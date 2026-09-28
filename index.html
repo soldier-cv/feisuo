@@ -1,0 +1,1977 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>飞梭 · 多端互联局域网传输架构原型</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.2/src/regular/style.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.2/src/fill/style.css" />
+  <style>
+    :root {
+      --desktop: #0d0f14;
+      --window: #171920;
+      --window-glass: rgba(23, 25, 32, 0.85);
+      --rail: #12141b;
+      --pane: #1b1e26;
+      --card-bg: #1f232d;
+      --hover: #262a35;
+      --press: #2d323f;
+      --line: #2b303d;
+      --line-2: #383f50;
+      --text: #eef1f6;
+      --text-2: #9aa4b5;
+      --text-3: #6c7688;
+      --accent: #2fbf8a;
+      --accent-press: #25a074;
+      --accent-soft: rgba(47, 191, 138, 0.15);
+      --accent-glow: rgba(47, 191, 138, 0.3);
+      --android-primary: #3ddc84;
+      --android-bg: #121316;
+      --android-surface: #1e2025;
+      --android-card: #272a31;
+      --warn: #e6a23c;
+      --danger: #f56c6c;
+      --shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+      --shadow-sm: 0 4px 16px rgba(0, 0, 0, 0.25);
+      --r-window: 14px;
+      --r-panel: 10px;
+      --r-ctl: 8px;
+      --r-sm: 6px;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      --ease: cubic-bezier(0.16, 1, 0.3, 1);
+      --title: 46px;
+      --rail-w: 240px;
+      --taskbar: 48px;
+      --top-ctrl: 46px;
+    }
+
+    [data-theme="light"] {
+      --desktop: #d8dee8;
+      --window: #f6f8fb;
+      --window-glass: rgba(246, 248, 251, 0.9);
+      --rail: #eaedf3;
+      --pane: #ffffff;
+      --card-bg: #f0f3f8;
+      --hover: #e6ebf3;
+      --press: #d9e1ec;
+      --line: #d2d8e3;
+      --line-2: #bdc5d4;
+      --text: #191c23;
+      --text-2: #5c6676;
+      --text-3: #818d9f;
+      --accent: #0f9b6e;
+      --accent-press: #0c7f5a;
+      --accent-soft: rgba(15, 155, 110, 0.12);
+      --accent-glow: rgba(15, 155, 110, 0.2);
+      --android-primary: #00875a;
+      --android-bg: #f2f4f7;
+      --android-surface: #ffffff;
+      --android-card: #e8ecf2;
+      --shadow: 0 20px 50px rgba(45, 55, 75, 0.18);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      font-family: var(--font);
+      color: var(--text);
+      background: var(--desktop);
+      overflow: hidden;
+      user-select: none;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input { font-family: inherit; color: inherit; }
+    button { cursor: pointer; border: 0; background: none; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    /* Top Multi-platform Switcher Bar */
+    .top-bar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: var(--top-ctrl);
+      background: rgba(13, 15, 20, 0.88);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--line);
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+    }
+    [data-theme="light"] .top-bar {
+      background: rgba(230, 235, 245, 0.9);
+      border-bottom-color: var(--line);
+    }
+    .top-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 14.5px;
+      letter-spacing: 0.02em;
+    }
+    .top-brand .logo-badge {
+      width: 28px;
+      height: 28px;
+      background: linear-gradient(135deg, var(--accent), #25a074);
+      color: #06281c;
+      border-radius: 7px;
+      display: grid;
+      place-items: center;
+      font-size: 17px;
+      box-shadow: 0 0 12px var(--accent-glow);
+    }
+    .top-brand span {
+      background: linear-gradient(90deg, var(--text), var(--text-2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .view-switcher {
+      display: flex;
+      background: var(--rail);
+      padding: 3px;
+      border-radius: 9px;
+      border: 1px solid var(--line);
+      gap: 3px;
+    }
+    .view-switcher button {
+      padding: 5px 14px;
+      font-size: 12.5px;
+      font-weight: 600;
+      border-radius: 6px;
+      color: var(--text-2);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s var(--ease);
+    }
+    .view-switcher button.active {
+      background: var(--pane);
+      color: var(--text);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+    }
+    .view-switcher button.active i {
+      color: var(--accent);
+    }
+    .top-right-ops {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .top-tag {
+      font-size: 11.5px;
+      padding: 3px 8px;
+      border-radius: 99px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .top-tag .pulse-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 var(--accent-glow); }
+      70% { box-shadow: 0 0 0 6px transparent; }
+      100% { box-shadow: 0 0 0 0 transparent; }
+    }
+    .btn-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 7px;
+      display: grid;
+      place-items: center;
+      color: var(--text-2);
+      font-size: 16px;
+    }
+    .btn-icon:hover { background: var(--hover); color: var(--text); }
+
+    /* Canvas Stage */
+    .stage {
+      position: fixed;
+      top: var(--top-ctrl);
+      left: 0; right: 0; bottom: 0;
+      display: grid;
+      place-items: center;
+      padding: 20px 24px calc(var(--taskbar) + 20px);
+      background:
+        radial-gradient(1000px 500px at 70% 20%, rgba(47, 191, 138, 0.07), transparent 45%),
+        radial-gradient(800px 450px at 15% 85%, rgba(40, 90, 160, 0.08), transparent 50%),
+        var(--desktop);
+      overflow: auto;
+      transition: all 0.3s var(--ease);
+    }
+
+    /* Mode Layouts */
+    .stage[data-mode="desktop"] .mobile-device-shell { display: none; }
+    .stage[data-mode="desktop"] .window { width: min(1200px, 96vw); height: min(760px, calc(100dvh - var(--top-ctrl) - var(--taskbar) - 40px)); }
+
+    .stage[data-mode="mobile"] .window { display: none; }
+    .stage[data-mode="mobile"] .taskbar { display: none; }
+    .stage[data-mode="mobile"] .mobile-device-shell { display: flex; }
+
+    .stage[data-mode="split"] {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 32px;
+      padding: 16px 24px calc(var(--taskbar) + 16px);
+    }
+    .stage[data-mode="split"] .window {
+      width: min(840px, 58vw);
+      height: min(740px, calc(100dvh - var(--top-ctrl) - var(--taskbar) - 36px));
+      flex-shrink: 0;
+    }
+    .stage[data-mode="split"] .mobile-device-shell {
+      display: flex;
+      flex-shrink: 0;
+      transform: scale(0.95);
+      transform-origin: center center;
+    }
+
+    /* Windows 11 App Window */
+    .window {
+      z-index: 10;
+      display: grid;
+      grid-template-rows: var(--title) 1fr auto;
+      background: var(--window);
+      border: 1px solid var(--line);
+      border-radius: var(--r-window);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      position: relative;
+      transition: transform 0.25s var(--ease), opacity 0.2s var(--ease);
+    }
+    .window.minimized {
+      transform: scale(0.8) translateY(200px);
+      opacity: 0;
+      pointer-events: none;
+    }
+    .titlebar {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      padding: 0 8px 0 16px;
+      background: rgba(23, 25, 32, 0.7);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--line);
+      user-select: none;
+    }
+    [data-theme="light"] .titlebar { background: rgba(246, 248, 251, 0.85); }
+    .titlebar .brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 600;
+      font-size: 13.5px;
+    }
+    .titlebar .brand i { color: var(--accent); font-size: 16px; }
+    .lan-status-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-2);
+      padding: 3px 10px;
+      border-radius: 99px;
+      background: var(--card-bg);
+      border: 1px solid var(--line);
+    }
+    .lan-status-badge .rate-txt {
+      color: var(--accent);
+      font-family: var(--font-mono);
+      font-weight: 600;
+    }
+    .win-btns { justify-self: end; display: flex; }
+    .win-btns button {
+      width: 44px;
+      height: 32px;
+      color: var(--text-2);
+      border-radius: 4px;
+      display: grid;
+      place-items: center;
+      font-size: 13px;
+    }
+    .win-btns button:hover { background: var(--hover); color: var(--text); }
+    .win-btns .close:hover { background: #e81123; color: #fff; }
+
+    /* Shell & Sidebar */
+    .shell {
+      display: grid;
+      grid-template-columns: var(--rail-w) 1fr;
+      min-height: 0;
+    }
+    .rail {
+      background: var(--rail);
+      border-right: 1px solid var(--line);
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      min-height: 0;
+    }
+    .me-card {
+      padding: 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .me-btn {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 10px;
+      border-radius: var(--r-panel);
+      text-align: left;
+      transition: background 0.15s var(--ease);
+    }
+    .me-btn:hover { background: var(--hover); }
+    .me-btn.active { background: var(--accent-soft); }
+    .avatar-mono {
+      width: 38px;
+      height: 38px;
+      border-radius: 9px;
+      background: linear-gradient(135deg, #2a3344, #1e2432);
+      color: var(--text);
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+      font-size: 14px;
+      flex-shrink: 0;
+      border: 1px solid var(--line-2);
+    }
+    .me-btn.active .avatar-mono {
+      background: var(--accent);
+      color: #05261b;
+      border-color: transparent;
+    }
+    .me-info strong { display: block; font-size: 13px; font-weight: 650; }
+    .me-info span { display: block; font-size: 11px; color: var(--text-2); margin-top: 2px; }
+
+    .rail-section-header {
+      padding: 12px 14px 6px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-3);
+    }
+    .devices-list {
+      overflow-y: auto;
+      padding: 4px 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .dev-item {
+      display: grid;
+      grid-template-columns: 36px 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 8px 10px;
+      border-radius: var(--r-ctl);
+      text-align: left;
+      position: relative;
+      transition: all 0.15s var(--ease);
+    }
+    .dev-item:hover { background: var(--hover); }
+    .dev-item.active {
+      background: var(--accent-soft);
+    }
+    .dev-item.active::before {
+      content: "";
+      position: absolute;
+      left: 0; top: 8px; bottom: 8px;
+      width: 3.5px;
+      border-radius: 0 3px 3px 0;
+      background: var(--accent);
+    }
+    .dev-item .dev-icon {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      background: var(--pane);
+      border: 1px solid var(--line);
+      display: grid;
+      place-items: center;
+      font-size: 16px;
+      color: var(--text-2);
+    }
+    .dev-item.active .dev-icon { color: var(--accent); border-color: var(--accent); }
+    .dev-item .dev-name { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+    .dev-item .dev-meta { font-size: 11px; color: var(--text-2); margin-top: 1px; }
+    .dev-item .status-indicator {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+    .dev-item.offline .status-indicator { background: var(--text-3); }
+    .dev-item.offline { opacity: 0.7; }
+
+    .rail-foot {
+      padding: 12px;
+      border-top: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .recv-hint-box {
+      background: var(--card-bg);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 11px;
+      color: var(--text-2);
+    }
+    .recv-hint-box .title { font-weight: 600; color: var(--text); margin-bottom: 2px; display: flex; justify-content: space-between; }
+    .recv-hint-box .path { word-break: break-all; color: var(--text-3); }
+
+    /* Main Content Area */
+    .main-area {
+      display: grid;
+      grid-template-rows: 52px 1fr;
+      min-width: 0;
+      min-height: 0;
+      background: var(--window);
+    }
+    .main-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 18px;
+      border-bottom: 1px solid var(--line);
+    }
+    .tab-pills {
+      display: flex;
+      background: var(--rail);
+      padding: 3px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      gap: 2px;
+    }
+    .tab-pills button {
+      padding: 5px 14px;
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--text-2);
+      border-radius: 6px;
+      transition: all 0.15s var(--ease);
+    }
+    .tab-pills button.active {
+      background: var(--pane);
+      color: var(--text);
+      box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+    }
+    .target-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12.5px;
+      color: var(--text-2);
+    }
+    .target-bar b { color: var(--text); }
+
+    /* Tab Views */
+    .tab-view { display: none; min-height: 0; overflow-y: auto; }
+    .tab-view.active { display: grid; }
+
+    /* View: Send Drop Zone */
+    .view-send {
+      padding: 20px;
+      grid-template-rows: 1fr;
+    }
+    .dropzone {
+      border: 2px dashed var(--line-2);
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 36px 20px;
+      transition: all 0.2s var(--ease);
+      background: rgba(255, 255, 255, 0.01);
+    }
+    .dropzone.drag-active {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      transform: scale(1.008);
+    }
+    .dropzone .drop-icon-ring {
+      width: 64px;
+      height: 64px;
+      border-radius: 18px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      display: grid;
+      place-items: center;
+      font-size: 32px;
+      margin-bottom: 16px;
+      transition: transform 0.2s var(--ease);
+    }
+    .dropzone:hover .drop-icon-ring { transform: translateY(-3px); }
+    .dropzone h2 {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .dropzone p {
+      max-width: 44ch;
+      color: var(--text-2);
+      font-size: 13.5px;
+      line-height: 1.5;
+      margin: 8px 0 18px;
+    }
+    .quick-actions {
+      display: flex;
+      gap: 10px;
+    }
+
+    /* Shuttle: Dual Pane */
+    .view-shuttle {
+      grid-template-columns: 1fr 80px 1fr;
+      min-height: 0;
+    }
+    .pane-col {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      min-height: 0;
+      border-right: 1px solid var(--line);
+    }
+    .pane-col:last-child { border-right: 0; border-left: 1px solid var(--line); }
+    .crumb-bar {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 10px 14px;
+      font-size: 12px;
+      color: var(--text-2);
+      border-bottom: 1px solid var(--line);
+      background: var(--rail);
+    }
+    .crumb-bar button { padding: 2px 5px; border-radius: 4px; color: var(--text-2); }
+    .crumb-bar button:hover { background: var(--hover); color: var(--text); }
+    .crumb-bar .current { font-weight: 600; color: var(--text); }
+    .file-actions-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      border-bottom: 1px solid var(--line);
+    }
+    .file-actions-bar button { color: var(--accent); font-weight: 600; }
+    .file-list {
+      overflow-y: auto;
+      padding: 6px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .file-row {
+      display: grid;
+      grid-template-columns: 20px 22px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      padding: 7px 10px;
+      border-radius: var(--r-sm);
+      text-align: left;
+      font-size: 13px;
+      transition: background 0.15s;
+    }
+    .file-row:hover { background: var(--hover); }
+    .file-row.checked { background: var(--accent-soft); }
+    .checkbox-box {
+      width: 15px;
+      height: 15px;
+      border: 1.5px solid var(--line-2);
+      border-radius: 4px;
+      display: grid;
+      place-items: center;
+      font-size: 10px;
+    }
+    .file-row.checked .checkbox-box {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #06281c;
+    }
+    .file-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-row .size { font-size: 11px; color: var(--text-3); font-family: var(--font-mono); }
+    .shuttle-divider {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 8px;
+      background: var(--rail);
+    }
+    .shuttle-btn {
+      width: 100%;
+      height: 44px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s var(--ease);
+    }
+    .shuttle-btn-send { background: var(--accent); color: #06281c; }
+    .shuttle-btn-send:hover { background: var(--accent-press); }
+    .shuttle-btn-fetch { background: var(--pane); color: var(--text); border: 1px solid var(--line-2); }
+    .shuttle-btn-fetch:hover { background: var(--hover); }
+    .shuttle-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    /* View: Self Settings & Service */
+    .view-self {
+      padding: 24px 32px;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 28px;
+      align-content: start;
+    }
+    .service-card {
+      background: var(--card-bg);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 20px;
+    }
+    .setting-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .setting-item:last-child { border-bottom: 0; }
+    .setting-item .text h4 { font-size: 13.5px; font-weight: 650; }
+    .setting-item .text p { font-size: 12px; color: var(--text-2); margin-top: 3px; max-width: 44ch; line-height: 1.45; }
+    .toggle-switch {
+      width: 42px;
+      height: 24px;
+      border-radius: 99px;
+      background: var(--line-2);
+      position: relative;
+      flex-shrink: 0;
+      transition: background 0.2s var(--ease);
+    }
+    .toggle-switch::after {
+      content: "";
+      position: absolute;
+      top: 3px; left: 3px;
+      width: 18px; height: 18px;
+      border-radius: 50%;
+      background: #fff;
+      transition: transform 0.2s var(--ease);
+    }
+    .toggle-switch.on { background: var(--accent); }
+    .toggle-switch.on::after { transform: translateX(18px); }
+
+    .qrcode-box {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      background: var(--pane);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 22px;
+    }
+    .qrcode-frame {
+      width: 160px;
+      height: 160px;
+      background: #fff;
+      border-radius: 10px;
+      padding: 10px;
+      margin: 14px 0;
+      display: grid;
+      place-items: center;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.15);
+    }
+    .pair-pin {
+      font-size: 32px;
+      font-weight: 800;
+      letter-spacing: 0.15em;
+      font-family: var(--font-mono);
+      color: var(--accent);
+      margin-top: 6px;
+    }
+
+    /* View: Log */
+    .view-log {
+      padding: 16px 24px;
+      align-content: start;
+    }
+    .log-item {
+      display: grid;
+      grid-template-columns: 24px 1fr auto;
+      gap: 12px;
+      align-items: center;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+    }
+    .log-item i { color: var(--accent); font-size: 18px; }
+    .log-item .title { font-weight: 600; }
+    .log-item .desc { font-size: 11.5px; color: var(--text-2); margin-top: 2px; }
+    .log-item .size { font-family: var(--font-mono); color: var(--text-3); font-size: 12px; }
+
+    /* Transfer Progress Bar Bottom Dock */
+    .dock-transfer {
+      border-top: 1px solid var(--line);
+      background: var(--rail);
+      padding: 10px 18px;
+      display: none;
+    }
+    .dock-transfer.active { display: block; }
+    .transfer-job-row {
+      display: grid;
+      grid-template-columns: 1fr 140px 80px;
+      gap: 14px;
+      align-items: center;
+      font-size: 12.5px;
+    }
+    .progress-track {
+      height: 5px;
+      background: var(--line);
+      border-radius: 99px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), #56dfae);
+      width: 0%;
+      transition: width 0.15s linear;
+    }
+
+    /* Common Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      height: 36px;
+      padding: 0 16px;
+      border-radius: var(--r-ctl);
+      font-size: 13px;
+      font-weight: 650;
+      transition: all 0.15s var(--ease);
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn-primary { background: var(--accent); color: #06281c; }
+    .btn-primary:hover { background: var(--accent-press); }
+    .btn-secondary { background: var(--pane); color: var(--text); border: 1px solid var(--line-2); }
+    .btn-secondary:hover { background: var(--hover); }
+    .btn-block { width: 100%; }
+
+    /* ========================================================
+       📱 Android Phone Simulation View
+       ======================================================== */
+    .mobile-device-shell {
+      width: 360px;
+      height: 720px;
+      background: #090a0d;
+      border: 10px solid #22252e;
+      border-radius: 46px;
+      box-shadow: 0 30px 80px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.08);
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      user-select: none;
+    }
+    .mobile-notch {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #000;
+      z-index: 90;
+      border: 2px solid #16181f;
+    }
+    .mobile-status-bar {
+      height: 34px;
+      padding: 8px 18px 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      font-weight: 600;
+      color: #fff;
+      z-index: 50;
+      background: var(--android-bg);
+    }
+    .mobile-status-icons { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+
+    /* Android Foreground Service Notification Pin */
+    .android-service-banner {
+      background: linear-gradient(135deg, rgba(61, 220, 132, 0.15), rgba(47, 191, 138, 0.05));
+      border: 1px solid rgba(61, 220, 132, 0.25);
+      border-radius: 12px;
+      margin: 8px 14px;
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 11.5px;
+    }
+    .android-service-banner .badge-ico {
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
+      background: var(--android-primary);
+      color: #042514;
+      display: grid;
+      place-items: center;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+    .android-service-banner .info strong { display: block; font-size: 12px; color: #fff; }
+    .android-service-banner .info span { color: var(--text-2); font-size: 10.5px; }
+
+    .mobile-content {
+      flex: 1;
+      background: var(--android-bg);
+      overflow-y: auto;
+      padding: 6px 14px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .mobile-appbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 4px 2px;
+    }
+    .mobile-appbar h3 { font-size: 20px; font-weight: 750; letter-spacing: -0.02em; }
+
+    .mobile-card {
+      background: var(--android-surface);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 14px;
+    }
+    .mobile-card-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-3);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 10px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .mobile-dev-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .mobile-dev-row:last-child { border-bottom: 0; }
+    .mobile-dev-row .info { display: flex; align-items: center; gap: 10px; }
+    .mobile-dev-row .icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      background: var(--card-bg);
+      color: var(--android-primary);
+      display: grid;
+      place-items: center;
+      font-size: 18px;
+    }
+
+    .mobile-quick-send {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .mobile-btn-tile {
+      background: var(--android-surface);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 8px;
+      text-align: left;
+      transition: all 0.15s;
+    }
+    .mobile-btn-tile:hover { background: var(--hover); border-color: var(--line-2); }
+    .mobile-btn-tile i { font-size: 22px; color: var(--android-primary); }
+    .mobile-btn-tile span { font-size: 13px; font-weight: 650; }
+    .mobile-btn-tile small { font-size: 11px; color: var(--text-2); }
+
+    /* Android Bottom Navigation Bar */
+    .mobile-nav-bar {
+      height: 56px;
+      background: var(--android-surface);
+      border-top: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-around;
+      padding: 0 10px;
+    }
+    .mobile-nav-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+      font-size: 10.5px;
+      color: var(--text-2);
+      font-weight: 600;
+    }
+    .mobile-nav-item.active { color: var(--android-primary); }
+    .mobile-nav-item i { font-size: 19px; }
+
+    /* Android Gesture Bar */
+    .mobile-home-pill {
+      height: 16px;
+      background: var(--android-surface);
+      display: grid;
+      place-items: center;
+      padding-bottom: 4px;
+    }
+    .mobile-home-pill::after {
+      content: "";
+      width: 72px;
+      height: 4px;
+      border-radius: 99px;
+      background: rgba(255,255,255,0.4);
+    }
+
+    /* Windows 11 Taskbar */
+    .taskbar {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      height: var(--taskbar);
+      background: rgba(18, 20, 27, 0.88);
+      backdrop-filter: blur(24px) saturate(140%);
+      -webkit-backdrop-filter: blur(24px) saturate(140%);
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      z-index: 90;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      padding: 0 14px;
+    }
+    [data-theme="light"] .taskbar {
+      background: rgba(235, 239, 246, 0.9);
+      border-top-color: rgba(0,0,0,0.08);
+    }
+    .taskbar-center { display: flex; gap: 6px; justify-self: center; }
+    .taskbar-btn {
+      width: 40px; height: 36px;
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 19px;
+      display: grid;
+      place-items: center;
+    }
+    .taskbar-btn:hover { background: var(--hover); }
+    .taskbar-btn.app-running {
+      position: relative;
+      background: var(--hover);
+    }
+    .taskbar-btn.app-running::after {
+      content: "";
+      position: absolute;
+      bottom: 2px;
+      left: 12px; right: 12px;
+      height: 3px;
+      border-radius: 99px;
+      background: var(--accent);
+    }
+    .taskbar-right {
+      justify-self: end;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .tray-button {
+      height: 34px;
+      padding: 0 8px;
+      border-radius: 6px;
+      color: var(--text-2);
+      font-size: 16px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .tray-button:hover { background: var(--hover); color: var(--text); }
+    .taskbar-clock {
+      font-size: 11.5px;
+      line-height: 1.25;
+      text-align: right;
+      color: var(--text-2);
+      padding: 0 6px;
+    }
+
+    /* Windows Native Notification Toast */
+    .win-toast {
+      position: fixed;
+      right: 20px;
+      bottom: calc(var(--taskbar) + 16px);
+      width: 340px;
+      background: var(--window);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      padding: 14px 16px;
+      z-index: 120;
+      transform: translateY(120%);
+      opacity: 0;
+      transition: all 0.3s var(--ease);
+      pointer-events: none;
+    }
+    .win-toast.show {
+      transform: translateY(0);
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .win-toast .app-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-3);
+      margin-bottom: 6px;
+    }
+    .win-toast h5 { font-size: 14px; font-weight: 650; }
+    .win-toast p { font-size: 12px; color: var(--text-2); margin-top: 4px; line-height: 1.4; }
+
+    /* Modal Dialog */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.65);
+      backdrop-filter: blur(4px);
+      z-index: 150;
+      display: none;
+      place-items: center;
+      padding: 20px;
+    }
+    .modal-overlay.active { display: grid; }
+    .modal-card {
+      width: min(460px, 100%);
+      background: var(--window);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 24px;
+      box-shadow: var(--shadow);
+      animation: modalIn 0.25s var(--ease);
+    }
+    @keyframes modalIn {
+      from { transform: scale(0.95); opacity: 0; }
+      to { transform: scale(1); opacity: 1; }
+    }
+
+    /* Android Scan Camera Overlay Simulation */
+    .camera-scanner {
+      width: 100%;
+      height: 220px;
+      background: #000;
+      border-radius: 12px;
+      position: relative;
+      overflow: hidden;
+      display: grid;
+      place-items: center;
+      margin: 14px 0;
+    }
+    .scanner-line {
+      position: absolute;
+      left: 10%; right: 10%;
+      height: 2px;
+      background: var(--accent);
+      box-shadow: 0 0 12px var(--accent);
+      animation: scanMotion 2s ease-in-out infinite;
+    }
+    @keyframes scanMotion {
+      0% { top: 15%; }
+      50% { top: 80%; }
+      100% { top: 15%; }
+    }
+    .scanner-box {
+      width: 140px;
+      height: 140px;
+      border: 2px solid var(--accent);
+      border-radius: 12px;
+      position: relative;
+    }
+
+    /* Split Mode Flow Connectors */
+    .flow-badge {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 10px 14px;
+      border-radius: 12px;
+      background: var(--accent-soft);
+      border: 1px solid rgba(47, 191, 138, 0.3);
+      box-shadow: 0 0 20px var(--accent-glow);
+    }
+
+    /* Utilities */
+    .hidden { display: none !important; }
+    .flex-row { display: flex; align-items: center; gap: 8px; }
+  </style>
+</head>
+<body>
+
+  <!-- Top Multi-platform Bar -->
+  <header class="top-bar">
+    <div class="top-brand">
+      <div class="logo-badge"><i class="ph ph-arrows-left-right"></i></div>
+      <span>飞梭 · 多端无感传输原型</span>
+    </div>
+
+    <!-- View Mode Switcher -->
+    <div class="view-switcher" role="tablist">
+      <button type="button" class="active" data-view="desktop" title="桌面端形态">
+        <i class="ph ph-desktop"></i> Windows 桌面端
+      </button>
+      <button type="button" data-view="mobile" title="移动端形态">
+        <i class="ph ph-device-mobile"></i> Android 安卓端
+      </button>
+      <button type="button" data-view="split" title="双端互联演示">
+        <i class="ph ph-arrows-merge"></i> 双端联动演示
+      </button>
+    </div>
+
+    <div class="top-right-ops">
+      <div class="top-tag">
+        <span class="pulse-dot"></span>
+        <span id="topStatusText">开机自连已就绪 · mDNS 监听中</span>
+      </div>
+      <button type="button" class="btn-icon" id="themeToggleBtn" title="切换暗色/明亮模式">
+        <i class="ph ph-sun"></i>
+      </button>
+    </div>
+  </header>
+
+  <!-- Interactive Stage -->
+  <main class="stage" id="mainStage" data-mode="desktop">
+
+    <!-- 1. Windows Desktop App Window -->
+    <div class="window" id="desktopWindow">
+      <!-- Title Bar -->
+      <div class="titlebar">
+        <div class="brand">
+          <i class="ph-fill ph-paper-plane-tilt"></i>
+          <span>飞梭</span>
+        </div>
+        <div class="lan-status-badge">
+          <i class="ph-fill ph-wifi-high" style="color: var(--accent);"></i>
+          <span>局域网 5GHz Wi-Fi · 传输速率：</span>
+          <span class="rate-txt" id="lanRate">94.8 MB/s</span>
+        </div>
+        <div class="win-btns">
+          <button type="button" id="winMinBtn" title="最小化到托盘"><i class="ph ph-minus"></i></button>
+          <button type="button" title="最大化"><i class="ph ph-square"></i></button>
+          <button type="button" class="close" id="winCloseBtn" title="关闭窗口 (进托盘，后台自连继续收)"><i class="ph ph-x"></i></button>
+        </div>
+      </div>
+
+      <!-- App Shell -->
+      <div class="shell">
+        <!-- Sidebar Rail -->
+        <aside class="rail">
+          <div class="me-card">
+            <button class="me-btn" id="meBtn" type="button">
+              <div class="avatar-mono">书</div>
+              <div class="me-info">
+                <strong>书房台式 (本机)</strong>
+                <span>开机自启 · 托盘常驻守护</span>
+              </div>
+            </button>
+          </div>
+
+          <div class="rail-section-header">
+            <span>受信设备 (开机自连)</span>
+            <button type="button" id="refreshDevBtn" title="重新探测"><i class="ph ph-arrows-clockwise"></i></button>
+          </div>
+
+          <div class="devices-list" id="desktopDevList">
+            <!-- Dynamically populated -->
+          </div>
+
+          <div class="rail-foot">
+            <button class="btn btn-secondary btn-block" id="pairNewDevBtn" type="button">
+              <i class="ph ph-plus-circle"></i> 绑定新设备
+            </button>
+            <div class="recv-hint-box">
+              <div class="title">
+                <span>自动落盘目录</span>
+                <a href="#" id="changeRecvPathLink" style="color:var(--accent); font-size:11px;">更改</a>
+              </div>
+              <div class="path" id="currentRecvPath">C:\Users\Chen\飞梭</div>
+            </div>
+          </div>
+        </aside>
+
+        <!-- Main Workspace -->
+        <section class="main-area">
+          <div class="main-toolbar">
+            <div class="tab-pills" id="desktopTabs">
+              <button type="button" class="active" data-tab="send">发送文件</button>
+              <button type="button" data-tab="shuttle">双栏穿梭</button>
+              <button type="button" data-tab="log">传输历史</button>
+            </div>
+            <div class="target-bar" id="targetBar">
+              <span>当前目标：</span><b id="targetDevName">随身 Pixel</b>
+              <span style="font-size:11px; color:var(--accent);">(信任设备 · 无需对方确认)</span>
+            </div>
+          </div>
+
+          <!-- View 1: Send Dropzone -->
+          <div class="tab-view view-send active" id="viewSend">
+            <div class="dropzone" id="desktopDropzone">
+              <div class="drop-icon-ring"><i class="ph ph-arrow-fat-lines-up"></i></div>
+              <h2 id="sendZoneTitle">拖拽文件到此处立即发送</h2>
+              <p id="sendZoneDesc">对方设备开机即可接收。即便对方窗口关闭，只要后台服务在跑，文件即刻自动写入对方目录。</p>
+              <div class="quick-actions">
+                <button class="btn btn-primary" id="btnPickFiles" type="button">
+                  <i class="ph ph-folder-open"></i> 选取本地文件
+                </button>
+                <button class="btn btn-secondary" id="btnSendClipboard" type="button">
+                  <i class="ph ph-clipboard-text"></i> 发送剪贴板
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- View 2: Shuttle Dual Pane -->
+          <div class="tab-view view-shuttle" id="viewShuttle">
+            <!-- Left Local -->
+            <div class="pane-col">
+              <div class="crumb-bar" id="localCrumb">
+                <button type="button">C:</button>/<button type="button">Users</button>/<span class="current">Documents</span>
+              </div>
+              <div class="file-actions-bar">
+                <span id="localSelCount">本机 · 0 项选中</span>
+                <button type="button" id="btnSelAllLocal">全选</button>
+              </div>
+              <div class="file-list" id="localFileList"></div>
+            </div>
+
+            <!-- Middle Shuttle Operations -->
+            <div class="shuttle-divider">
+              <button class="shuttle-btn shuttle-btn-send" id="shuttleSendBtn" type="button">
+                <i class="ph ph-arrow-right"></i>
+                <span>发送</span>
+              </button>
+              <button class="shuttle-btn shuttle-btn-fetch" id="shuttleFetchBtn" type="button">
+                <i class="ph ph-arrow-left"></i>
+                <span>取回</span>
+              </button>
+            </div>
+
+            <!-- Right Remote -->
+            <div class="pane-col">
+              <div class="crumb-bar" id="remoteCrumb">
+                <button type="button">/sdcard</button>/<span class="current">飞梭</span>
+              </div>
+              <div class="file-actions-bar">
+                <span id="remoteSelCount">随身 Pixel · 0 项选中</span>
+                <button type="button" id="btnSelAllRemote">全选</button>
+              </div>
+              <div class="file-list" id="remoteFileList"></div>
+            </div>
+          </div>
+
+          <!-- View 3: Log -->
+          <div class="tab-view view-log" id="viewLog">
+            <div class="log-item">
+              <i class="ph-fill ph-check-circle"></i>
+              <div>
+                <div class="title">IMG_2026_0928_Live.jpg</div>
+                <div class="desc">来自 随身 Pixel (Android) · 局域网直连自动落盘</div>
+              </div>
+              <div class="size">4.2 MB</div>
+            </div>
+            <div class="log-item">
+              <i class="ph-fill ph-check-circle"></i>
+              <div>
+                <div class="title">项目架构规范与部署指南.pdf</div>
+                <div class="desc">已发送到 工位笔记本 (Windows) · 100.64.0.31</div>
+              </div>
+              <div class="size">18.6 MB</div>
+            </div>
+          </div>
+
+          <!-- View 4: Self Service Settings -->
+          <div class="tab-view view-self" id="viewSelf">
+            <div>
+              <div class="service-card">
+                <h3 style="font-size:16px; margin-bottom:14px; font-weight:700;">系统自启与无人值守守护</h3>
+                
+                <div class="setting-item">
+                  <div class="text">
+                    <h4>开机静默自启动</h4>
+                    <p>登录 Windows 时自动以服务模式在后台运行，开机即可在局域网内与受信设备握手通信。</p>
+                  </div>
+                  <div class="toggle-switch on" id="swDesktopAutostart"></div>
+                </div>
+
+                <div class="setting-item">
+                  <div class="text">
+                    <h4>受信设备全自动接收</h4>
+                    <p>来自白名单中已绑定的设备，传输直接写入用户目录，无需人肉点击允许，实现无人值守。</p>
+                  </div>
+                  <div class="toggle-switch on" id="swDesktopAutoRecv"></div>
+                </div>
+
+                <div class="setting-item">
+                  <div class="text">
+                    <h4>关闭窗口时最小化到系统托盘</h4>
+                    <p>点击关闭按钮仅隐藏主界面，后台网络服务持续监听，随时响应局域网传输请求。</p>
+                  </div>
+                  <div class="toggle-switch on" id="swDesktopTrayMode"></div>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div class="qrcode-box">
+                <h4 style="font-size:14px; font-weight:700;">本机快速绑定</h4>
+                <p style="font-size:12px; color:var(--text-2); margin-top:4px;">使用安卓端扫描二维码，或输入一次性配对码</p>
+                <div class="qrcode-frame">
+                  <!-- Simulated Canvas QR -->
+                  <svg viewBox="0 0 100 100" width="100%" height="100%">
+                    <rect x="0" y="0" width="100" height="100" fill="#ffffff" />
+                    <!-- QR pattern anchors -->
+                    <rect x="10" y="10" width="24" height="24" fill="#000" />
+                    <rect x="14" y="14" width="16" height="16" fill="#fff" />
+                    <rect x="18" y="18" width="8" height="8" fill="#000" />
+
+                    <rect x="66" y="10" width="24" height="24" fill="#000" />
+                    <rect x="70" y="14" width="16" height="16" fill="#fff" />
+                    <rect x="74" y="18" width="8" height="8" fill="#000" />
+
+                    <rect x="10" y="66" width="24" height="24" fill="#000" />
+                    <rect x="14" y="70" width="16" height="16" fill="#fff" />
+                    <rect x="18" y="74" width="8" height="8" fill="#000" />
+
+                    <!-- Payload dots -->
+                    <rect x="42" y="14" width="6" height="6" fill="#000" />
+                    <rect x="52" y="22" width="6" height="6" fill="#000" />
+                    <rect x="42" y="34" width="6" height="6" fill="#000" />
+                    <rect x="62" y="44" width="6" height="6" fill="#000" />
+                    <rect x="46" y="58" width="6" height="6" fill="#000" />
+                    <rect x="74" y="68" width="6" height="6" fill="#000" />
+                    <rect x="38" y="74" width="6" height="6" fill="#000" />
+                    <rect x="84" y="84" width="6" height="6" fill="#000" />
+                  </svg>
+                </div>
+                <div class="pair-pin">592 108</div>
+                <span style="font-size:11px; color:var(--text-3); margin-top:4px;">一次绑定，终生互信</span>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Bottom Dock: Transfer Task -->
+      <footer class="dock-transfer" id="desktopDockTransfer">
+        <div class="transfer-job-row">
+          <div class="job-info">
+            <span id="jobFileName" style="font-weight:600;">正在发送：IMG_2026_0928_Live.jpg</span>
+            <span style="color:var(--text-3); font-size:11px; margin-left:8px;" id="jobTargetDev">至 随身 Pixel</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" id="jobProgressFill"></div>
+          </div>
+          <div class="job-stat" style="text-align:right; font-family:var(--font-mono); font-size:11.5px; color:var(--accent);" id="jobPctTxt">
+            45% · 98 MB/s
+          </div>
+        </div>
+      </footer>
+    </div>
+
+    <!-- 2. Android Phone Shell -->
+    <div class="mobile-device-shell" id="mobileShell">
+      <div class="mobile-notch"></div>
+      
+      <!-- Android Status Bar -->
+      <div class="mobile-status-bar">
+        <span>10:28</span>
+        <div class="mobile-status-icons">
+          <i class="ph ph-wifi-high"></i>
+          <i class="ph ph-cell-signal-full"></i>
+          <i class="ph-fill ph-battery-charging"></i>
+        </div>
+      </div>
+
+      <!-- Android Foreground Service Persistent Notification -->
+      <div class="android-service-banner">
+        <div class="badge-ico"><i class="ph ph-arrows-left-right"></i></div>
+        <div class="info">
+          <strong>飞梭前台守护服务 · 开机自启常驻</strong>
+          <span>已连通：书房台式 (100.64.0.12) · 局域网待命</span>
+        </div>
+      </div>
+
+      <!-- Mobile Content Scroll Area -->
+      <div class="mobile-content">
+        <div class="mobile-appbar">
+          <h3>飞梭</h3>
+          <div class="flex-row">
+            <button type="button" class="btn-icon" id="mobileScanBtn" title="扫一扫配对电脑">
+              <i class="ph ph-scan" style="font-size:20px; color:var(--android-primary);"></i>
+            </button>
+            <button type="button" class="btn-icon" id="mobileSettingsBtn">
+              <i class="ph ph-gear" style="font-size:20px;"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Quick Transfer Shortcuts -->
+        <div class="mobile-quick-send">
+          <button class="mobile-btn-tile" id="mobileSendPhotoBtn" type="button">
+            <i class="ph ph-image"></i>
+            <div>
+              <span>发最新相片</span>
+              <small>直传书房台式</small>
+            </div>
+          </button>
+          <button class="mobile-btn-tile" id="mobileSendFileBtn" type="button">
+            <i class="ph ph-files"></i>
+            <div>
+              <span>选手机文件</span>
+              <small>极速秒传</small>
+            </div>
+          </button>
+        </div>
+
+        <!-- Connected Devices List Card -->
+        <div class="mobile-card">
+          <div class="mobile-card-title">
+            <span>受信电脑与设备</span>
+            <span style="color:var(--android-primary);">2 台在线</span>
+          </div>
+
+          <div class="mobile-dev-row">
+            <div class="info">
+              <div class="icon"><i class="ph-fill ph-desktop"></i></div>
+              <div>
+                <strong style="font-size:13.5px; display:block;">书房台式 (Windows)</strong>
+                <span style="font-size:11px; color:var(--text-2);">已自连 · 无人值守直接存</span>
+              </div>
+            </div>
+            <button class="btn btn-primary" style="height:28px; padding:0 10px; font-size:11.5px;" id="mobileQuickSendToDesktopBtn" type="button">
+              直传
+            </button>
+          </div>
+
+          <div class="mobile-dev-row">
+            <div class="info">
+              <div class="icon"><i class="ph-fill ph-laptop"></i></div>
+              <div>
+                <strong style="font-size:13.5px; display:block;">工位笔记本</strong>
+                <span style="font-size:11px; color:var(--text-2);">局域网在线 · 100.64.0.31</span>
+              </div>
+            </div>
+            <span style="font-size:11px; color:var(--text-3);">待命</span>
+          </div>
+        </div>
+
+        <!-- Mobile Auto-Recv Settings Card -->
+        <div class="mobile-card">
+          <div class="mobile-card-title">
+            <span>自启与保活管理</span>
+          </div>
+          <div class="setting-item" style="padding: 6px 0;">
+            <div class="text">
+              <h4 style="font-size:12.5px;">开机自启广播 (BOOT_COMPLETED)</h4>
+              <p style="font-size:10.5px;">手机重启后自动唤醒前台服务</p>
+            </div>
+            <div class="toggle-switch on" id="swMobileBoot"></div>
+          </div>
+          <div class="setting-item" style="padding: 6px 0;">
+            <div class="text">
+              <h4 style="font-size:12.5px;">已排除系统电池优化 (Doze)</h4>
+              <p style="font-size:10.5px;">息屏时不断开 Wi-Fi 局域网监听</p>
+            </div>
+            <div class="toggle-switch on" id="swMobileDoze"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Android Bottom Nav -->
+      <nav class="mobile-nav-bar">
+        <div class="mobile-nav-item active">
+          <i class="ph ph-arrows-left-right"></i>
+          <span>互传</span>
+        </div>
+        <div class="mobile-nav-item">
+          <i class="ph ph-folder"></i>
+          <span>穿梭</span>
+        </div>
+        <div class="mobile-nav-item">
+          <i class="ph ph-clock-counter-clockwise"></i>
+          <span>历史</span>
+        </div>
+        <div class="mobile-nav-item">
+          <i class="ph ph-user"></i>
+          <span>我的</span>
+        </div>
+      </nav>
+
+      <!-- Android Home Bar -->
+      <div class="mobile-home-pill"></div>
+    </div>
+
+  </main>
+
+  <!-- Windows 11 Taskbar -->
+  <footer class="taskbar" id="windowsTaskbar">
+    <div></div>
+    <div class="taskbar-center">
+      <button class="taskbar-btn" type="button"><i class="ph-fill ph-windows-logo"></i></button>
+      <button class="taskbar-btn app-running" id="tbAppIcon" type="button" title="飞梭 (运行中)"><i class="ph ph-paper-plane-tilt" style="color:var(--accent);"></i></button>
+      <button class="taskbar-btn" type="button"><i class="ph ph-folder"></i></button>
+      <button class="taskbar-btn" type="button"><i class="ph ph-terminal-window"></i></button>
+    </div>
+    <div class="taskbar-right">
+      <button class="tray-button" id="systemTrayBtn" type="button" title="飞梭 托盘驻留图标">
+        <i class="ph-fill ph-paper-plane-tilt" style="color:var(--accent);"></i>
+      </button>
+      <div class="taskbar-clock">
+        <div id="tbClockTime">10:28</div>
+        <div id="tbClockDate">2026/09/28</div>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Windows Native Notification Toast (Simulated) -->
+  <div class="win-toast" id="winNotificationToast">
+    <div class="app-badge">
+      <i class="ph-fill ph-paper-plane-tilt" style="color:var(--accent);"></i>
+      <span>飞梭 · 自动落盘通知</span>
+    </div>
+    <h5 id="winToastTitle">收到来自「随身 Pixel」的新文件</h5>
+    <p id="winToastDesc">已全自动写入 C:\Users\Chen\飞梭\IMG_2026_0928_Live.jpg (无需确认)</p>
+  </div>
+
+  <!-- Modal Overlay (Pairing & Scanner) -->
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal-card" id="modalContainer">
+      <!-- Injected dynamically -->
+    </div>
+  </div>
+
+  <!-- Hidden File Input for Native File Picker -->
+  <input type="file" id="realFilePicker" multiple hidden />
+
+  <script>
+    // State management
+    const state = {
+      theme: localStorage.getItem("feisuo-theme") || "dark",
+      viewMode: "desktop", // desktop | mobile | split
+      selectedDeviceId: "phone",
+      currentTab: "send",
+      receivePath: "C:\\Users\\Chen\\飞梭",
+      autostart: true,
+      autoRecv: true,
+      trayMinimized: false,
+      isTransferring: false,
+      localSelected: new Set(),
+      remoteSelected: new Set(),
+      devices: [
+        { id: "phone", name: "随身 Pixel (安卓手机)", os: "Android 15", type: "mobile", online: true, ip: "100.64.0.18", ping: "4ms", icon: "ph-device-mobile" },
+        { id: "work", name: "工位笔记本", os: "Windows 11", type: "pc", online: true, ip: "100.64.0.31", ping: "2ms", icon: "ph-laptop" },
+        { id: "tv", name: "客厅电视", os: "Android TV", type: "tv", online: false, ip: "100.64.0.44", ping: "-", icon: "ph-television" }
+      ],
+      files: {
+        local: [
+          { name: "项目架构规范与部署指南.pdf", type: "pdf", size: "18.6 MB" },
+          { name: "飞梭跨端核心引擎设计草案.docx", type: "doc", size: "1.2 MB" },
+          { name: "2026-Q3产品规划.xlsx", type: "xls", size: "480 KB" },
+          { name: "演示安装包-v2.0-debug.apk", type: "apk", size: "32.4 MB" },
+          { name: "全套高清壁纸素材包", type: "dir", size: "4 files" }
+        ],
+        remote: [
+          { name: "DCIM", type: "dir", size: "128 items" },
+          { name: "IMG_2026_0928_Live.jpg", type: "img", size: "4.2 MB" },
+          { name: "VID_20260927_4K.mp4", type: "video", size: "642 MB" },
+          { name: "录音备忘录.m4a", type: "audio", size: "12.8 MB" }
+        ]
+      }
+    };
+
+    // DOM Helpers
+    const $ = (id) => document.getElementById(id);
+
+    // Initial Setup
+    function init() {
+      applyTheme();
+      renderDeviceList();
+      renderShuttleFiles();
+      setupEventListeners();
+      simulateTrafficRate();
+    }
+
+    function applyTheme() {
+      document.documentElement.dataset.theme = state.theme;
+      $("themeToggleBtn").innerHTML = state.theme === "dark" 
+        ? '<i class="ph ph-sun"></i>' 
+        : '<i class="ph ph-moon"></i>';
+      localStorage.setItem("feisuo-theme", state.theme);
+    }
+
+    function setViewMode(mode) {
+      state.viewMode = mode;
+      $("mainStage").dataset.mode = mode;
+      document.querySelectorAll(".view-switcher button").forEach(btn => {
+        btn.classList.toggle("active", btn.dataset.view === mode);
+      });
+      // Show/hide taskbar
+      $("windowsTaskbar").style.display = (mode === "mobile") ? "none" : "grid";
+    }
+
+    function renderDeviceList() {
+      const container = $("desktopDevList");
+      container.innerHTML = state.devices.map(d => `
+        <div class="dev-item ${d.id === state.selectedDeviceId ? 'active' : ''} ${d.online ? '' : 'offline'}" data-id="${d.id}">
+          <div class="dev-icon"><i class="ph ${d.icon}"></i></div>
+          <div class="dev-meta-block">
+            <div class="dev-name">
+              <span>${d.name}</span>
+            </div>
+            <div class="dev-meta">${d.ip} · ${d.online ? '自连在线 (' + d.ping + ')' : '离线待命'}</div>
+          </div>
+          <div class="status-indicator"></div>
+        </div>
+      `).join("");
+      
+      const current = state.devices.find(d => d.id === state.selectedDeviceId) || state.devices[0];
+      $("targetDevName").textContent = current.name;
+      $("sendZoneTitle").textContent = `发给「${current.name}」`;
+    }
+
+    function renderShuttleFiles() {
+      // Local
+      $("localFileList").innerHTML = state.files.local.map(f => {
+        const checked = state.localSelected.has(f.name);
+        return `
+          <div class="file-row ${checked ? 'checked' : ''}" data-side="local" data-name="${f.name}">
+            <div class="checkbox-box">${checked ? '✓' : ''}</div>
+            <i class="ph ${f.type === 'dir' ? 'ph-folder-fill' : 'ph-file'}" style="color: ${f.type === 'dir' ? '#e6a23c' : 'var(--text-2)'}"></i>
+            <span class="name">${f.name}</span>
+            <span class="size">${f.size}</span>
+          </div>
+        `;
+      }).join("");
+
+      // Remote
+      $("remoteFileList").innerHTML = state.files.remote.map(f => {
+        const checked = state.remoteSelected.has(f.name);
+        return `
+          <div class="file-row ${checked ? 'checked' : ''}" data-side="remote" data-name="${f.name}">
+            <div class="checkbox-box">${checked ? '✓' : ''}</div>
+            <i class="ph ${f.type === 'dir' ? 'ph-folder-fill' : 'ph-file'}" style="color: ${f.type === 'dir' ? '#e6a23c' : 'var(--text-2)'}"></i>
+            <span class="name">${f.name}</span>
+            <span class="size">${f.size}</span>
+          </div>
+        `;
+      }).join("");
+
+      $("localSelCount").textContent = `本机 · ${state.localSelected.size} 项选中`;
+      $("remoteSelCount").textContent = `随身 Pixel · ${state.remoteSelected.size} 项选中`;
+      $("shuttleSendBtn").disabled = state.localSelected.size === 0;
+      $("shuttleFetchBtn").disabled = state.remoteSelected.size === 0;
+    }
+
+    function showWinNotification(title, desc) {
+      const toast = $("winNotificationToast");
+      $("winToastTitle").textContent = title;
+      $("winToastDesc").textContent = desc;
+      toast.classList.add("show");
+      setTimeout(() => toast.classList.remove("show"), 4200);
+    }
+
+    function triggerTransferSimulation(fileName, fromName, toName, isIncoming = false) {
+      if (state.isTransferring) return;
+      state.isTransferring = true;
+
+      const dock = $("desktopDockTransfer");
+      dock.classList.add("active");
+      $("jobFileName").textContent = isIncoming ? `正在自动接收：${fileName}` : `正在发送：${fileName}`;
+      $("jobTargetDev").textContent = isIncoming ? `来自 ${fromName}` : `至 ${toName}`;
+
+      let pct = 0;
+      const fill = $("jobProgressFill");
+      const txt = $("jobPctTxt");
+
+      const interval = setInterval(() => {
+        pct += Math.floor(Math.random() * 18) + 12;
+        if (pct >= 100) {
+          pct = 100;
+          clearInterval(interval);
+          fill.style.width = "100%";
+          txt.textContent = "已完成 · 100%";
+          
+          setTimeout(() => {
+            dock.classList.remove("active");
+            state.isTransferring = false;
+            if (isIncoming) {
+              showWinNotification(`文件自动接收完成`, `已安全写入 ${state.receivePath}\\${fileName}`);
+            } else {
+              showWinNotification(`文件发送成功`, `${fileName} 已送达 ${toName}，对方服务自动接收入库。`);
+            }
+          }, 1000);
+        } else {
+          fill.style.width = pct + "%";
+          const speed = (90 + Math.random() * 20).toFixed(1);
+          txt.textContent = `${pct}% · ${speed} MB/s`;
+        }
+      }, 160);
+    }
+
+    function simulateTrafficRate() {
+      setInterval(() => {
+        const rate = (92 + Math.random() * 14).toFixed(1);
+        $("lanRate").textContent = `${rate} MB/s`;
+      }, 2500);
+    }
+
+    function setupEventListeners() {
+      // Theme Switch
+      $("themeToggleBtn").addEventListener("click", () => {
+        state.theme = state.theme === "dark" ? "light" : "dark";
+        applyTheme();
+      });
+
+      // View Switcher (Desktop / Mobile / Split)
+      document.querySelectorAll(".view-switcher button").forEach(btn => {
+        btn.addEventListener("click", () => setViewMode(btn.dataset.view));
+      });
+
+      // Windows Minimize / Close to Tray
+      $("winCloseBtn").addEventListener("click", () => {
+        $("desktopWindow").classList.add("minimized");
+        state.trayMinimized = true;
+        showWinNotification("飞梭正在托盘后台运行", "开机自连依然活跃，受信设备发来文件将自动入盘，无须保持前台窗口。");
+      });
+      $("winMinBtn").addEventListener("click", () => {
+        $("desktopWindow").classList.add("minimized");
+        state.trayMinimized = true;
+      });
+
+      // Taskbar app click restore
+      $("tbAppIcon").addEventListener("click", () => {
+        $("desktopWindow").classList.remove("minimized");
+        state.trayMinimized = false;
+      });
+      $("systemTrayBtn").addEventListener("click", () => {
+        $("desktopWindow").classList.toggle("minimized");
+        state.trayMinimized = $("desktopWindow").classList.contains("minimized");
+      });
+
+      // Switch Devices in Sidebar
+      $("desktopDevList").addEventListener("click", (e) => {
+        const item = e.target.closest(".dev-item");
+        if (!item) return;
+        state.selectedDeviceId = item.dataset.id;
+        $("meBtn").classList.remove("active");
+        renderDeviceList();
+        // Switch back to normal tabs
+        if (state.currentTab === "self") switchTab("send");
+      });
+
+      // Click "Me" to show Settings
+      $("meBtn").addEventListener("click", () => {
+        $("meBtn").classList.add("active");
+        document.querySelectorAll(".dev-item").forEach(d => d.classList.remove("active"));
+        switchTab("self");
+      });
+
+      // Desktop Tab Switching
+      $("desktopTabs").addEventListener("click", (e) => {
+        const btn = e.target.closest("button[data-tab]");
+        if (!btn) return;
+        switchTab(btn.dataset.tab);
+      });
+
+      function switchTab(tabId) {
+        state.currentTab = tabId;
+        document.querySelectorAll("#desktopTabs button").forEach(b => {
+          b.classList.toggle("active", b.dataset.tab === tabId);
+        });
+        document.querySelectorAll(".tab-view").forEach(v => v.classList.remove("active"));
+        if (tabId === "send") $("viewSend").classList.add("active");
+        if (tabId === "shuttle") $("viewShuttle").classList.add("active");
+        if (tabId === "log") $("viewLog").classList.add("active");
+        if (tabId === "self") $("viewSelf").classList.add("active");
+      }
+
+      // Drag and drop file simulation
+      const dropzone = $("desktopDropzone");
+      ["dragenter", "dragover"].forEach(ev => {
+        dropzone.addEventListener(ev, (e) => {
+          e.preventDefault();
+          dropzone.classList.add("drag-active");
+        });
+      });
+      ["dragleave", "drop"].forEach(ev => {
+        dropzone.addEventListener(ev, (e) => {
+          e.preventDefault();
+          dropzone.classList.remove("drag-active");
+          if (ev === "drop") {
+            const files = e.dataTransfer.files;
+            const name = files.length > 0 ? files[0].name : "打包素材.zip";
+            triggerTransferSimulation(name, "书房台式", "随身 Pixel");
+          }
+        });
+      });
+
+      $("btnPickFiles").addEventListener("click", () => {
+        $("realFilePicker").click();
+      });
+      $("realFilePicker").addEventListener("change", (e) => {
+        if (e.target.files && e.target.files.length > 0) {
+          triggerTransferSimulation(e.target.files[0].name, "书房台式", "随身 Pixel");
+        }
+      });
+      $("btnSendClipboard").addEventListener("click", () => {
+        triggerTransferSimulation("剪贴板内容 (文本与图像)", "书房台式", "随身 Pixel");
+      });
+
+      // Shuttle file check toggle
+      $("localFileList").addEventListener("click", (e) => {
+        const row = e.target.closest(".file-row");
+        if (!row) return;
+        const name = row.dataset.name;
+        if (state.localSelected.has(name)) state.localSelected.delete(name);
+        else state.localSelected.add(name);
+        renderShuttleFiles();
+      });
+      $("remoteFileList").addEventListener("click", (e) => {
+        const row = e.target.closest(".file-row");
+        if (!row) return;
+        const name = row.dataset.name;
+        if (state.remoteSelected.has(name)) state.remoteSelected.delete(name);
+        else state.remoteSelected.add(name);
+        renderShuttleFiles();
+      });
+      $("btnSelAllLocal").addEventListener("click", () => {
+        state.files.local.forEach(f => state.localSelected.add(f.name));
+        renderShuttleFiles();
+      });
+      $("btnSelAllRemote").addEventListener("click", () => {
+        state.files.remote.forEach(f => state.remoteSelected.add(f.name));
+        renderShuttleFiles();
+      });
+      $("shuttleSendBtn").addEventListener("click", () => {
+        const names = Array.from(state.localSelected).join(", ");
+        triggerTransferSimulation(names, "书房台式", "随身 Pixel");
+        state.localSelected.clear();
+        renderShuttleFiles();
+      });
+      $("shuttleFetchBtn").addEventListener("click", () => {
+        const names = Array.from(state.remoteSelected).join(", ");
+        triggerTransferSimulation(names, "随身 Pixel", "书房台式", true);
+        state.remoteSelected.clear();
+        renderShuttleFiles();
+      });
+
+      // Toggles in Desktop Settings
+      $("swDesktopAutostart").addEventListener("click", function() {
+        this.classList.toggle("on");
+      });
+      $("swDesktopAutoRecv").addEventListener("click", function() {
+        this.classList.toggle("on");
+      });
+      $("swDesktopTrayMode").addEventListener("click", function() {
+        this.classList.toggle("on");
+      });
+
+      // Mobile Buttons Action
+      $("mobileSendPhotoBtn").addEventListener("click", () => {
+        triggerTransferSimulation("IMG_2026_0928_Live.jpg", "随身 Pixel", "书房台式", true);
+      });
+      $("mobileQuickSendToDesktopBtn").addEventListener("click", () => {
+        triggerTransferSimulation("工作备忘录.txt", "随身 Pixel", "书房台式", true);
+      });
+      $("mobileSendFileBtn").addEventListener("click", () => {
+        triggerTransferSimulation("VID_20260927_4K.mp4", "随身 Pixel", "书房台式", true);
+      });
+
+      // Mobile Scan QR Modal
+      $("mobileScanBtn").addEventListener("click", () => {
+        openModal(`
+          <h3 style="font-size:17px; font-weight:700; margin-bottom:6px;">扫描电脑二维码配对</h3>
+          <p style="font-size:12px; color:var(--text-2);">将取景框对准书房台式飞梭上的二维码，即可建立一次性受信白名单</p>
+          <div class="camera-scanner">
+            <div class="scanner-box"></div>
+            <div class="scanner-line"></div>
+          </div>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-top:12px;">
+            <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+            <button class="btn btn-primary" id="btnConfirmPairSim">模拟扫描成功</button>
+          </div>
+        `);
+        $("btnConfirmPairSim").addEventListener("click", () => {
+          closeModal();
+          showWinNotification("新设备配对成功！", "「随身 Pixel」已写入受信密钥库，以后开机即自动互通。");
+        });
+      });
+
+      // Pair New Device Button in Desktop
+      $("pairNewDevBtn").addEventListener("click", () => {
+        openModal(`
+          <h3 style="font-size:17px; font-weight:700; margin-bottom:6px;">添加信任新设备</h3>
+          <p style="font-size:12.5px; color:var(--text-2); margin-bottom:16px;">
+            飞梭采用设备指纹与非对称密钥互信机制。在对方设备输入当前码，或使用安卓端扫描，即可终生免密开机直通。
+          </p>
+          <div style="background:var(--pane); border:1px solid var(--line); border-radius:10px; padding:16px; text-align:center;">
+            <div style="font-size:11.5px; color:var(--text-3);">当前一次性配对码</div>
+            <div style="font-size:32px; font-weight:800; font-family:var(--font-mono); color:var(--accent); letter-spacing:0.18em; margin:6px 0;">592 108</div>
+            <div style="font-size:11px; color:var(--text-2);">有效期 10 分钟 · 仅需首次配对一次</div>
+          </div>
+          <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:18px;">
+            <button class="btn btn-secondary" onclick="closeModal()">关闭</button>
+          </div>
+        `);
+      });
+
+      // Modal Background Dismiss
+      $("modalOverlay").addEventListener("click", (e) => {
+        if (e.target.id === "modalOverlay") closeModal();
+      });
+    }
+
+    function openModal(htmlContent) {
+      $("modalContainer").innerHTML = htmlContent;
+      $("modalOverlay").classList.add("active");
+    }
+
+    function closeModal() {
+      $("modalOverlay").classList.remove("active");
+    }
+
+    // Run on startup
+    window.addEventListener("DOMContentLoaded", init);
+  </script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+# Dependencies & Build
+node_modules/
+dist/
+target/
+build/
+bin/
+obj/
+
+# IDE & Editors
+.idea/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# OS temporary files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Tool artifacts
+.openchamber/
+*.log
