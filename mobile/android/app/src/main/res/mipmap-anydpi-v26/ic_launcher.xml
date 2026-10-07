@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  应用图标: 自适应图标 (API 26+)。
+  前景层必须留出安全区 —— 启动器会把图标裁成圆形/圆角方形,
+  满幅绘制会导致中间的"飞梭"标志被裁掉。
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>

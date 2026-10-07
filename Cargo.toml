@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "core",
+    "desktop/src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["xudong.hua", "Feisuo Team"]
+license = "MIT"
+repository = "https://github.com/soldier-cv/feisuo"

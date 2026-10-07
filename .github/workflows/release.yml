@@ -1,0 +1,381 @@
+name: Build and Release
+
+# 仅 tag v* 或手动触发；普通 push 不发版
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+          # 同 ci.yml：Swatinem/rust-cache 没有 `key` 输入，写了不生效。
+          prefix-key: release
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # ⚠️ 必须与 ci.yml 锁**同一个具体版本**。
+          #
+          # 写 `version: 9` 是浮动 major：pnpm 10 发布后会自动升级，
+          # 而它的 lockfile 格式与 9 不兼容 —— `--frozen-lockfile` 直接失败。
+          # 在 CI 里那只是"检查挂了"，在这里是**发版失败、版本打不出来**，
+          # 而发版失败的现场（"lockfile 不满足"）完全看不出是工具链变了。
+          #
+          # 升 pnpm 时: 两份 workflow 一起改 + 重新生成 `ui/pnpm-lock.yaml`
+          #（当前 `lockfileVersion: '9.0'`，与 pnpm 9 配套）。
+          version: 9.15.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # 必须与 ci.yml 一致 —— 否则"CI 绿的版本"和"发版构建的版本"
+          # 可能是两个不同的产物，而没人会发现。
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      # 版本号的**唯一来源**是 `Cargo.toml` 的 `CARGO_PKG_VERSION`（规则 6）。
+      #
+      # 早先这里写死 `$ver = '0.1.0'` 作为回退，于是有两个独立的坏结果：
+      #   1. 规则 6 明确「任何位置不得写死版本字符串」，这行本身就是违规；
+      #   2. tag 不是语义化版本时正则不匹配，**静默**回退到 0.1.0 ——
+      #      推一个 `vnext` 标签会发出一个名为 vnext、内容却是 0.1.0 的
+      #      Release，两处配置被一起改成 0.1.0，守卫全部通过，
+      #      而所有在线用户从此永远收到「已是最新」。
+      #
+      # 现在：tag 存在时**必须**能解析出版本号，解析不出就失败。
+      # 手动触发（无 tag）时从 Cargo.toml 读当前版本，那才是唯一来源。
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $cargo = Get-Content 'Cargo.toml' -Raw -Encoding UTF8
+          if ($cargo -notmatch '(?m)^version = "([^"]+)"') {
+            throw "Cargo.toml 里读不到版本号"
+          }
+          $fallback = $Matches[1]
+          Write-Host "Cargo.toml 当前版本: $fallback"
+
+          $ver = $fallback
+          if ("${{ github.ref_type }}" -eq 'tag') {
+            $raw = "${{ github.ref_name }}"
+            $t = $raw -replace '^[vV]', ''
+            if ($t -notmatch '^(\d+\.\d+\.\d+)') {
+              # 刻意**硬失败**而不是回退：发一个内容与标签不符的 Release
+              # 比不发糟糕得多 —— 它会静默地把所有用户的更新通道锁死。
+              throw "标签 '$raw' 不是 v<major>.<minor>.<patch> 形式, 拒绝发版（避免发出内容与标签不符的包）"
+            }
+            $ver = $Matches[1]
+            if ($ver -ne $fallback) {
+              # 不是错误：仓库里的 Cargo.toml 本来就由 Stamp version 现场改写，
+              # 不提交回仓库。tag 才是发版时的权威。
+              Write-Host "以标签为准: $ver（仓库当前 $fallback）"
+            }
+          }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$ver"
+          Write-Host "version=$ver"
+
+      # 版本号必须同时写进 Cargo.toml 与 tauri.conf.json:
+      #   * Cargo.toml -> CARGO_PKG_VERSION (updater 读它作为"当前版本")
+      #   * tauri.conf.json -> tauri::AppHandle::package_info().version
+      # 两处不一致会让"检查更新"永远认为无需更新或永远有更新。
+      - name: Stamp version
+        shell: pwsh
+        run: |
+          $ver = '${{ steps.ver.outputs.version }}'
+
+          $cargo = 'Cargo.toml'
+          $text = Get-Content $cargo -Raw -Encoding UTF8
+          # 只改 `[workspace.package]` 段里**第一处** `version`。
+          #
+          # PowerShell 的 `-replace` 是**全局**替换：一旦 Cargo.toml 以后长出
+          # 第二处 `version = "..."`（比如给某个成员单独指定版本），
+          # 这一行会把两处一起改掉，成员版本与工作区版本就分叉了，
+          # 而 `CARGO_PKG_VERSION` 读的是成员自己的值 —— 于是改的正好不是
+          # 真正生效的那一处，且没有任何报错。
+          $rx = [regex]'(?m)^version = "[^"]+"'
+          if (-not $rx.IsMatch($text)) { throw "Cargo.toml 里没有找到 version 字段" }
+          $text = $rx.Replace($text, "version = `"$ver`"", 1)
+          Set-Content -Path $cargo -Value $text -Encoding UTF8 -NoNewline
+
+          # 刻意**不做** ConvertFrom-Json | ConvertTo-Json 往返：
+          # productName / title 是中文，Windows PowerShell 5.1 的 JSON 往返
+          # 会按系统代码页重新编码，把「飞梭」写成乱码并顺带重排整个文件。
+          # 只定点替换 "version" 那一行，其余字节原样保留。
+          $conf = 'desktop/src-tauri/tauri.conf.json'
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          $text = [System.IO.File]::ReadAllText((Resolve-Path $conf), [System.Text.Encoding]::UTF8)
+          $updated = [regex]::Replace($text, '("version"\s*:\s*")[^"]+(")', "`${1}$ver`${2}", 1)
+          if ($updated -eq $text) { throw "tauri.conf.json 里没有找到 version 字段" }
+          [System.IO.File]::WriteAllText((Resolve-Path $conf), $updated, $utf8)
+          Write-Host "stamped version $ver"
+
+      - name: Install UI dependencies
+        run: pnpm --dir ui install --frozen-lockfile
+
+      - name: Build UI
+        run: pnpm --dir ui build
+
+      # 必须与本地 README「手动编译」给出的**同一条构建命令**。
+      #
+      # 早先这里是 `cargo build --release -p feisuo-desktop`，与本地
+      # `cargo tauri build --no-bundle` 不同：后者会带上 Tauri CLI 注入的
+      # 构建期环境（`TAURI_ENV_*`、资源与图标处理）。两条路径的产物可能不同，
+      # 而差异只会在用户下载之后才暴露 —— 本地怎么测都测不出来。
+      #
+      # "本地能跑通"与"发出去的能用"必须是同一件事，否则测试没有意义。
+      - name: Build desktop executable
+        shell: pwsh
+        run: |
+          cargo install tauri-cli --version "^2" --locked
+          if ($LASTEXITCODE -ne 0) { throw "安装 tauri-cli 失败" }
+          cargo tauri build --no-bundle
+          if ($LASTEXITCODE -ne 0) { throw "cargo tauri build 失败" }
+
+      # 与 README「三个守卫」第 1 条同源的复核：Stamp version 改了两处配置，
+      # 这里**再读回来确认**它们真的相等。
+      #
+      # 放在 build 之后而不是 Stamp 之后：Stamp 里 `tauri.conf.json` 的
+      # 正则替换只检查"有没有替换掉"（`$updated -eq $text`），
+      # 不检查"替换成了什么"。万一它匹配到了另一个 `"version"` 字段
+      # （比如某个 schema 里的），两处就悄悄分叉了 —— 而不一致的版本号
+      # 会让检查更新**永久失灵**，且没有任何一处会报错。
+      - name: Verify version stamp landed in both files
+        shell: pwsh
+        run: |
+          $ver = '${{ steps.ver.outputs.version }}'
+          $cargoText = Get-Content 'Cargo.toml' -Raw -Encoding UTF8
+          $confText = [System.IO.File]::ReadAllText(
+            (Resolve-Path 'desktop/src-tauri/tauri.conf.json'), [System.Text.Encoding]::UTF8)
+          $vCargo = if ($cargoText -match '(?m)^version\s*=\s*"([^"]+)"') { $Matches[1] } else { $null }
+          $vTauri = if ($confText -match '"version"\s*:\s*"([^"]+)"') { $Matches[1] } else { $null }
+          if ($vCargo -ne $ver) { throw "Cargo.toml 版本是 '$vCargo'，期望 '$ver'" }
+          if ($vTauri -ne $ver) { throw "tauri.conf.json 版本是 '$vTauri'，期望 '$ver'" }
+          Write-Host "两处版本一致: $ver"
+
+      # 绿色版单文件：直接产出可双击运行的 exe。
+      # 应用内更新会把新 exe 覆盖到当前 exe 所在目录，所以文件名对用户可见，
+      # 统一为 Feisuo-win-x64.exe。
+      - name: Collect artifact
+        shell: pwsh
+        run: |
+          $src = 'target/release/feisuo-desktop.exe'
+          if (-not (Test-Path $src)) { throw "构建产物缺失: $src" }
+
+          $stage = 'publish/Feisuo-win-x64.exe'
+          New-Item -ItemType Directory -Force -Path 'publish' | Out-Null
+          Copy-Item $src $stage -Force
+
+          $size = (Get-Item $stage).Length
+          Write-Host "Feisuo-win-x64.exe : $([math]::Round($size / 1MB, 2)) MB"
+          if ($size -lt 1MB) { throw "产物体积异常 ($size 字节)，疑似构建失败" }
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Feisuo-win-x64-v${{ steps.ver.outputs.version }}
+          path: |
+            publish/Feisuo-win-x64.exe
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            publish/Feisuo-win-x64.exe
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false
+          body: |
+            ## 📦 下载
+
+            | 文件 | 说明 |
+            | --- | --- |
+            | `Feisuo-win-x64.exe` | Windows x64 绿色版，双击即用，无需安装 |
+
+            国内用户可在 [Gitee 镜像 Releases](https://gitee.com/huaxudong/feisuo/releases) 页面高速下载。
+
+            ## 🔄 自动更新
+
+            飞梭桌面端内置版本检查，**Gitee 优先、GitHub 降级**：
+            托盘右键「检查更新…」或「系统设置 → 关于与更新」均可触发，
+            静默调度为启动后 8 秒首次检查、之后每 12 小时一次。
+
+            ## ⚠️ 系统要求
+
+            - Windows 10 1809 (17763) 及以上 / Windows 11
+            - [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)（Win11 自带，Win10 可能需安装）
+
+      # ⚠️ `continue-on-error` 只让**Gitee 镜像**这一步不阻断发版，
+      # 因为 GitHub Release 已经建好、用户已经能下载了 —— 镜像失败不该
+      # 让整个发版显示为失败。
+      #
+      # 代价是这个步骤的失败**不在 job 状态里**，只能看日志。
+      # 所以脚本内部对关键失败用 `throw` + `::error::` 显式标注，
+      # 并且客户端已经能自愈：Gitee 说"有新版却没附件"时会报明确错误，
+      # 而"Gitee 说已是最新但 GitHub 更新"现在会被探测出来并改用 GitHub。
+      - name: Sync Release to Gitee
+        if: startsWith(github.ref, 'refs/tags/') && github.repository == 'soldier-cv/feisuo'
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          if (-not $env:GITEE_TOKEN) {
+            # `::error::` 而不是 `::warning::`：没有 token 意味着**国内用户拿不到
+            # 高速通道**，而客户端是 Gitee 优先的。这不是可以忽略的小事，
+            # 必须在 Actions 页面上一眼可见。
+            Write-Host "::error::未配置 GITEE_TOKEN Secret，Gitee 镜像发布被跳过。国内用户将只能走 GitHub（常超时）。请在 GitHub 仓库 Settings → Secrets 添加 GITEE_TOKEN。"
+            exit 0
+          }
+
+          $tag = "${{ github.ref_name }}"
+          $ver = '${{ steps.ver.outputs.version }}'
+          $owner = "huaxudong"
+          $repo = "feisuo"
+          $token = $env:GITEE_TOKEN
+          $exe = (Resolve-Path "publish/Feisuo-win-x64.exe").Path
+
+          Write-Host "正在准备同步 Release 到 Gitee ($owner/$repo, Tag: $tag)..."
+
+          # 确保 tag 已经存在于 Gitee 仓库
+          try {
+            git remote add gitee "https://huaxudong:$token@gitee.com/$owner/$repo.git"
+          } catch {}
+          try {
+            git push gitee "HEAD:refs/tags/$tag" --force
+            Write-Host "Tag $tag 推送至 Gitee 成功"
+          } catch {
+            Write-Host "推送到 Gitee Tag 提示: $_"
+          }
+
+          $releasesUrl = "https://gitee.com/api/v5/repos/$owner/$repo/releases"
+          $headers = @{ "Authorization" = "token $token" }
+          $createPayload = @{
+            access_token     = $token
+            tag_name         = $tag
+            target_commitish = "main"
+            name             = "Feisuo $tag"
+            body             = "局域网极速传输工具（Windows 绿色版）。国内高速下载。"
+            prerelease       = $false
+          } | ConvertTo-Json
+
+          $releaseId = $null
+
+          # 1. 尝试直接创建 Gitee Release（URL query param + Header 双重鉴权）
+          try {
+            $createUrl = "$releasesUrl`?access_token=$token"
+            Write-Host "正在向 Gitee 发送创建 Release 请求: $createUrl"
+            $resp = Invoke-RestMethod -Uri $createUrl -Method Post -Body $createPayload -ContentType "application/json; charset=utf-8" -Headers $headers
+            $releaseId = $resp.id
+            Write-Host "Gitee 创建 Release 成功，ID: $releaseId"
+          } catch {
+            $errDetail = if ($_.ErrorDetails) { $_.ErrorDetails.Message } else { $_.Exception.Message }
+            Write-Host "Gitee 创建 Release 响应: $errDetail"
+          }
+
+          # 2. 如果已存在或创建未直接返回 id，则尝试查询已有的 tag release
+          if (-not $releaseId) {
+            try {
+              $queryUrl = "$releasesUrl/tags/$tag`?access_token=$token"
+              Write-Host "正在查询已有 Release: $queryUrl"
+              $existing = Invoke-RestMethod -Uri $queryUrl -Method Get -Headers $headers
+              $releaseId = $existing.id
+              Write-Host "找到已有 Gitee Release ID: $releaseId"
+            } catch {
+              $errDetail = if ($_.ErrorDetails) { $_.ErrorDetails.Message } else { $_.Exception.Message }
+              Write-Host "查询已有 Gitee Release 响应: $errDetail"
+            }
+          }
+
+          # 3. 如果成功获取到 Release ID，上传安装包附件
+          if ($releaseId -and (Test-Path $exe)) {
+            $fileName = [System.IO.Path]::GetFileName($exe)
+            $attachUrl = "https://gitee.com/api/v5/repos/$owner/$repo/releases/$releaseId/attach_files"
+
+            # 检查并清理同名旧附件（防止 400 冲突）
+            try {
+              Write-Host "检查 Release (ID: $releaseId) 是否已存在同名附件 $fileName ..."
+              $existingAttaches = Invoke-RestMethod -Uri "$attachUrl`?access_token=$token" -Method Get -Headers $headers
+              foreach ($att in @($existingAttaches)) {
+                if ($att.name -eq $fileName) {
+                  Write-Host "发现已有同名附件 (ID: $($att.id))，正在清理以便重新上传..."
+                  Invoke-RestMethod -Uri "$attachUrl/$($att.id)`?access_token=$token" -Method Delete -Headers $headers
+                  Write-Host "旧附件删除成功"
+                }
+              }
+            } catch {
+              $errDetail = if ($_.ErrorDetails) { $_.ErrorDetails.Message } else { $_.Exception.Message }
+              Write-Host "检查/清理已有附件提示: $errDetail"
+            }
+
+            Write-Host "正在上传绿色版到 Gitee Release (ID: $releaseId): $exe ..."
+            $uploadUrl = "$attachUrl`?access_token=$token"
+            $curlArgs = @(
+              "-s", "-S",
+              "-X", "POST",
+              $uploadUrl,
+              "-F", "access_token=$token",
+              "-F", "file=@$exe"
+            )
+            & curl.exe @curlArgs
+            $curlExit = $LASTEXITCODE
+
+            # ⚠️ 必须检查退出码。curl 失败（网络、超时、413）时
+            # 附件**根本没上传**，而 Release 已经建好了 —— 客户端
+            # `finish()` 会看到"有新版本但没有 Feisuo-win-x64.exe 附件"，
+            # 报一个用户看不懂的错误。而这条路径整体 `continue-on-error`，
+            # 于是镜像就成了一个"有 Release、无附件"的空壳，
+            # 每次检查更新都命中它却拿不到任何东西。
+            #
+            # 早先这里无条件打印「上传完毕！」，失败也看不出来。
+            if ($curlExit -ne 0) {
+              throw "Gitee 附件上传失败（curl 退出码 $curlExit）。已建好的 Release 没有附件，客户端会报『发现新版本但没有附件』—— 请手动到 Gitee 后台补传，或删除该 Release。"
+            }
+
+            # 上传成功也不能只看退出码：Gitee 返回非 2xx 时 curl 仍可能退出 0
+            # （取决于是否带 -f）。所以回读一次附件列表确认。
+            $verify = $null
+            try {
+              $verify = Invoke-RestMethod -Uri "$attachUrl`?access_token=$token" -Method Get -Headers $headers
+            } catch {
+              Write-Warning "回读附件列表失败（上传本身已返回 0）：$_"
+            }
+            if ($null -ne $verify) {
+              $names = @($verify) | ForEach-Object { $_.name }
+              if ($names -notcontains $fileName) {
+                throw "上传后回读附件列表里没有 $fileName（实际有: $($names -join ', ')）。Gitee 镜像当前不可用，客户端会走 GitHub 通道。"
+              }
+              Write-Host "已确认附件存在: $fileName"
+            }
+            Write-Host "`nGitee Release 上传完毕！"
+          } else {
+            # 这里必须 throw：Release 可能**已经被建出来了**，只是没拿到 id。
+            # 那就留下一个"有 Release、无附件"的空壳 —— 客户端每次检查更新
+            # 都会命中它、报"发现新版本但没有附件"，而 GitHub 上其实有完整版本。
+            # 早先只 Write-Warning，镜像就这么半死不活地留着。
+            throw "未能获取到有效的 Gitee Release ID (releaseId=$releaseId, exeExists=$(Test-Path $exe))，附件未上传。若 Release 已创建，请到 Gitee 后台补传 $fileName 或删除该 Release。"
+          }

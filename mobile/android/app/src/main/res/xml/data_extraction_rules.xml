@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ (API 31) 云备份与设备迁移规则。
+  与 backup_rules.xml 同理: 身份私钥与受信库一律排除。
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="device_identity.key" />
+        <exclude domain="file" path="trust_store.db" />
+        <exclude domain="file" path="share-staging" />
+        <exclude domain="sharedpref" path="feisuo_secure.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="device_identity.key" />
+        <exclude domain="file" path="trust_store.db" />
+        <exclude domain="file" path="share-staging" />
+        <exclude domain="sharedpref" path="feisuo_secure.xml" />
+    </device-transfer>
+</data-extraction-rules>

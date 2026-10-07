@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  允许备份的内容: 仅非敏感的界面偏好。
+  设备身份私钥 (device_identity.key) 与受信库 (trust_store.db) 绝不能出设备,
+  否则"一次配对终生免密"的非对称签名安全根基直接崩塌。
+-->
+<full-backup-content>
+    <exclude domain="file" path="device_identity.key" />
+    <exclude domain="file" path="trust_store.db" />
+    <exclude domain="file" path="share-staging" />
+    <exclude domain="sharedpref" path="feisuo_secure.xml" />
+</full-backup-content>

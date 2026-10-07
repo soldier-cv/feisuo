@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#0E9A6E</color>
+    <color name="feisuo_accent">#0E9A6E</color>
+    <color name="feisuo_accent_dark">#0C825D</color>
+    <color name="ic_stat_white">#FFFFFFFF</color>
+</resources>

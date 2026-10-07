@@ -1,24 +1,115 @@
-# Dependencies & Build
+# ============================================================================
+# 飞梭 .gitignore
+#
+# 原则：**宁可多忽略一点，也不要让构建产物/机器相关文件进仓库**。
+# 进仓库的代价不只是体积 —— 它们会在换机器、换工具版本时变成
+# "明明改了却没生效"的灵异事件。
+# ============================================================================
+
+# --- 依赖与构建产物 ---
 node_modules/
 dist/
 target/
 build/
 bin/
 obj/
+*.tsbuildinfo
 
-# IDE & Editors
+# Cargo.lock **要入库**：本项目产出的是应用（不是库），
+# 应用必须锁死依赖版本，否则同一份代码在不同机器上构建出不同二进制。
+# 所以这里只忽略 Cargo.lock.orig 之类的残留：
+Cargo.lock.orig
+Cargo.lock.bak
+
+# --- 编辑器 / IDE ---
 .idea/
 .vscode/
+.vs/
 *.suo
 *.user
 *.userosscache
 *.sln.docstates
+*.swp
+*.swo
+*~
 
-# OS temporary files
+# --- 操作系统 ---
 Thumbs.db
+ehthumbs.db
 Desktop.ini
 .DS_Store
+$RECYCLE.BIN/
 
-# Tool artifacts
-.openchamber/
+# --- Python 字节码（脚本跑过就会生成，不入库）---
+__pycache__/
+*.pyc
+
+# --- 日志与临时文件 ---
 *.log
+build.log
+*.tmp
+*.bak
+*.orig
+*.rej
+.env
+.env.local
+.openchamber/
+
+# --- Tauri 自动生成的 schema ---
+# 这些由 `tauri build` 每次构建时按当前 Tauri 版本 + capabilities 重新生成，
+# 换版本就会整份变动。入库只会制造无意义的 diff 噪音。
+desktop/src-tauri/gen/schemas/
+
+# --- Cargo 配置：由脚本生成，含本机 NDK 路径 ---
+# `.cargo/config.toml` 里的 linker 路径必然含 NDK 的安装位置与版本，
+# 每台机器都不同。它是**构建产物**，由 `mobile/android/build-native.ps1`
+# 在编译 .so 时现场生成。早先提交过一份写死路径的版本
+# （指向某人的 %TEMP%\...\android-ndk-r27c），它在任何别的机器上都是坏的。
+.cargo/config.toml
+.cargo/config
+
+# --- Rust core 的 JNI 交叉编译产物 ---
+# 不入库: 每个 ABI 约 4.9 MB, 且必须与当前 NDK 版本匹配,
+# 入库只会导致换机器时拿到一份链接到旧 NDK 的 .so,
+# 运行期才报 UnsatisfiedLinkError。
+#
+# ⚠️ 这里**不能**写 `app/src/main/jniLibs/` ——
+#    含 `/` 的模式被 git **锚定到 .gitignore 所在目录**（仓库根），
+#    匹配不到 `mobile/android/app/src/main/jniLibs/`，规则会**静默失效**。
+#    无 `/` 的模式才在任意层级生效。
+jniLibs/
+*.so
+
+# --- Android / Gradle（机器相关路径与构建产物，不入库）---
+local.properties
+.gradle/
+.kotlin/
+captures/
+*.apk
+*.aab
+# 签名密钥：**绝不入库**。密钥进仓库 = 任何拿到仓库的人都能签出一个
+# "看起来是官方"的 APK，用户装上后无法与官方版共存。
+keystore.properties
+*.jks
+*.keystore
+# 示例文件要入库（它是给维护者看的模板），上面两条只匹配真实文件
+!keystore.properties.example
+
+# --- 前端构建产物 ---
+# `ui/public/phosphor/` 由 `ui/scripts/prepare-phosphor.mjs` 从 `node_modules`
+# 生成（`prebuild` / `predev` 自动执行），约 660 KB 纯产物。
+#
+# 为什么不入库 —— 两个理由，第二个更要命：
+# 1. 体积：它是 `@phosphor-icons/web` 的派生物，版本由 pnpm-lock 决定；
+# 2. **脚本每次会 `rmSync(整个目录)` 再重建** ⇒ 入库后每次构建都产生
+#    一堆"内容相同但时间戳变了"的改动，`git status` 永远是脏的，
+#    真正的改动就被淹没了。
+#
+# 安全性：`pnpm install` 后 `predev`/`prebuild` 会自动重新生成，
+# 克隆仓库不需要它。
+ui/public/phosphor/
+
+# --- 诊断报告导出（用户实测产物，不该进仓库）---
+metrics.prom
+*-诊断报告*.txt
+*_report.txt

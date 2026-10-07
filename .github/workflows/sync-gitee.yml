@@ -1,0 +1,64 @@
+name: Sync to Gitee
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: sync-gitee
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push to Gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          # 禁用终端交互式密码提示，防止凭证异常时卡死
+          export GIT_TERMINAL_PROMPT=0
+
+          if [ -z "$GITEE_TOKEN" ]; then
+            echo "::error::未检测到 GITEE_TOKEN Secret，请在 GitHub 仓库 Settings -> Secrets and variables -> Actions 中配置 GITEE_TOKEN。"
+            exit 1
+          fi
+
+          if [ "${{ github.repository }}" != "soldier-cv/feisuo" ]; then
+            echo "非主仓库，跳过 Gitee 镜像推送。"
+            exit 0
+          fi
+
+          echo "配置 Gitee 远端仓库..."
+          git remote add gitee "https://huaxudong:${GITEE_TOKEN}@gitee.com/huaxudong/feisuo.git"
+
+          BRANCH="${{ github.ref_name }}"
+
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "推送 Tag ${BRANCH} 到 Gitee..."
+            git push gitee "refs/tags/${BRANCH}:refs/tags/${BRANCH}" --force
+            echo "✅ Gitee 标签同步完成！"
+            exit 0
+          fi
+
+          echo "对齐 ${BRANCH} 分支..."
+          git fetch origin "${BRANCH}"
+          git checkout -B "${BRANCH}" "origin/${BRANCH}"
+
+          echo "推送 ${BRANCH} 分支到 Gitee..."
+          git push -u gitee "${BRANCH}:${BRANCH}" --force
+
+          echo "推送所有 Tags 到 Gitee..."
+          git push gitee --tags --force
+
+          echo "✅ Gitee 镜像全量同步完成！"

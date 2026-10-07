@@ -1,0 +1,50 @@
+[package]
+name = "feisuo-desktop"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Windows desktop host for Feisuo using Tauri v2"
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0", features = ["tray-icon", "image-png", "image-ico", "custom-protocol"] }
+tauri-plugin-shell = "2.0"
+tauri-plugin-autostart = "2.0"
+tauri-plugin-dialog = "2.0"
+# 全局热键 Ctrl+Alt+V（§6.4 剪贴板直发）。
+# 不装这个插件就只能靠前端 keydown —— 那样**窗口隐藏时热键完全失效**,
+# 而托盘常驻恰恰意味着窗口大部分时间是隐藏的, 等于功能不存在。
+tauri-plugin-global-shortcut = "2.0"
+feisuo-core = { path = "../../core" }
+tokio = { version = "1.43", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "6.0"
+chrono = { version = "0.4", features = ["serde"] }
+local-ip-address = "0.6"
+
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "native-tls", "http2", "charset", "system-proxy"] }
+
+# Windows 原生剪贴板（§6）。
+# 浏览器层的 `navigator.clipboard.read()` 在 WebView2 下经常因为需要用户手势 +
+# 窗口焦点 + 权限而返回空，**且完全拿不到 `CF_HDROP`（资源管理器里复制的文件）** ——
+# 而"复制文件直接发"恰恰是剪贴板发送里最有价值的一条（§6.3）。
+# 特性：CF_HDROP/CF_DIB 常量在 Win32_Foundation；OpenClipboard/GetClipboardData
+# 在 Win32_System_DataExchange；GlobalLock/GlobalSize 在 Win32_System_Memory。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_UI_WindowsAndMessaging",
+    # GetLogicalDrives / GetDriveTypeW / GetVolumeInformationW / GetDiskFreeSpaceExW
+    "Win32_Storage_FileSystem",
+    # CF_HDROP / CF_DIB / CF_UNICODETEXT 常量在 Ole 模块
+    "Win32_System_Ole",
+    # DROPFILES 结构
+] }

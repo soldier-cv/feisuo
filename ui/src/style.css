@@ -1,0 +1,487 @@
+/* ============================================================
+ * 飞梭 Feisuo · 全局主题令牌 (Design Tokens)
+ * 说明: App.vue 内所有颜色一律通过 var(--xxx) 引用,
+ *       严禁在组件内硬编码 #hex / rgba(), 否则浅色主题必然失效。
+ * ============================================================ */
+
+:root {
+  --font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: "Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace;
+
+  /* ---- 层级表面 (Surfaces) ---- */
+  --bg-window: #18191f;
+  --bg-sidebar: #121318;
+  --bg-card: #20222b;
+  --bg-card-hover: #272a35;
+  --bg-elevated: #1e212a;   /* 弹窗 / 提示条等浮层底色 */
+  --bg-inset: #16181f;      /* 输入框、下沉区域 */
+  --bg-active: rgba(47, 191, 138, 0.15);
+  --bg-hover-soft: rgba(255, 255, 255, 0.06);
+  --bg-row-soft: rgba(255, 255, 255, 0.035);
+  --track-bg: rgba(255, 255, 255, 0.1);
+  --switch-off: rgba(255, 255, 255, 0.2);
+  /* 深色主题下轨道是半透明白色, 白滑块天然对比充足, 无需描边 */
+  --switch-knob: #ffffff;
+  --switch-knob-ring: rgba(0, 0, 0, 0);
+
+  /* ---- 拖放区 ---- */
+  --drop-border: rgba(255, 255, 255, 0.16);
+  --drop-bg: rgba(255, 255, 255, 0.02);
+  --drop-bg-hover: rgba(47, 191, 138, 0.06);
+
+  /* ---- 描边 ---- */
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.18);
+
+  /* ---- 键盘焦点环 ----
+   * 这里原本还有 `--border-focus: rgba(47,191,138,0.55)`, 已删除:
+   * 零引用, 而且它比 WCAG 1.4.11 对焦点指示器要求的 3:1 差得远 ——
+   * 0.55 的透明度合成后压相邻底色只有 2.2:1。
+   *
+   * 留着它比删掉更糟: 它叫"focus", 看起来正是焦点环该用的那个,
+   * 下一个人很可能顺手就写了 `var(--border-focus)`, 然后上线一份
+   * 合规但看不见的焦点环 —— 而且**没有任何守卫会报警**, 因为
+   * 对比度守卫只测 `-text` 系列与若干显式指定的组合。
+   *
+   * 所以焦点环取品牌色的**实心**值(压窗口底色 7.4:1),
+   * 且由 `focus_ring_must_exist_and_meet_non_text_contrast` 逐项测量。 */
+  --focus-ring: #2fbf8a;
+
+  /* ---- 主色 ---- */
+  --accent: #2fbf8a;
+  /* --accent-hover 已删除(零引用): 强调按钮的悬停/按下态一律走
+     `filter: brightness()`, 不换色值。留着它反而会诱使下一个人
+     改用色值, 于是**同一套按钮出现两种悬停表现** —— 一种随主题走、
+     一种只对某个色值成立。 */
+  --accent-contrast: #042417;
+  --accent-soft: rgba(47, 191, 138, 0.16);
+  --accent-border: rgba(47, 191, 138, 0.32);
+  --accent-glow: rgba(47, 191, 138, 0.32);
+  /* 压在 *-soft 底上作**文字**用的颜色。
+     必须是**浅**的：深色主题下 *-soft 是"亮色叠在深底上"，
+     合成结果仍偏暗（accent-soft → #223b3a），深前景压上去只有 1.9:1。
+     浅前景实测 7.2~7.8:1。品牌色当**填充**用，当**文字**用另一个。 */
+  --accent-on-soft: #7fe3c0;
+  --info-on-soft: #a8d0ff;
+  --warn-on-soft: #f5c877;
+  --danger-on-soft: #ff9d9d;
+  --success-on-soft: #9ae6bd;
+
+  /* 压在**实心容器**上（--bg-window / --bg-sidebar / --bg-card / --bg-inset）
+     作**文字**用的颜色。深色主题下品牌色本来就够亮（6~9:1），
+     所以这一组在深色下就等于品牌色本身。 */
+  --accent-text: #2fbf8a;
+  --info-text: #4aa3ff;
+  --warn-text: #e6a23c;
+  --danger-text: #ff6b6b;
+  --success-text: #5fd08a;
+  --purple-text: #b37feb;
+  --green-text: #67c23a;
+
+  /* ---- 圆角刻度 ----
+   *
+   * 只有四个值，**按尺寸角色**分，不按"好看程度"随手挑：
+   *   --radius-pill  胶囊（进度条、标签、开关轨道）
+   *   --radius-lg    大容器（面板、弹窗、穿梭分栏）
+   *   --radius-md    卡片 / 按钮 / 输入框
+   *   --radius-sm    小徽标、图标按钮、行内小控件
+   *
+   * ## 为什么值得收敛
+   *
+   * 收敛前有 **12 种**圆角：4 / 5 / 6 / 7 / 8 / 9 / 10 / 12 / 14 / 50% /
+   * 99px / 999px。相邻容器差 1px 时用户看不出"这是有意的层级"，
+   * 只看出"这个界面圆角不一致" —— 5px 与 6px 差的那 1px 不传达任何信息。
+   *
+   * 之前 5px 与 6px 混用（`.undo-toast-btn` 5px、`.btn-clean-primary` 6px），
+   * 7px 单独存在（`.scope-mode`，只出现一次）、9px 只出现在
+   * `.scope-foot` 的"只有下两角圆"里。这些都是随手写的痕迹。
+   */
+  --radius-pill: 999px;
+  --radius-lg: 10px;
+  --radius-md: 6px;
+  --radius-sm: 4px;
+
+  /* ---- 文本 ---- */
+  --text-primary: #ffffff;
+  --text-secondary: #a3adc0;
+  /* 三级文字(提示/说明)。
+     原值 #828b9c：压 --bg-card 是 4.70:1 达标，但它**不是只压在卡片上** ——
+     侧栏、地址栏、面板底色、以及各种半透明叠层（--bg-hover-soft /
+     --bg-row-soft / --bg-active）全都更暗，逐个量下来最低只有 3.53:1。
+     提到 #9aa3b4 = 4.53:1（在最差的那个底色上）。
+     代价是提示文字亮了一档 —— 比"看不清"划算。 */
+  --text-tertiary: #9aa3b4;
+  --text-on-solid: #ffffff;
+  /* `--text-main` / `--text-dim` 是历史别名。
+     它们此前只以 `var(--text-dim, #8a8f98)` 这种**内联回退**的形式存在,
+     而回退是写死的深色值 —— 浅色主题下不会���覆盖, 于是浅灰压白底、
+     基本读不出来。改成别名后两套主题自动跟随, 也不必在每处重复回退。 */
+  --text-main: var(--text-primary);
+  --text-dim: var(--text-tertiary);
+
+  /* 状态 chip 的半透明底 / 描边。
+     之前散在组件里写成 rgba(80,200,140,…) 这类字面量, 浅色主题下
+     是一层亮绿糊在白底上, 文字与边框一起糊掉。 */
+  --success-soft: rgba(95, 208, 138, 0.16);
+  --success-soft-hover: rgba(95, 208, 138, 0.26);
+  --success-border: rgba(95, 208, 138, 0.32);
+  --warn-border: rgba(230, 162, 60, 0.45);
+
+  /* 「按下」档的填充, 比 --bg-hover-soft 更实一档。 */
+  --bg-press-strong: rgba(255, 255, 255, 0.24);
+  /* 弹窗内部的下沉区（剪贴板预览正文）, 比 --bg-inset 更暗一档。 */
+  --bg-inset-strong: rgba(0, 0, 0, 0.28);
+
+  /* ---- 语义色 ---- */
+  --danger: #ff6b6b;
+  /* 实心危险按钮专用底色。--danger #ff6b6b 压白字只有 2.78:1(严重不足),
+     压暗到 #bf5050 后为 4.69:1。--danger 本身保持原样, 继续用于
+     描边/图标/文字等不需要承载白字的场合。 */
+  --danger-solid: #bf5050;
+  --danger-soft: rgba(232, 17, 35, 0.16);
+  --danger-border: rgba(232, 17, 35, 0.35);
+  --danger-strong: rgba(232, 17, 35, 0.42);
+  --warn: #e6a23c;
+  --warn-soft: rgba(230, 162, 60, 0.18);
+  --info-soft: rgba(64, 158, 255, 0.16);
+  /* 实心成功按钮底色(审批弹窗的"允许")。
+     白字压原值 #12a05a 只有 3.39:1, 压到 #0f884c 后为 4.52:1。 */
+  --success-solid: #0f884c;
+  --success-solid-hover: #0c7d43;
+  /* 这里原本还有 --info / --success / --purple / --green 四个"裸"语义色,
+     已删除: 它们**零引用**。
+     危险之处不在于多余, 而在于它们让令牌表看起来像有一套完整的
+     语义色板(--danger/--warn/--info/--success/--purple/--green),
+     而实际在用的只有 --danger / --warn 两个, 其余一律走
+     `-soft` / `-on-soft` / `-text` 三档。下一个人要"给成功态换个绿",
+     很自然会写 var(--success) —— 那是一条**没被对比度守卫覆盖**的
+     颜色(守卫只测 `-text` 系列与若干指定组合), 于是可能直接上线
+     一份读不清的文字。
+     真正在用的是 --success-text / --info-text / --purple-text /
+     --green-text, 它们都在 `key_token_pairs` 的测量范围内。 */
+
+  /* ---- 标题栏 (Windows 原生 caption 区) ---- */
+  --titlebar-bg: #111216;
+  --titlebar-fg: #f2f4f8;
+  --titlebar-chip-bg: rgba(255, 255, 255, 0.06);
+  --titlebar-hover: rgba(255, 255, 255, 0.1);
+  --win-close-hover: #e81123;
+
+  /* ---- 遮罩 / 阴影 ---- */
+  --overlay-scrim: rgba(0, 0, 0, 0.72);
+  --shadow-modal: 0 24px 70px rgba(0, 0, 0, 0.6);
+  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.24);
+  --shadow-toast: 0 10px 30px rgba(0, 0, 0, 0.5);
+
+  /* ---- 滚动条 ---- */
+  --scrollbar-thumb: rgba(255, 255, 255, 0.18);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.34);
+
+  /* ---- 层级刻度 (z-index) ----
+   *
+   * 改版前是 5 个裸数字散在各处: 100 / 200 / 300 / 900 / 1000。
+   * 光看数字读不出意图 —— 为什么遮罩是 300 而配对码遮罩是 900?
+   * 谁盖住谁只有把文件全读完才知道。而其中一处是真的**错的**
+   * (见 .modal-mask 的注释), 光看数字根本发现不了。
+   *
+   * 这里按**语义**命名, 数字只作为实现细节:
+   *   titlebar       标题栏 (含可拖拽区与 caption 按钮)
+   *   titlebar-caption  caption 按钮组 —— 必须在标题栏**之上**:
+   *                   它们自己带 pointer-events, 但仍可能被拖拽区盖住
+   *   overlay        通用弹窗遮罩
+   *   overlay-nested 叠加弹窗 (在已有弹窗之上再弹的那层)
+   *   toast          全局提示 —— 永远在最上, 因为它要能在
+   *                   任何模态之上被看见 (含托盘常驻时的完成通知)
+   *
+   * 注意 toast > overlay 是**有意**的: 弹窗打开时用户仍需看到
+   * "传输完成"这类与弹窗无关的通知。
+   */
+  --z-titlebar: 100;
+  --z-titlebar-caption: 200;
+  --z-overlay: 300;
+  --z-overlay-nested: 900;
+  --z-toast: 1000;
+}
+
+[data-theme="light"] {
+  /* 圆角与主题无关，两套主题给同样的值。
+     仍然要在这里**重写一遍**（而不是只靠 :root 继承）：
+     `light_theme_must_override_every_color_token` 这条守卫要求
+     :root 里的每个令牌在浅色块里都有对应项 —— 它存在的理由是
+     防止"新增一个颜色令牌时忘了加浅色值"，而 `var()` 未定义会让
+     声明**直接失效**（不是回落到默认值）。圆角失效的表现是
+     "整个界面变成直角"，一眼可见却极难归因。 */
+  --radius-pill: 999px;
+  --radius-lg: 10px;
+  --radius-md: 6px;
+  --radius-sm: 4px;
+
+  --bg-window: #f3f5f9;
+  --bg-sidebar: #e9edf4;
+  --bg-card: #ffffff;
+  --bg-card-hover: #eef2f8;
+  --bg-elevated: #ffffff;
+  --bg-inset: #f5f7fa;
+  --bg-active: rgba(14, 154, 110, 0.12);
+  --bg-hover-soft: rgba(15, 30, 55, 0.06);
+  --bg-row-soft: rgba(15, 30, 55, 0.04);
+  --track-bg: rgba(15, 30, 55, 0.12);
+  --switch-off: rgba(15, 30, 55, 0.22);
+  /* 开关滑块颜色。
+     浅色主题的关闭态轨道是"半透明深色"(rgba(15,30,55,0.22) 叠在白底上
+     ≈ rgb(202,209,219))。旧实现把滑块写死成 #fff, 于是白滑块贴在浅灰轨道上,
+     对比度极低 —— 这就是"白色主题下按钮纯白"那一类问题在开关上的表现。
+     勾选态轨道是 --accent(绿), 白滑块压绿没问题; 只有关闭态需要额外描边,
+     见 App.vue 里 .fluent-slider:before 的 --switch-knob-ring。 */
+  --switch-knob: #ffffff;
+  --switch-knob-ring: rgba(15, 30, 55, 0.18);
+
+  --drop-border: rgba(15, 30, 55, 0.18);
+  --drop-bg: rgba(255, 255, 255, 0.6);
+  --drop-bg-hover: rgba(14, 154, 110, 0.07);
+
+  --border-subtle: rgba(15, 30, 55, 0.1);
+  --border-strong: rgba(15, 30, 55, 0.22);
+  /* 浅色主题的焦点环压窗口底色(#f3f5f9)为 3.26:1,
+   * 压白色卡片为 3.61:1 —— 两处都过 WCAG 1.4.11 的 3:1。 */
+  --focus-ring: #0e9a6e;
+
+  --accent: #0e9a6e;
+  /* --accent-hover 已删除(零引用): 强调按钮的悬停态走的是
+     `filter: brightness()` 而不是换一个色值。见 :root 同处说明。 */
+  /* 压在 --accent 上的文字色。
+     原为 #ffffff, 但白字压 #0e9a6e 只有 3.58:1(低于 AA 的 4.5:1),
+     这正是"浅色主题下按钮看不清"的来源。改用与深色主题同一套深绿
+     #042417 = 4.62:1, 且**不需要改动品牌色 --accent 本身**。 */
+  --accent-contrast: #042417;
+  --accent-soft: rgba(14, 154, 110, 0.14);
+  --accent-border: rgba(14, 154, 110, 0.32);
+  --accent-glow: rgba(14, 154, 110, 0.28);
+  /* 压在各自 *-soft 底上的**文字**色。浅色主题的 -soft 合成后接近白，
+     品牌色压上去只剩 2.8~3.9:1 —— 状态 chip 的文字基本读不出来。
+     与深色主题同一策略：填充用品牌色，文字另给一个深的。
+     这也解释了为什么这两个令牌在两套主题下方向相反。 */
+  --accent-on-soft: #0a6d4f;
+  --info-on-soft: #14559f;
+  --warn-on-soft: #84530e;
+  --danger-on-soft: #ad2c2c;
+  --success-on-soft: #236f45;
+
+  /* 压在**实心容器**上作**文字**用的颜色。浅色下必须压深。
+     最差的那处是 --bg-sidebar (#e9edf4) —— 而侧栏恰好是品牌色
+     最常当文字用的地方：面包屑链接、文件类型图标、状态标签、速度读数。
+     这也是为什么它与 `-on-soft` 是**两个**令牌：压在"亮色叠层"上
+     和压在"实心容器"上，底色亮度差一档，各要各的值。 */
+  --accent-text: #0a6d4f;
+  --info-text: #18609b;
+  --warn-text: #8f5a10;
+  --danger-text: #c03434;
+  --success-text: #26794a;
+  --purple-text: #6f47a8;
+  --green-text: #2f7d1e;
+
+  --text-primary: #171a20;
+  --text-secondary: #4f586b;
+  /* 原 #7d8799 压在白底上只有 3.62:1。提到 #6e7686 之后压卡片是 4.57:1，
+     但侧栏(#e9edf4)/窗口底(#f3f5f9)/输入框(#f5f7fa) 仍只有 3.89~4.26:1 ——
+     提示文字在这几处最需要看清，偏偏最看不清。压到 #5f6779 = 4.83:1。 */
+  --text-tertiary: #5f6779;
+  --text-on-solid: #ffffff;
+  --text-main: var(--text-primary);
+  --text-dim: var(--text-tertiary);
+
+  /* 浅色下的 chip 底色必须**压深**而不是照搬深色值：
+     深色主题的 rgba(95,208,138,0.16) 叠在白底上几乎看不见，
+     状态就"消失"了 —— 而状态 chip 消失比颜色不协调严重得多。 */
+  --success-soft: rgba(47, 158, 95, 0.14);
+  --success-soft-hover: rgba(47, 158, 95, 0.2);
+  --success-border: rgba(47, 158, 95, 0.3);
+  --warn-border: rgba(181, 118, 26, 0.4);
+
+  --bg-press-strong: rgba(15, 30, 55, 0.16);
+  --bg-inset-strong: rgba(15, 30, 55, 0.05);
+
+  --danger: #d13b3b;
+  /* 白字压 --danger #d13b3b = 4.42:1, 差一点。实心按钮用 #d93a3a = 4.55:1。 */
+  --danger-solid: #d93a3a;
+  --danger-soft: rgba(209, 59, 59, 0.1);
+  --danger-border: rgba(209, 59, 59, 0.3);
+  --danger-strong: rgba(209, 59, 59, 0.2);
+  --warn: #b5761a;
+  --warn-soft: rgba(181, 118, 26, 0.14);
+  --info-soft: rgba(28, 111, 208, 0.12);
+  --success-solid: #0d874a;
+  --success-solid-hover: #0c7d43;
+  /* 与深色块同批删除: --info / --success / --purple / --green 零引用,
+     理由见 :root 里那段说明。浅色块同样不能留, 否则 `light_theme_
+     must_override_every_color_token` 只查"深色有、浅色有没有" ——
+     单边存在反而会让那条守卫的语义变得含糊。 */
+
+  --titlebar-bg: #f7f9fc;
+  --titlebar-fg: #1b1f27;
+  --titlebar-chip-bg: rgba(15, 30, 55, 0.05);
+  --titlebar-hover: rgba(15, 30, 55, 0.08);
+  --win-close-hover: #e81123;
+
+  --overlay-scrim: rgba(23, 26, 32, 0.42);
+  --shadow-modal: 0 24px 70px rgba(23, 26, 32, 0.28);
+  --shadow-card: 0 1px 4px rgba(23, 26, 32, 0.12);
+  --shadow-toast: 0 10px 30px rgba(23, 26, 32, 0.22);
+
+  --scrollbar-thumb: rgba(15, 30, 55, 0.24);
+  --scrollbar-thumb-hover: rgba(15, 30, 55, 0.4);
+
+  /* 层级刻度与主题无关(见 :root 里的说明), 但仍要在这里重写一遍:
+   * 未定义的 var() 会让声明**直接失效**(不是回落到默认值)。 */
+  --z-titlebar: 100;
+  --z-titlebar-caption: 200;
+  --z-overlay: 300;
+  --z-overlay-nested: 900;
+  --z-toast: 1000;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #app {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-family);
+  background-color: var(--bg-window);
+  color: var(--text-primary);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 表单控件统一继承主题,避免系统默认样式(白底黑字)在深色下突兀 */
+input,
+select,
+textarea,
+button {
+  font-family: inherit;
+}
+
+/* ============================================================
+ * 键盘焦点环 (全局兜底)
+ *
+ * 为什么放在**全局**而不是逐个组件写:
+ * 改版前整份样式表只有 2 条 `:focus-visible`(.scope-btn /
+ * .dir-send-btn), 其余 60+ 个可聚焦控件 —— 按钮、芯片、页签、
+ * 图标按钮、面包屑、设备行 —— 全部没有可见焦点指示。键盘用户
+ * Tab 到哪一项根本看不出来, 而这类界面(列表 + 大量小按钮)正是
+ * 最依赖键盘的。
+ *
+ * 为什么用 `:focus-visible` 而不是 `:focus`:
+ * 鼠标点按钮时不该冒出焦点框(Fluent / macOS 都不冒), 但键盘
+ * 导航必须冒。`:focus-visible` 正好是浏览器替我们做的这个区分,
+ * 不要自己用 JS 判断"刚才是不是鼠标点的"。
+ *
+ * `outline` 而不是 `box-shadow`:
+ * outline 由浏览器绘制在元素边框之外, **不会被祖先的
+ * `overflow:hidden` 裁掉**, 也不会被自身背景盖住。本项目里
+ * `.devices-scroll-area` / `.tab-page` / 弹窗都有 overflow,
+ * 用 box-shadow 做焦点环会在滚动容器边缘消失。
+ *
+ * offset 用 `-2px` 而不是 `2px`: 界面里到处是贴边的紧凑控件
+ * (侧栏设备行的隐藏按钮、面包屑、页签), 外扩的焦点框会被
+ * 窗口边界切掉一截 —— 只显示一半的焦点框比不显示更容易误导。
+ * 内扩贴着控件走, 任何位置都完整可见。
+ *
+ * 组件里已有的 `:focus-visible`(.scope-btn / .dir-send-btn)
+ * 因为选择器更具体, 仍然优先生效 —— 这里是**兜底**, 不是覆盖。
+ * ============================================================ */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* ============================================================
+ * 按下反馈 (全局兜底)
+ *
+ * 改版前 60+ 个可点控件里只有 `.btn-fluent-primary` 有 `:active`,
+ * 其余全部按下时纹丝不动 —— 鼠标点了没反应, 用户会怀疑没点上
+ * 于是再点一遍(对"发送"这类动作就是重复发送)。
+ *
+ * 反馈必须**克制**: 只用 filter 变暗, 不用 transform 缩放。
+ * 本界面里按钮常常紧挨着(关闭框里"取消 / 最小化 / 退出"三个
+ * 并排), 一旦缩放就等于告诉用户"我刚刚点了另一个", 比没有
+ * 反馈更糟。
+ * ============================================================ */
+button:active:not(:disabled),
+[role="button"]:active:not([aria-disabled="true"]) { filter: brightness(0.94); }
+button:active:disabled,
+[role="button"]:active[aria-disabled="true"] { filter: none; }
+
+/* 同理, 把散落在组件里的 `outline: none` 兜住:
+ * 输入框靠 border-color + box-shadow 表达焦点, 但当它落在
+ * 与 border 同色的底上时那条线索会消失。这里保证键盘焦点
+ * 至少还有一条可见路径。 */
+.standard-text-input:focus-visible,
+.standard-select:focus-visible,
+.code-pin-input:focus-visible,
+.code-prompt-input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* ============================================================
+ * 动效降级 (WCAG 2.3.3 Animation from Interactions)
+ *
+ * 界面里有两处**无限循环**动画: 搜索雷达的 `pulse` 2.5s 扩散环,
+ * 以及刷新按钮的 `spin`。前庭功能障碍者面对持续脉动的光圈会
+ * 诱发不适, 这不是"偏好"问题而是健康问题, 所以一旦用户在
+ * 系统里声明了 reduced-motion 就必须真的停下来 ——
+ * 不是把时长调短, 而是**不再动**。
+ *
+ * 进度条(.speed-dock-fill / .pin-countdown-fill)的 width 过渡
+ * 不在禁用之列: 它表达的是"传输进行到哪", 是信息而非装饰,
+ * 停掉会让用户以为传输卡住了。
+ * ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  .radar-pulse-ring {
+    animation: none;
+  }
+  /* 骨架的呼吸同理：它一直在动，而加载可能持续好几秒（跨网络列目录）。
+   * 停掉之后骨架变成一块静态灰条 —— 形状信息（"这里会出现一个文件行"）
+   * 仍然保留，只是不再起伏。 */
+  .skeleton-block {
+    animation: none;
+    opacity: 0.6;
+  }
+  .spinning,
+  .ph-spin {
+    animation: none;
+  }
+  .toast-fade-enter-active,
+  .toast-fade-leave-active {
+    transition: opacity 0.2s;
+    transform: none;
+  }
+  .toast-fade-enter-from,
+  .toast-fade-leave-to {
+    transform: translateX(-50%);
+  }
+}
+
+/* Custom Delicate Scrollbars for Inner Lists Only */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}

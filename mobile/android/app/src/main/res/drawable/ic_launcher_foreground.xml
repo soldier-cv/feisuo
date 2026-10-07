@@ -1,0 +1,28 @@
+<!--
+  启动图标前景: 白色"飞梭"标志。
+  108x108 画布, 内容限制在中间 72x72 安全区内 (即 18~90)。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 纸飞机主体 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,30 L78,40 L54,50 L30,40 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M36,50 L54,58 L54,80 L36,66 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M72,50 L54,58 L54,80 L72,66 Z" />
+    <!-- 尾部速度线 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M40,72 L50,78 L50,81 L40,75 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M48,80 L56,85 L56,88 L48,83 Z" />
+</vector>

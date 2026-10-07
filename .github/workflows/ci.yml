@@ -1,0 +1,382 @@
+name: CI
+
+# push / PR：全量编译 + 前端类型检查 + 守卫测试，不发 Release
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: windows-latest
+    env:
+      # 下面几个检查脚本的输出全是中文（给读 CI 日志的人看）。
+      # GitHub 的 windows runner 是**英文** Windows, stdout 默认 cp1252,
+      # `print("对比度检查")` 会抛 UnicodeEncodeError, 脚本以退出码 1 结束 ——
+      # 于是 5 个检查步骤全红, 而被检查的代码完全正确。
+      # 实测复现: 强制 PYTHONIOENCODING=cp1252 跑 check-contrast.py 即崩。
+      #
+      # 脚本内部已各自调用 `scripts/_ci_utf8.py` 的 `force_utf8_stdout()`,
+      # 那是真正可靠的修法 —— 本地手动跑、别的机器上跑都覆盖得到。
+      # 这里再加一道 belt-and-braces, 覆盖将来新增而忘了加固的脚本。
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+          # ⚠️ 这里**不能**写 `key:`。Swatinem/rust-cache 没有 `key` 输入
+          # （它有 `prefix-key` / `shared-key`），传 `key` 只会产生一条
+          # "unexpected input" 警告并且**完全不影响**缓存命中 ——
+          # 看起来配了缓存，实际每次都是冷构建。
+          prefix-key: ci
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # ⚠️ 必须锁**具体版本**，不能写 `version: 9`。
+          #
+          # 浮动 major 意味着 pnpm 10 发布后 CI 自动升级，而 pnpm 10 的
+          # lockfile 格式与 9 **不兼容** —— `pnpm install --frozen-lockfile`
+          # 会直接失败，报的是"lockfile 不满足"，看起来像依赖写错了，
+          # 实际是工具链自己变了。
+          #
+          # 这个版本号与 `ui/pnpm-lock.yaml` 的 `lockfileVersion` 配套：
+          # 升级 pnpm 时必须同时重新生成 lockfile，否则就是上面那个死结。
+          # 本机实测版本同为 9.15.0。
+          version: 9.15.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # vite 6 要求 Node ^18.0.0 || ^20.0.0 || >=22.0.0。
+          # 20 是这个区间里最稳的一档；升到 22+ 之前先在这里确认一遍。
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      # 前端必须先构建: tauri.conf.json 的 frontendDist 指向 ui/dist，
+      # 目录不存在时 tauri-build 在编译期直接失败
+      - name: Install UI dependencies
+        run: pnpm --dir ui install --frozen-lockfile
+
+      - name: Build UI (vue-tsc 类型检查 + vite 打包)
+        run: pnpm --dir ui build
+
+      # vite 对游离声明只报 warning，而 CSS 解析器会**丢弃**它并继续解析 ——
+      # 构建照样成功、界面大体正常，只有那一条规则静默失效。
+      # 本仓库实际踩过 8 处（迁移硬编码颜色时误删选择器行），症状是
+      # 「只有某个交互不对」，极难联想到是语法坏了。所以单独兜一道。
+      - name: Check for stray CSS declarations
+        run: python scripts/check-css-stray-declarations.py
+
+      # 对比度：两套主题都要达标，且**做了 alpha 合成**。
+      #
+      # 浅色主题是用户可点的真实功能，而品牌色当**文字**用时到处不达标
+      # （压在 --bg-sidebar 上只有 3.05:1、压在 *-soft 叠层上 2.81:1），
+      # 而那些位置恰恰是面包屑链接、文件类型图标、状态标签、速度读数 ——
+      # 最需要看清的地方。现已引入 `--*-on-soft` / `--*-text` 两组令牌。
+      #
+      # 脚本必须**先做 alpha 合成**：把 rgba 当不透明色算会得到一堆
+      # `1.00` 的荒谬结果，一屏假警报等于没有检查。
+      - name: Check contrast in both themes
+        run: python scripts/check-contrast.py
+
+      # 这些检查脚本输出全是中文。英文 Windows / GitHub runner 的 stdout
+      # 默认 cp1252, 中文会抛 UnicodeEncodeError -> 退出码 1 ->
+      # **5 个检查步骤全红, 而被检查的代码完全正确**。
+      # 脚本内部已各自加固, 这一步确认没有新增脚本漏掉。
+      - name: Check CI scripts hardened for stdout encoding
+        run: python scripts/check-ci-encoding.py
+
+      # （原先此处有两个步骤，用 `scripts/check-ps1-encoding.py`
+      #   校验 build.ps1 / build-native.ps1 能否被 PowerShell 5.1 解析。
+      #   那两个脚本已按用户要求删除，改为手动执行命令 —— 见 README「手动编译」。
+      #   一并删掉的是 check-ps1-encoding.py：它守的正是这两个文件，
+      #   文件不在后它会**一路绿着**却什么也没检查，是最坏的那种守卫。）
+
+      # 入口一致性：同一个动作在不同入口下不许有行为差异。
+      #
+      # 这个项目反复出现的失效模式不是"某个功能坏了"，而是
+      # **同一个动作在不同入口下行为不同**：准入检查四份拷贝（两份不完整）、
+      # 落点三条路径各带各的（有一条压根没带）、撤销窗口只有一条路径有、
+      # 直发成功无条件清空整个待发清单。都不会报错也不会崩，
+      # 界面照样显示"发送成功"，而行为与隔壁入口不同。
+      - name: Audit UI entry-point invariants
+        run: python scripts/audit-ui-invariant.py
+
+      # 先证明守卫自己没坏：把已知缺陷形态喂进去，必须**每一条都红**。
+      # 不做这步，一个解析失效的守卫会一直绿，而 CI 显示一切正常 ——
+      # 那比没有守卫更危险。历史教训见脚本注释里的三条（内联对象类型、
+      # 按变量名匹配、只查"有没有调"不查"在哪里调"）。
+      - name: Selftest the UI invariant guard
+        run: python scripts/audit-ui-invariant.py --selftest
+
+      - name: Verify UI build output
+        shell: pwsh
+        run: |
+          $index = 'ui/dist/index.html'
+          if (-not (Test-Path $index)) { throw "UI 产物缺失: $index" }
+          Write-Host "OK $index ($((Get-Item $index).Length) bytes)"
+
+      # invoke 参数 / Tauri 命令签名对齐。
+      #
+      # Tauri v2 的 `invoke` 按**已声明的参数名**反序列化，多余的 key
+      # 被**静默丢弃**：不报错、不警告、不进日志。所以"前端加了参数、
+      # 后端忘了加"在运行期完全隐形 —— 症状是"功能没生效"，
+      # 而不是任何可被发现的错误。
+      #
+      # 本仓库真实中过：`send_files` 少声明 `dest_sub_path`，
+      # 于是穿梭发送"落到对方地址栏当前目录"从未在桌面端生效过，
+      # 而界面上地址栏停在哪一层、按钮提示写去哪一层，全都看不出来。
+      #
+      # 这一步不需要编译，秒级完成，代价与收益不成比例地划算。
+      # 先跑自检：审计工具自己的解析器坏了会输出"没发现问题"，
+      # 那种情况下这一步比没有更糟。
+      - name: Audit invoke args against Tauri command signatures
+        run: |
+          python scripts/audit-invoke-args.py --selftest
+          if ($LASTEXITCODE -ne 0) { throw "审计工具自检失败，其输出不可信" }
+          python scripts/audit-invoke-args.py --strict
+          if ($LASTEXITCODE -ne 0) { throw "存在 invoke 断链，见上方报告" }
+
+      # 界面上的「解除配对」必须走**双向**通道（§14.5）。
+      #
+      # 为什么需要独立一步：`removeTrustedDevice`（纯本地 DELETE）
+      # 仍然存在且仍被 bridge 导出，而它与新语义的差别不是实现细节 ——
+      # 它就是"只改本地一半"，正是本轮要消灭的那个缺陷。
+      # 而这类接线错误 `vue-tsc` **抓不到**（两边都有定义、类型都对），
+      # `cargo test` 也抓不到（core 侧是好的）。
+      - name: Guard bidirectional unpair wiring
+        run: |
+          python scripts/guard_ui_unpair.py
+          if ($LASTEXITCODE -ne 0) { throw "解除配对接线被改回单向, 见上方报告" }
+
+      # `blocked`（黑名单）维度是**实现期自己加的**，原始需求里没有
+      # （`grep -i blacklist 735dd66` 零命中，§14.0 有溯源）。
+      # 按结论它应当整体删除。这条守卫盯住**写入方数量**：
+      # 每多一个「让设备变成被阻止」的入口，就是给一个
+      # 需求从未要求过的状态增加一条可达路径。
+      #
+      # 它**不是**断言"这个维度不该存在"—— 那是 §14.11 决策 1 的事，
+      # 还没拍板。少一个写入方同样要报：那是功能被悄悄删掉。
+      # 需求完成度取证：把需求侧的每一条对着**代码**逐项核对。
+      # 这不是文档检查 —— 它读的全是实现（协议帧 / handler / 命令注册 /
+      # 守卫测试），任何一条"看起来做了"而实际没接上的都会在这里现形。
+      - name: Audit trust requirements against code
+        run: |
+          python scripts/audit_trust_requirements.py
+          if ($LASTEXITCODE -ne 0) { throw "需求 3 未真正端到端达成, 见上方取证" }
+
+      - name: Guard blocked dimension from coming back
+        # 判据是"20 类标记必须全为 0"，不是"写入方数量不变"——
+        # 该维度已按 DESIGN_TRUST_SHUTTLE.md §14.11 决策 1 整体删除。
+        run: |
+          python scripts/guard_blocked_dimension.py
+          if ($LASTEXITCODE -ne 0) { throw "blocked 维度被重新引入, 见上方报告" }
+
+      - name: Guard against a local-only unpair path coming back
+        # 「一方解开配对，双方都变成不信任」——需求只有一条解除配对语义。
+        # 源码标记守卫只盯名字；"不许删行"由 core 里的行为测试
+        # (unpair_local_only_keeps_the_row_and_the_hidden_preference) 负责，
+        # 两者缺一不可。
+        run: |
+          python scripts/guard_no_local_only_unpair.py
+          if ($LASTEXITCODE -ne 0) { throw "本地单向解除配对通路被重新引入, 见上方报告" }
+
+      - name: Guard session-grant UI wiring
+        # §2.3.1「N 分钟内免重复确认」。core 侧有行为测试，
+        # 这里盯**界面侧** —— 因为 core 全对而界面没接 = 用户在
+        # 不知情的情况下被放宽了信任，那比没有这个功能更糟。
+        run: |
+          python scripts/guard_session_grant_ui.py
+          if ($LASTEXITCODE -ne 0) { throw "短期授权的界面接线缺失, 见上方报告" }
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets --locked
+
+      # 守卫测试（wiring_guard / update_guard / android_guard / os_shim 等）
+      # 跑在干净的 CI 机器上，不存在污染本地环境的风险，必须执行 ——
+      # 它们是把"后端加了能力、前端忘接线"变成编译失败的关键防线。
+      #
+      # `--locked` 是刻意的：Cargo.lock **已入库**，而 Cargo.toml 的依赖
+      # 声明与 lock 不一致时，不加 `--locked` 会让 cargo **悄悄重新解析**
+      # 并在 CI 里改写 lock —— 于是"忘了提交 lock"这件事永远不会暴露，
+      # 而本地和 CI 用的依赖版本已经开始分叉。加了它，drift 直接失败。
+      - name: Run test suite
+        run: cargo test --workspace --locked
+
+  # ---------------------------------------------------------------------------
+  # Android：把 arm64 目标真正编一遍
+  #
+  # 为什么要单独一个 job：`check` 跑在 Windows 上，而 **Windows 上根本不编译
+  # `#[cfg(unix)]` / `#[cfg(target_os = "android")]` 的代码**。Android 走
+  # `unix` 分支，所以 `core/src/storage/chunk_store.rs` 里那个
+  # `Ok(file.read_at(..))`（实际在编 `Result<Result<usize, _>>`）在 Windows 上
+  # 永远是零错误 —— 直到真的去编 Android 目标才暴露。
+  #
+  # 也就是说：本仓库**曾经**有一个编译错误，能通过全部现有 CI，因为没有任何
+  # 一个 job 编译过移动端。加这个 job 就是为了让那类错误没有藏身之处。
+  #
+  # 产物只作为 artifact 上传，**不发布**（发版由 release.yml 负责，
+  # 且 release.yml 只发 Windows 绿色版）。
+  # ---------------------------------------------------------------------------
+  android:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+          prefix-key: android
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # NDK 由 sdkmanager 装，版本写死在这里。
+      # 为什么写死而不是"用最新的"：`.so` 与 NDK 版本绑定，而 CI 要的是
+      # **可复现**。写死 + 升级时手工改这一行，比每次跑都可能不一样的
+      # "latest" 更容易定位"是哪次 NDK 升级导致的变化"。
+      - name: Install Android NDK
+        shell: pwsh
+        run: |
+          $sdk = $env:ANDROID_SDK_ROOT
+          if (-not $sdk) { $sdk = $env:ANDROID_HOME }
+          if (-not $sdk) { throw "ANDROID_SDK_ROOT / ANDROID_HOME 都没设置" }
+          $ndkVersion = '30.0.16248370'
+          $sdkmanager = Join-Path $sdk 'cmdline-tools/latest/bin/sdkmanager.bat'
+          if (-not (Test-Path $sdkmanager)) {
+            throw "找不到 sdkmanager: $sdkmanager（镜像需要装 cmdline-tools）"
+          }
+          # 先接受许可。**这是 sdkmanager 最常见的失败原因**，报错是
+          # "Failed to install... license 'android-sdk-license' has not been accepted"，
+          # 而 `sdkmanager --licenses` 是交互式的 —— 不喂 yes 它会直接挂在那儿。
+          # 跑一次的成本是几秒，收益是消除一整类"昨天还好好的"失败。
+          'y' | & $sdkmanager --licenses | Out-Null
+          & $sdkmanager "ndk;$ndkVersion"
+          if ($LASTEXITCODE -ne 0) { throw "安装 NDK $ndkVersion 失败" }
+          $ndkHome = Join-Path $sdk "ndk/$ndkVersion"
+          if (-not (Test-Path (Join-Path $ndkHome 'source.properties'))) {
+            throw "NDK 目录存在但缺少 source.properties（安装不完整）: $ndkHome"
+          }
+          # 让下一步的交叉编译能找到它：那一步直接读 ANDROID_NDK_HOME,
+          # 两个变量都写进 GITHUB_ENV，以防后续步骤用到。
+          # 而交叉编译是下一个步骤，所以顺序正确。
+          "ANDROID_NDK_HOME=$ndkHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ANDROID_NDK_ROOT=$ndkHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "NDK: $ndkHome"
+
+      # 把 core 交叉编译成 arm64 的 .so。
+      #
+      # 为什么这段曾经是 build-native.ps1：linker 路径**必然**含 NDK 的
+      # 安装位置与版本，每台机器都不同，所以 `.cargo/config.toml`
+      # 属于**构建产物**而不是源码，不能提交。
+      #
+      # 现在内联到 CI 里，是因为 CI 的 NDK 路径是**已知且确定**的
+      # （上一步刚装好并校验过 source.properties），不需要那套
+      # "扫描 side-by-side 目录、比版本号"的探测逻辑。
+      # 本地要交叉编译请照 README「手动编译」一节操作。
+      - name: Cross-compile libfeisuo_core.so
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 显式检查：pwsh 默认不会因非零退出码中断后续命令，
+          # 那样 cargo 失败会被当成"成功"，最后报一个无关的错。
+          if (-not $env:ANDROID_NDK_HOME) { throw 'ANDROID_NDK_HOME 未设置（上一步应写入 GITHUB_ENV）' }
+          $ndk = $env:ANDROID_NDK_HOME
+          $triple = 'aarch64-linux-android'
+          $api = 21   # minSdk 是 26；取更低无意义，取更高老系统直接加载失败
+          $binDir = Join-Path $ndk "toolchains/llvm/prebuilt/windows-x86_64/bin"
+          $linker = Join-Path $binDir "aarch64-linux-android$api-clang.cmd"
+          if (-not (Test-Path $linker)) { throw "找不到 NDK linker: $linker" }
+          $llvmAr = Join-Path $binDir 'llvm-ar.exe'
+          if (-not (Test-Path $llvmAr)) { $llvmAr = Join-Path $binDir 'llvm-ar' }
+
+          # 路径一律用 TOML **literal string**（单引号）。
+          # basic string（双引号）里 `\` 是转义符，`C:\Users\...` 的
+          # `\U` 不是合法转义，报错还指不到真正原因。
+          $q = { param($p) if ($p.Contains("'")) { throw "路径含单引号: $p" }; "'$p'" }
+          $toml = @(
+            '# 由 CI 内联生成，请勿手工编辑；也不该提交（含本机 NDK 路径）。',
+            "# NDK: $ndk",
+            '',
+            "[target.$triple]",
+            "linker = $(&$q $linker)",
+            $(if (Test-Path $llvmAr) { "ar = $(&$q $llvmAr)" }),
+            'rustflags = [',
+            '    "-C",',
+            '    "link-arg=-Wl,-z,max-page-size=16384",',
+            ']',
+            '',
+            '# cc-rs（rusqlite bundled 会编 C 代码）需要在 PATH 之外拿到目标平台 clang',
+            '[env]',
+            "CC_$(($triple -replace '-','_').ToUpper()) = $(&$q $linker)",
+            $(if (Test-Path $llvmAr) { "AR_$(($triple -replace '-','_').ToUpper()) = $(&$q $llvmAr)" }),
+            ''
+          ) -join "`n"
+
+          New-Item -ItemType Directory -Force -Path '.cargo' | Out-Null
+          Set-Content -LiteralPath '.cargo/config.toml' -Value $toml -Encoding utf8
+
+          & cargo build -p feisuo-core --target $triple --profile release --message-format short
+          if ($LASTEXITCODE -ne 0) { throw "cargo build 失败（退出码 $LASTEXITCODE）" }
+
+          $dest = 'mobile/android/app/src/main/jniLibs/arm64-v8a'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Copy-Item "target/$triple/release/libfeisuo_core.so" "$dest/libfeisuo_core.so" -Force
+          $so = "$dest/libfeisuo_core.so"
+          if (-not (Test-Path $so)) { throw "原生库缺失: $so" }
+          Write-Host "OK $so ($([math]::Round((Get-Item $so).Length/1MB,2)) MB)"
+
+      - name: Build debug APK
+        shell: pwsh
+        working-directory: mobile/android
+        run: |
+          .\gradlew.bat assembleDebug --console=plain
+          if ($LASTEXITCODE -ne 0) { throw "assembleDebug 失败" }
+          $apk = Get-ChildItem 'app/build/outputs/apk/debug' -Filter *.apk -ErrorAction SilentlyContinue |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $apk) { throw '没找到 APK 产物' }
+          Write-Host "APK: $($apk.FullName) ($([math]::Round($apk.Length/1MB,2)) MB)"
+          # 体积下限守卫：APK 必须含 lib/<abi>/libfeisuo_core.so。
+          # 低于 1 MB 基本等于"原生库没打进去" —— 而那种情况 Gradle
+          # 依然会报 BUILD SUCCESSFUL，编译期与运行期都看不出来，
+          # 只在真机上表现为 UnsatisfiedLinkError。
+          if ($apk.Length -lt 1MB) { throw "APK 只有 $([math]::Round($apk.Length/1KB,1)) KB，原生库很可能没打进去" }
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: feisuo-android-debug-apk
+          path: mobile/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
+

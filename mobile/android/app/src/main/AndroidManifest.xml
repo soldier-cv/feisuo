@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  注意: 本文件不允许出现 package 属性。
+  AGP 8+ 会把它视为硬错误, 包名统一由 app/build.gradle.kts 的 namespace 提供。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Network & Multicast Permissions -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!--
+      connectedDevice 类型前台服务的运行时前置权限之一(任意Of即可),
+      绝不能当"多余权限"删掉, 否则 startForeground(connectedDevice) 直接抛 SecurityException。
+    -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Storage Permissions -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+
+    <!-- Autostart & Persistence Permissions -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
+      ## 为什么这里只需要 MAIN/LAUNCHER
+
+      Android 11+ 的包可见性（package visibility）会过滤掉查询结果。官方
+      "自动可见"清单第一条是 **"Your own app"（自己的应用）**，此外还包括
+      启动器、输入法、系统设置等系统组件。本项目只有两处查询，且都在范围内：
+
+      1. `FeisuoDaemonService` 里的 `getLaunchIntentForPackage(packageName)`
+         —— 查的是**本应用自己**，自动可见；
+      2. `MainActivity.requestIgnoreBatteryOptimizations` 里的
+         `direct.resolveActivity(packageManager)` —— 查的是**系统设置**，
+         属于自动可见的系统组件。
+
+      所以 NSD 那条 `<queries>` 已删除：**本项目根本不用 NsdManager / mDNS**。
+      设备发现是自研的 UDP 组播 + 定向广播（`core/src/discovery/mod.rs` 的
+      `DiscoveryService`），走固定端口的裸 socket，不经 Android 的 NSD 框架，
+      全仓检索 `NsdManager|discoverServices` 零命中。
+
+      留着那条声明不会报错，但它会让人以为发现走 NSD，从而在
+      "为什么 NSD 一个服务都发现不到" 上浪费排查时间（其实与本项目无关）。
+
+      ⚠️ 若将来引入 NSD（`NsdManager.discoverServices`），**必须**把
+      `android.net.nsd.NSD_SERVICE` 加回这里 —— 那时没有它就是
+      "一台设备都发现不到，且没有任何报错"。
+
+      参考: https://developer.android.com/training/package-visibility
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Feisuo">
+
+        <!--
+          LAUNCHER 入口。
+          缺了它 getLaunchIntentForPackage() 必然返回 null, 常驻通知的
+          PendingIntent 会包住一个 null Intent, 用户点通知即崩溃;
+          同时用户无法打开主界面 -> 无法申请通知权限 -> 无法引导电池优化白名单。
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.Feisuo">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Boot / App Update Receiver -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <!--
+                  更新安装时系统会主动 kill 进程, START_STICKY 不会重新拉起,
+                  自连能力会静默消失直到下次重启手机。
+                -->
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          Persistent Foreground Service.
+
+          为什么是 connectedDevice 而不是 dataSync:
+          Android 15 (targetSdk 35) 给 **dataSync** 与 **mediaProcessing**
+          两类各加了"24 小时内累计 6 小时"的硬上限, 超时且未重写
+          Service.onTimeout() 会抛 RemoteServiceException 直接杀掉进程。
+          与"开机自连 7x24 无人值守"的产品承诺直接互斥。
+
+          ⚠️ 那个 6 小时上限**只**适用于 dataSync / mediaProcessing 这两类
+          (两者各自独立计时, 见
+          https://developer.android.com/develop/background-work/services/fgs/timeout),
+          **connectedDevice 没有这个限制** —— 所以本服务不需要 onTimeout()。
+
+          这条注释以前写的是"只保留 connectedDevice: dataSync 在 Android 15 上有
+          6 小时上限", 少了"哪一类"的前提, 容易被读成 connectedDevice 也受限,
+          进而有人去加一个不必要的 onTimeout。
+        -->
+        <service
+            android:name=".FeisuoDaemonService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice"
+            android:stopWithTask="false" />
+
+        <!-- System Share Target Activity -->
+        <activity
+            android:name=".ShareTargetActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="application/*" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="application/*" />
+            </intent-filter>
+        </activity>
+
+    </application>
+</manifest>

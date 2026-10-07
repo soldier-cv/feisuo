@@ -1,0 +1,22 @@
+<!--
+  常驻通知小图标: 必须是**纯白单色**矢量。
+  通知小图标会被系统按 alpha 通道重新着色, 带颜色会被渲染成色块。
+  (框架内置的 stat_notify_sync 在部分 ROM 上会被裁切变形, 所以用自己的。)
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,2 L22,5.5 L12,9 L2,5.5 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M5,8.5 L12,11.5 L12,21 L5,16.5 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M19,8.5 L12,11.5 L12,21 L19,16.5 Z" />
+</vector>

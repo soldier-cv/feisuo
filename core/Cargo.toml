@@ -1,0 +1,74 @@
+[package]
+name = "feisuo-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Core network discovery, security, and high-throughput transfer engine for Feisuo"
+
+[lib]
+# rlib 供桌面端 (Tauri) 直接链接;
+# cdylib 是 Android 端 JNI 的必需产物 —— 缺了它 cargo 只会产出 .rlib,
+# 打包时找不到 libfeisuo_core.so, 而编译全程无任何报错。
+name = "feisuo_core"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+tokio = { version = "1.43", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+blake3 = "1.5"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"
+rusqlite = { version = "0.33", features = ["bundled"] }
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+local-ip-address = "0.6"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6.0"
+hex = "0.4"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+
+# 显式 socket buffer 设置与回读（§9.2）。tokio 的 TcpStream 只暴露
+# set_nodelay, 设不了 SO_SNDBUF/SO_RCVBUF —— 而高 RTT 链路上
+# 缓冲区不足正是"带宽够但速度上不去"的主因（见 transport/sockopt.rs）。
+socket2 = { version = "0.5", features = ["all"] }
+if-addrs = "0.15.0"
+
+# 可浏览卷枚举（§7.2 / §7.4）。
+# GetLogicalDrives / GetDriveTypeW / GetVolumeInformationW / GetDiskFreeSpaceExW
+# 全部在 Win32_Storage_FileSystem 下。
+#
+# 常用目录（桌面 / 下载 / 文档…）另需 SHGetKnownFolderPath + FOLDERID_*：
+#   - Win32_UI_Shell 提供这两个（注意：**不是** Win32_System_Com_Shell ——
+#     windows 0.61 里没有那个 feature，写了会直接选不出版本）；
+#   - Win32_System_Com 提供 CoTaskMemFree —— SHGetKnownFolderPath 分配的
+#     PWSTR 必须用它释放，否则**每次调用泄漏一段内存**（反复切目录会累积）。
+#
+# ⚠️ 不能用 `%USERPROFILE%\\Desktop` 拼路径。两类用户会直接踩空：
+#   ① 桌面/文档/图片常被重定向到 OneDrive —— 真路径是
+#      `C:\\Users\\<u>\\OneDrive\\桌面`，不是 `C:\\Users\\<u>\\Desktop`；
+#   ② 目录名是**本地化**的 —— 中文系统叫 `文档`，不是 `Documents`。
+# 这两类在真实用户里占比很高，写死等于对相当一部分用户直接失效。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
+# 仅 Android 端 JNI 使用。`jni` crate 在加载时需要 dlopen libjvm,
+# 桌面上链接它会失败, 所以必须按 target 限定。
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
+# 仅用于 tests/ 下的协议集成验证, 不进产物
+[dev-dependencies]
+tokio = { version = "1.43", features = ["full"] }
+serde_json = "1.0"
+uuid = { version = "1.11", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+# 集成测试默认安静, 设 FEISUO_TEST_LOG=1 时才输出 —— 否则 30 个用例的
+# 日志会互相刷屏, 真正有用的错误反而被埋掉
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

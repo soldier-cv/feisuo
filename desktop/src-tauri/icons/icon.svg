@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Background glow filter -->
+    <filter id="emerald-glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="16" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    
+    <!-- Shuttle shadow filter -->
+    <filter id="plane-shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="12" dy="16" stdDeviation="14" flood-color="#000000" flood-opacity="0.65" />
+    </filter>
+
+    <!-- Radial Cyan-Emerald Inner Ambient -->
+    <radialGradient id="inner-ambient" cx="65%" cy="35%" r="60%">
+      <stop offset="0%" stop-color="#0ea5e9" stop-opacity="0.35" />
+      <stop offset="60%" stop-color="#10b981" stop-opacity="0.15" />
+      <stop offset="100%" stop-color="#0b1322" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Emerald Stroke Gradient -->
+    <linearGradient id="squircle-stroke" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00dc82" stop-opacity="0.85" />
+      <stop offset="100%" stop-color="#047857" stop-opacity="0.4" />
+    </linearGradient>
+
+    <!-- Left Wing Gradient -->
+    <linearGradient id="wing-left-grad" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#ecfdf5" />
+    </linearGradient>
+
+    <!-- Right Wing Gradient -->
+    <linearGradient id="wing-right-grad" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#00dc82" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+  </defs>
+
+  <!-- Ambient Outer Glow -->
+  <rect x="42" y="42" width="428" height="428" rx="105" fill="none" stroke="#00dc82" stroke-width="8" stroke-opacity="0.35" filter="url(#emerald-glow)" />
+
+  <!-- Base Squircle -->
+  <rect x="42" y="42" width="428" height="428" rx="105" fill="#0b1322" stroke="url(#squircle-stroke)" stroke-width="6" />
+
+  <!-- Inner Ambient Glow -->
+  <rect x="42" y="42" width="428" height="428" rx="105" fill="url(#inner-ambient)" />
+
+  <!-- Supersonic Paper Dart (Plane) Group with Shadow -->
+  <g filter="url(#plane-shadow)">
+    <!-- A. Left Outer Facet (Dark Emerald Backlight) -->
+    <polygon points="394,117.5 102.5,297 210,266" fill="#057855" />
+
+    <!-- B. Right Outer Facet (Deep Emerald Shadow) -->
+    <polygon points="394,117.5 245.5,302 215,409.5" fill="#045a41" />
+
+    <!-- C. Left Main Wing (Pure Tech White to Aurora Tint) -->
+    <polygon points="394,117.5 210,266 148.5,363.5" fill="url(#wing-left-grad)" />
+
+    <!-- D. Right Main Wing (High Saturation Emerald #00dc82) -->
+    <polygon points="394,117.5 148.5,363.5 245.5,302" fill="url(#wing-right-grad)" />
+
+    <!-- E. Crisp Edge Highlights -->
+    <!-- Spine Center Line -->
+    <line x1="394" y1="117.5" x2="148.5" y2="363.5" stroke="#ffffff" stroke-width="4" stroke-linecap="round" />
+    <!-- Left Wing Edge -->
+    <line x1="394" y1="117.5" x2="102.5" y2="297" stroke="#ffffff" stroke-width="2.5" stroke-opacity="0.85" stroke-linecap="round" />
+    <!-- Right Wing Edge -->
+    <line x1="394" y1="117.5" x2="215" y2="409.5" stroke="#34d399" stroke-width="2.5" stroke-opacity="0.9" stroke-linecap="round" />
+    <!-- Fold Ribs -->
+    <line x1="148.5" y1="363.5" x2="245.5" y2="302" stroke="#00dc82" stroke-width="2" stroke-opacity="0.8" />
+    <line x1="148.5" y1="363.5" x2="210" y2="266" stroke="#d1fae5" stroke-width="2" stroke-opacity="0.8" />
+  </g>
+</svg>

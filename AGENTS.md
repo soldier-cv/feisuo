@@ -17,7 +17,7 @@
    - 首次绑定通过扫码或 6 位 PIN 码交换 Ed25519 设备指纹；
    - 之后局域网相遇基于非对称签名进行双向静默认证（Mutual Auth），全程零弹窗确认。
 3. **无人值守，安全落盘**：
-   - 受信设备发送的文件直接写入预设目标文件夹（Windows: `~/飞梭/`，Android: `/sdcard/Download/飞梭/` 或相册自动注册）；
+   - 受信设备发送的文件直接写入预设目标文件夹（Windows: `~/feisuo/`，Android: `/sdcard/Download/feisuo/` 或相册自动注册）；
    - 同名文件自动增加序号递增保护（如 `file (1).ext`），绝不覆盖原有数据。
 4. **极速高吞吐**：
    - 底层由 Rust + QUIC / TCP 零拷贝多路复用驱动，榨干千兆局域网与 Wi-Fi 6 极限吞吐（110MB/s+）。
@@ -53,7 +53,6 @@
 ```
 feisuo/
 ├── AGENTS.md                  # 本文件 (Agent 核心协作规范)
-├── AGETN.md                   # 兼容别名软链文件
 ├── FRAMEWORK_DESIGN.md        # 完整系统架构设计白皮书
 ├── README.md                  # 项目概览与原型使用指南
 ├── index.html                 # 多端交互原型 (Windows/Android/联动)
@@ -97,3 +96,65 @@ feisuo/
    - 桌面端：验证关闭窗口进托盘，开机以 `--daemon` 参数静默拉起；
    - 移动端：验证前台通知常驻与开机广播监听；
 4. **提交约束**：完成功能阶段开发后，向用户汇报进展，**等待用户明确发出“提交”指令后才执行 Git 操作**。
+
+---
+
+## 5. CI / 发版 / Gitee 镜像规范
+
+工程位于 `.github/workflows/`，与 QuickClip 保持同构，便于统一维护心智模型。
+
+| 工作流 | 触发 | 职责 |
+| :--- | :--- | :--- |
+| `ci.yml` | push / PR 到 `main` | 装 Rust + pnpm → 构建 UI（含 `vue-tsc` 类型检查）→ `cargo check --workspace --all-targets` → `cargo test --workspace` |
+| `release.yml` | tag `v*` / 手动 | 打版本号 → 构建 → 上传 `Feisuo-win-x64.exe` → 发 GitHub Release → 同步 Gitee Release |
+| `sync-gitee.yml` | push 到 `main` / tag `v*` / 手动 | 镜像分支与全部 Tag 到 Gitee |
+
+### 🔴 规则 5：Gitee 镜像（强制）
+
+- 仓库地址**硬编码**在 workflow 与客户端代码里，改仓库名必须同步改这三处：
+  - `.github/workflows/sync-gitee.yml`（分支/Tag 镜像）
+  - `.github/workflows/release.yml`（Release 与附件）
+  - `desktop/src-tauri/src/updater.rs`（客户端检查更新的三条通道）
+- **这三处的一致性已有守卫**：
+  `update_guard::repo_identifiers_must_be_consistent_across_the_three_places`
+  会核对仓库标识在三个文件里同时出现、附件名在 `release.yml` 里一致、
+  以及 Gitee 推送目标与客户端的 Gitee 通道同源。
+  写在这里的"必须同步改"曾经只是文档——**改漏的后果全是静默的**
+  （镜像推到别处 / 发版传到别处 / 客户端永远停在旧版本且界面上看不出异常）。
+- **`GITEE_TOKEN` 必须配置在 GitHub 仓库 Secrets**，否则同步会**硬失败**
+  （`sync-gitee.yml` 有意不做静默跳过：静默跳过会让"镜像没生效"变成一件
+  几个月后才发现的事）。未配置时 `release.yml` 里的 Release 同步是
+  `continue-on-error` 降级，只发 warning。
+- 国内网络环境下 GitHub API 常常超时，因此客户端检查更新
+  **Gitee 优先、GitHub 降级**，详见 `FRAMEWORK_DESIGN.md` §7.7。
+
+### 🔴 规则 6：版本号只有一个来源
+
+- 当前版本一律取自 `CARGO_PKG_VERSION`，**任何位置不得写死版本字符串**。
+  `release.yml` 的 “Stamp version” 会同时改写 `Cargo.toml` 与
+  `tauri.conf.json` —— 漏改任一处，检查更新就会永久失灵
+  （两处不一致时，要么永远提示"发现新版本"，要么永远"已是最新"）。
+- 语义化版本；发版前在 `CHANGELOG.md` 记录实质变更。
+
+### 🔴 规则 7：发版产物
+
+- 绿色版单文件 `Feisuo-win-x64.exe`，**不做 ZIP、不做安装器**。
+- 该文件名被客户端 `updater.rs` 精确匹配，改名会让所有在线用户
+  永远解析不到附件（守卫 `update_guard::current_version_must_come_from_cargo_pkg` 会拦截）。
+- 产物体积下限由 `release.yml` 断言（`< 1MB` 视为构建失败），
+  防止"构建成功但只产出了残缺 exe"被发版出去。
+
+### 常见命令
+
+```powershell
+# 前端类型检查 + 打包
+pnpm --dir ui build
+
+# 全量检查与测试（含所有守卫）
+cargo check --workspace --all-targets
+cargo test --workspace
+
+# 绿色版构建（产物：target\release\feisuo-desktop.exe）
+# 注意：build.ps1 已按用户要求删除，改手动执行；完整步骤见 README「手动编译」。
+cargo tauri build --no-bundle
+```

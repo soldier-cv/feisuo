@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      用 Theme.DeviceDefault.Light 而非 Material 主题:
+      守护服务常驻通知与系统设置页的观感必须与设备原生一致, 避免在 ROM 上
+      因缺少 Material 依赖而回退成难看的默认样式。
+    -->
+    <style name="Theme.Feisuo" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar" />
+</resources>

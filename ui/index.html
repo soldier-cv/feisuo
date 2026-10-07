@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>飞梭 Feisuo</title>
+    <!--
+      桌面壳应用，没有社交分享场景，所以不写 og:* —— 写了反而是给爬虫
+      看的假信息。真正有用的是下面两条：
+
+      `color-scheme` 让浏览器知道本窗口是**深色**壳：原生滚动条、
+      表控件、拼写下拉框会跟着走深色。此前不声明时，Windows 会按浅色
+      给那些原生部件，深色界面上会出现一条刺眼的白滚动条。
+      值随主题一起改（见 main.ts 的 applyStoredTheme）。
+
+      `description` 仍要写：WebView2 的窗口/任务栏预览、进程名、以及
+      将来万一加"关于"面板时读的都是它。
+    -->
+    <meta name="description" content="飞梭 Feisuo · 局域网极速互传：mDNS 自动发现、非对称签名免密互认、绿色版单文件、110MB/s+" />
+    <meta name="color-scheme" content="dark light" />
+    <!--
+      图标字体随包分发: 此前从 CDN 引入, 一旦断网(局域网工具本就常在无外网环境)
+      整个界面的图标会全部变成空白方块。
+      仅保留 woff2, 由 `node scripts/prepare-phosphor.mjs` 生成。
+    -->
+    <link rel="stylesheet" href="/phosphor/regular.css" />
+    <link rel="stylesheet" href="/phosphor/fill.css" />
+    <link rel="stylesheet" href="/phosphor/bold.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
