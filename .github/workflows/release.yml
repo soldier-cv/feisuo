@@ -23,6 +23,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -54,6 +56,37 @@ jobs:
           node-version: 20
           cache: pnpm
           cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install Android NDK
+        shell: pwsh
+        run: |
+          $sdk = $env:ANDROID_SDK_ROOT
+          if (-not $sdk) { $sdk = $env:ANDROID_HOME }
+          if (-not $sdk) { throw "ANDROID_SDK_ROOT / ANDROID_HOME 都没设置" }
+          $ndkVersion = '30.0.16248370'
+          $sdkmanager = Join-Path $sdk 'cmdline-tools/latest/bin/sdkmanager.bat'
+          if (-not (Test-Path $sdkmanager)) {
+            throw "找不到 sdkmanager: $sdkmanager（镜像需要装 cmdline-tools）"
+          }
+          'y' | & $sdkmanager --licenses | Out-Null
+          & $sdkmanager "ndk;$ndkVersion"
+          if ($LASTEXITCODE -ne 0) { throw "安装 NDK $ndkVersion 失败" }
+          $ndkHome = Join-Path $sdk "ndk/$ndkVersion"
+          if (-not (Test-Path (Join-Path $ndkHome 'source.properties'))) {
+            throw "NDK 目录存在但缺少 source.properties（安装不完整）: $ndkHome"
+          }
+          "ANDROID_NDK_HOME=$ndkHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ANDROID_NDK_ROOT=$ndkHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "NDK: $ndkHome"
 
       # 版本号的**唯一来源**是 `Cargo.toml` 的 `CARGO_PKG_VERSION`（规则 6）。
       #
@@ -174,12 +207,82 @@ jobs:
           if ($vTauri -ne $ver) { throw "tauri.conf.json 版本是 '$vTauri'，期望 '$ver'" }
           Write-Host "两处版本一致: $ver"
 
+      # ---------------------------------------------------------------------------
+      # Android: 交叉编译原生库并构建 Release APK
+      # ---------------------------------------------------------------------------
+      - name: Cross-compile Android libfeisuo_core.so
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:ANDROID_NDK_HOME) { throw 'ANDROID_NDK_HOME 未设置（前序步骤应写入 GITHUB_ENV）' }
+          $ndk = $env:ANDROID_NDK_HOME
+          $triple = 'aarch64-linux-android'
+          $api = 21   # minSdk 是 26；取更低无意义，取更高老系统直接加载失败
+          $binDir = Join-Path $ndk "toolchains/llvm/prebuilt/windows-x86_64/bin"
+          $linker = Join-Path $binDir "aarch64-linux-android$api-clang.cmd"
+          if (-not (Test-Path $linker)) { throw "找不到 NDK linker: $linker" }
+          $llvmAr = Join-Path $binDir 'llvm-ar.exe'
+          if (-not (Test-Path $llvmAr)) { $llvmAr = Join-Path $binDir 'llvm-ar' }
+
+          $q = { param($p) if ($p.Contains("'")) { throw "路径含单引号: $p" }; "'$p'" }
+          $toml = @(
+            '# 由 CI 内联生成，请勿手工编辑；也不该提交（含本机 NDK 路径）。',
+            "# NDK: $ndk",
+            '',
+            "[target.$triple]",
+            "linker = $(&$q $linker)",
+            $(if (Test-Path $llvmAr) { "ar = $(&$q $llvmAr)" }),
+            'rustflags = [',
+            '    "-C",',
+            '    "link-arg=-Wl,-z,max-page-size=16384",',
+            ']',
+            '',
+            '# cc-rs（rusqlite bundled 会编 C 代码）需要在 PATH 之外拿到目标平台 clang',
+            '[env]',
+            "CC_$(($triple -replace '-','_').ToUpper()) = $(&$q $linker)",
+            $(if (Test-Path $llvmAr) { "AR_$(($triple -replace '-','_').ToUpper()) = $(&$q $llvmAr)" }),
+            ''
+          ) -join "`n"
+
+          New-Item -ItemType Directory -Force -Path '.cargo' | Out-Null
+          Set-Content -LiteralPath '.cargo/config.toml' -Value $toml -Encoding utf8
+
+          & cargo build -p feisuo-core --target $triple --profile release --message-format short
+          if ($LASTEXITCODE -ne 0) { throw "cargo build 失败（退出码 $LASTEXITCODE）" }
+
+          $dest = 'mobile/android/app/src/main/jniLibs/arm64-v8a'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Copy-Item "target/$triple/release/libfeisuo_core.so" "$dest/libfeisuo_core.so" -Force
+          $so = "$dest/libfeisuo_core.so"
+          if (-not (Test-Path $so)) { throw "原生库缺失: $so" }
+          Write-Host "OK $so ($([math]::Round((Get-Item $so).Length/1MB,2)) MB)"
+
+      - name: Build Android release APK
+        shell: pwsh
+        working-directory: mobile/android
+        run: |
+          $ver = '${{ steps.ver.outputs.version }}'
+          .\gradlew.bat assembleRelease --console=plain
+          if ($LASTEXITCODE -ne 0) { throw "assembleRelease 失败" }
+          $apk = Get-ChildItem 'app/build/outputs/apk/release' -Filter *.apk -ErrorAction SilentlyContinue |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $apk) { throw '没找到 Release APK 产物' }
+
+          $destDir = (Resolve-Path '../../publish').Path
+          if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Force -Path $destDir | Out-Null }
+          $destApk = Join-Path $destDir "Feisuo-v${ver}-arm64.apk"
+          Copy-Item $apk.FullName $destApk -Force
+          $size = (Get-Item $destApk).Length
+          Write-Host "Release APK: $destApk ($([math]::Round($size/1MB,2)) MB)"
+          if ($size -lt 2MB) { throw "APK 只有 $([math]::Round($size/1KB,1)) KB，原生库很可能没打进去" }
+
       # 绿色版单文件：直接产出可双击运行的 exe。
       # 应用内更新会把新 exe 覆盖到当前 exe 所在目录，所以文件名对用户可见，
       # 统一为 Feisuo-win-x64.exe。
       - name: Collect artifact
         shell: pwsh
         run: |
+          $ver = '${{ steps.ver.outputs.version }}'
           $src = 'target/release/feisuo-desktop.exe'
           if (-not (Test-Path $src)) { throw "构建产物缺失: $src" }
 
@@ -191,13 +294,99 @@ jobs:
           Write-Host "Feisuo-win-x64.exe : $([math]::Round($size / 1MB, 2)) MB"
           if ($size -lt 1MB) { throw "产物体积异常 ($size 字节)，疑似构建失败" }
 
+          $stageApk = "publish/Feisuo-v${ver}-arm64.apk"
+          if (-not (Test-Path $stageApk)) { throw "Android APK 发布产物缺失: $stageApk" }
+          $apkSize = (Get-Item $stageApk).Length
+          Write-Host "Feisuo-v${ver}-arm64.apk : $([math]::Round($apkSize / 1MB, 2)) MB"
+          if ($apkSize -lt 2MB) { throw "APK 体积异常 ($apkSize 字节)，疑似构建失败" }
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Feisuo-win-x64-v${{ steps.ver.outputs.version }}
+          name: Feisuo-release-v${{ steps.ver.outputs.version }}
           path: |
             publish/Feisuo-win-x64.exe
+            publish/Feisuo-v${{ steps.ver.outputs.version }}-arm64.apk
           if-no-files-found: error
+
+      - name: Resolve release notes
+        id: notes
+        shell: pwsh
+        run: |
+          $ver = '${{ steps.ver.outputs.version }}'
+          $notes = ''
+          if (Test-Path 'CHANGELOG.md') {
+            $lines = Get-Content 'CHANGELOG.md' -Encoding utf8
+            $in = $false
+            $buf = @()
+            foreach ($l in $lines) {
+              if ($l.Trim().StartsWith("## [$ver]") -or $l.Trim().StartsWith("## [v$ver]")) {
+                $in = $true
+                continue
+              }
+              if ($in) {
+                if ($l.Trim() -match '^##\s+\[') { break }
+                $buf += $l
+              }
+            }
+            $notes = ($buf -join [Environment]::NewLine).Trim()
+
+            # 首发版本或尚未从 [未发布] 归档时，回退提取 [未发布] 节
+            if ([string]::IsNullOrWhiteSpace($notes)) {
+              $inUnreleased = $false
+              $unreleasedBuf = @()
+              foreach ($l in $lines) {
+                if ($l.Trim().StartsWith('## [未发布]') -or $l.Trim().StartsWith('## [Unreleased]')) {
+                  $inUnreleased = $true
+                  continue
+                }
+                if ($inUnreleased) {
+                  if ($l.Trim() -match '^##\s+\[') { break }
+                  $unreleasedBuf += $l
+                }
+              }
+              $notes = ($unreleasedBuf -join [Environment]::NewLine).Trim()
+            }
+          }
+          if ([string]::IsNullOrWhiteSpace($notes)) {
+            $notes = (git log -1 --pretty=%B).Trim()
+          }
+
+          $bodyFile = Join-Path $env:RUNNER_TEMP 'release_body.md'
+          $giteeBodyFile = Join-Path $env:RUNNER_TEMP 'gitee_body.md'
+
+          Set-Content -Path $giteeBodyFile -Value $notes -Encoding utf8
+
+          $ghFullBody = @"
+## 📝 更新内容
+
+$notes
+
+## 📦 下载
+
+| 文件 | 说明 |
+| --- | --- |
+| `Feisuo-win-x64.exe` | Windows x64 绿色版，双击即用，无需安装 |
+| `Feisuo-v$ver-arm64.apk` | Android 移动端安装包（适用于 arm64-v8a 架构手机，Android 8.0+） |
+
+国内用户可在 [Gitee 镜像 Releases](https://gitee.com/huaxudong/feisuo/releases) 页面高速下载。
+
+## 🔄 自动更新
+
+飞梭桌面端内置版本检查，**Gitee 优先、GitHub 降级**：
+托盘右键「检查更新…」或「系统设置 → 关于与更新」均可触发，
+静默调度为启动后 8 秒首次检查、之后每 12 小时一次。
+
+## ⚠️ 系统要求
+
+- **Windows**: Windows 10 1809 (17763) 及以上 / Windows 11，内置 WebView2 Runtime
+- **Android**: Android 8.0 (API 26) 及以上，arm64-v8a 架构
+"@
+
+          Set-Content -Path $bodyFile -Value $ghFullBody -Encoding utf8
+
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "body_file=$bodyFile"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "gitee_body_file=$giteeBodyFile"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -205,29 +394,12 @@ jobs:
         with:
           files: |
             publish/Feisuo-win-x64.exe
-          generate_release_notes: true
+            publish/Feisuo-v${{ steps.ver.outputs.version }}-arm64.apk
+          body_path: ${{ steps.notes.outputs.body_file }}
+          generate_release_notes: false
           fail_on_unmatched_files: true
           draft: false
           prerelease: false
-          body: |
-            ## 📦 下载
-
-            | 文件 | 说明 |
-            | --- | --- |
-            | `Feisuo-win-x64.exe` | Windows x64 绿色版，双击即用，无需安装 |
-
-            国内用户可在 [Gitee 镜像 Releases](https://gitee.com/huaxudong/feisuo/releases) 页面高速下载。
-
-            ## 🔄 自动更新
-
-            飞梭桌面端内置版本检查，**Gitee 优先、GitHub 降级**：
-            托盘右键「检查更新…」或「系统设置 → 关于与更新」均可触发，
-            静默调度为启动后 8 秒首次检查、之后每 12 小时一次。
-
-            ## ⚠️ 系统要求
-
-            - Windows 10 1809 (17763) 及以上 / Windows 11
-            - [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)（Win11 自带，Win10 可能需安装）
 
       # ⚠️ `continue-on-error` 只让**Gitee 镜像**这一步不阻断发版，
       # 因为 GitHub Release 已经建好、用户已经能下载了 —— 镜像失败不该
@@ -258,6 +430,16 @@ jobs:
           $repo = "feisuo"
           $token = $env:GITEE_TOKEN
           $exe = (Resolve-Path "publish/Feisuo-win-x64.exe").Path
+          $apk = (Resolve-Path "publish/Feisuo-v${ver}-arm64.apk" -ErrorAction SilentlyContinue)
+          $giteeBodyPath = "${{ steps.notes.outputs.gitee_body_file }}"
+          $giteeBody = if (Test-Path $giteeBodyPath) {
+            Get-Content $giteeBodyPath -Raw -Encoding utf8
+          } else {
+            "局域网极速传输工具（Windows 绿色版 / Android 端）。国内高速下载。"
+          }
+
+          $filesToUpload = @($exe)
+          if ($apk) { $filesToUpload += $apk.Path }
 
           Write-Host "正在准备同步 Release 到 Gitee ($owner/$repo, Tag: $tag)..."
 
@@ -279,7 +461,7 @@ jobs:
             tag_name         = $tag
             target_commitish = "main"
             name             = "Feisuo $tag"
-            body             = "局域网极速传输工具（Windows 绿色版）。国内高速下载。"
+            body             = $giteeBody
             prerelease       = $false
           } | ConvertTo-Json
 
@@ -313,65 +495,66 @@ jobs:
 
           # 3. 如果成功获取到 Release ID，上传安装包附件
           if ($releaseId -and (Test-Path $exe)) {
-            $fileName = [System.IO.Path]::GetFileName($exe)
             $attachUrl = "https://gitee.com/api/v5/repos/$owner/$repo/releases/$releaseId/attach_files"
 
-            # 检查并清理同名旧附件（防止 400 冲突）
-            try {
-              Write-Host "检查 Release (ID: $releaseId) 是否已存在同名附件 $fileName ..."
-              $existingAttaches = Invoke-RestMethod -Uri "$attachUrl`?access_token=$token" -Method Get -Headers $headers
-              foreach ($att in @($existingAttaches)) {
-                if ($att.name -eq $fileName) {
-                  Write-Host "发现已有同名附件 (ID: $($att.id))，正在清理以便重新上传..."
-                  Invoke-RestMethod -Uri "$attachUrl/$($att.id)`?access_token=$token" -Method Delete -Headers $headers
-                  Write-Host "旧附件删除成功"
+            foreach ($uploadFile in $filesToUpload) {
+              $fileName = [System.IO.Path]::GetFileName($uploadFile)
+
+              # 检查并清理同名旧附件（防止 400 冲突）
+              try {
+                Write-Host "检查 Release (ID: $releaseId) 是否已存在同名附件 $fileName ..."
+                $existingAttaches = Invoke-RestMethod -Uri "$attachUrl`?access_token=$token" -Method Get -Headers $headers
+                foreach ($att in @($existingAttaches)) {
+                  if ($att.name -eq $fileName) {
+                    Write-Host "发现已有同名附件 (ID: $($att.id))，正在清理以便重新上传..."
+                    Invoke-RestMethod -Uri "$attachUrl/$($att.id)`?access_token=$token" -Method Delete -Headers $headers
+                    Write-Host "旧附件删除成功: $fileName"
+                  }
                 }
+              } catch {
+                $errDetail = if ($_.ErrorDetails) { $_.ErrorDetails.Message } else { $_.Exception.Message }
+                Write-Host "检查/清理已有附件提示: $errDetail"
               }
-            } catch {
-              $errDetail = if ($_.ErrorDetails) { $_.ErrorDetails.Message } else { $_.Exception.Message }
-              Write-Host "检查/清理已有附件提示: $errDetail"
-            }
 
-            Write-Host "正在上传绿色版到 Gitee Release (ID: $releaseId): $exe ..."
-            $uploadUrl = "$attachUrl`?access_token=$token"
-            $curlArgs = @(
-              "-s", "-S",
-              "-X", "POST",
-              $uploadUrl,
-              "-F", "access_token=$token",
-              "-F", "file=@$exe"
-            )
-            & curl.exe @curlArgs
-            $curlExit = $LASTEXITCODE
+              Write-Host "正在上传文件到 Gitee Release (ID: $releaseId): $uploadFile ..."
+              $uploadUrl = "$attachUrl`?access_token=$token"
+              $curlArgs = @(
+                "-s", "-S",
+                "-X", "POST",
+                $uploadUrl,
+                "-F", "access_token=$token",
+                "-F", "file=@$uploadFile"
+              )
+              & curl.exe @curlArgs
+              $curlExit = $LASTEXITCODE
 
-            # ⚠️ 必须检查退出码。curl 失败（网络、超时、413）时
-            # 附件**根本没上传**，而 Release 已经建好了 —— 客户端
-            # `finish()` 会看到"有新版本但没有 Feisuo-win-x64.exe 附件"，
-            # 报一个用户看不懂的错误。而这条路径整体 `continue-on-error`，
-            # 于是镜像就成了一个"有 Release、无附件"的空壳，
-            # 每次检查更新都命中它却拿不到任何东西。
-            #
-            # 早先这里无条件打印「上传完毕！」，失败也看不出来。
-            if ($curlExit -ne 0) {
-              throw "Gitee 附件上传失败（curl 退出码 $curlExit）。已建好的 Release 没有附件，客户端会报『发现新版本但没有附件』—— 请手动到 Gitee 后台补传，或删除该 Release。"
-            }
-
-            # 上传成功也不能只看退出码：Gitee 返回非 2xx 时 curl 仍可能退出 0
-            # （取决于是否带 -f）。所以回读一次附件列表确认。
-            $verify = $null
-            try {
-              $verify = Invoke-RestMethod -Uri "$attachUrl`?access_token=$token" -Method Get -Headers $headers
-            } catch {
-              Write-Warning "回读附件列表失败（上传本身已返回 0）：$_"
-            }
-            if ($null -ne $verify) {
-              $names = @($verify) | ForEach-Object { $_.name }
-              if ($names -notcontains $fileName) {
-                throw "上传后回读附件列表里没有 $fileName（实际有: $($names -join ', ')）。Gitee 镜像当前不可用，客户端会走 GitHub 通道。"
+              # ⚠️ 必须检查退出码。curl 失败（网络、超时、413）时
+              # 附件**根本没上传**，而 Release 已经建好了 —— 客户端
+              # `finish()` 会看到"有新版本但没有 Feisuo-win-x64.exe 附件"，
+              # 报一个用户看不懂的错误。而这条路径整体 `continue-on-error`，
+              # 于是镜像就成了一个"有 Release、无附件"的空壳，
+              # 每次检查更新都命中它却拿不到任何东西。
+              if ($curlExit -ne 0) {
+                throw "Gitee 附件上传失败（curl 退出码 $curlExit）。已建好的 Release 没有附件，客户端会报『发现新版本但没有附件』—— 请手动到 Gitee 后台补传，或删除该 Release。"
               }
-              Write-Host "已确认附件存在: $fileName"
+
+              # 上传成功也不能只看退出码：Gitee 返回非 2xx 时 curl 仍可能退出 0
+              # （取决于是否带 -f）。所以回读一次附件列表确认。
+              $verify = $null
+              try {
+                $verify = Invoke-RestMethod -Uri "$attachUrl`?access_token=$token" -Method Get -Headers $headers
+              } catch {
+                Write-Warning "回读附件列表失败（上传本身已返回 0）：$_"
+              }
+              if ($null -ne $verify) {
+                $names = @($verify) | ForEach-Object { $_.name }
+                if ($names -notcontains $fileName) {
+                  throw "上传后回读附件列表里没有 $fileName（实际有: $($names -join ', ')）。Gitee 镜像当前不可用，客户端会走 GitHub 通道。"
+                }
+                Write-Host "已确认附件存在: $fileName"
+              }
             }
-            Write-Host "`nGitee Release 上传完毕！"
+            Write-Host "`nGitee Release 全部附件上传完毕！"
           } else {
             # 这里必须 throw：Release 可能**已经被建出来了**，只是没拿到 id。
             # 那就留下一个"有 Release、无附件"的空壳 —— 客户端每次检查更新

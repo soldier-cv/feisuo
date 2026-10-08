@@ -377,17 +377,22 @@ pub const VOLUME_ANY: &str = "*";
 /// 灰掉会泄露"这里有东西"）。
 pub fn filter_volumes_by_scope(volumes: &mut Vec<VolumeInfo>, scope: &crate::security::AccessScope) {
     match scope.mode {
-        crate::security::AccessMode::All => {
+        crate::security::AccessMode::All | crate::security::AccessMode::Denylist => {
             for v in volumes.iter_mut() {
                 v.readable = true;
             }
         }
         crate::security::AccessMode::Allowlist => {
             for v in volumes.iter_mut() {
-                v.readable = scope
+                // 如果卷在 allow_volumes 中，或者 allow_paths 中有路径属于该卷
+                let in_vol = scope
                     .allow_volumes
                     .iter()
                     .any(|a| a.eq_ignore_ascii_case(&v.id));
+                let in_path = scope.allow_paths.iter().any(|p| {
+                    p.to_ascii_lowercase().starts_with(&v.id.to_ascii_lowercase())
+                });
+                v.readable = in_vol || in_path;
             }
             volumes.retain(|v| v.readable);
         }

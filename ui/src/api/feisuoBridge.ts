@@ -26,6 +26,8 @@ export interface LocalDeviceInfo {
    * 详见 `core/src/security/auth_policy.rs` 的 `subnet_verdict`。
    */
   allowed_peer_subnets: string[];
+  /** 最大并发传输任务数 */
+  max_concurrent_transfers: number;
 }
 
 /** 更新流程阶段 (与 Rust 侧 UpdatePhase 一一对应) */
@@ -55,7 +57,7 @@ export interface TransferRecord {
   direction: "send" | "recv";
   peer_name: string;
   peer_ip: string;
-  status: "completed" | "failed";
+  status: "completed" | "failed" | "cancelled";
   created_at: number;
   time_formatted: string;
   // ---- v2：速度度量的原始量（速度是派生值，由后端算好）----
@@ -73,6 +75,8 @@ export interface TransferRecord {
   connect_ms: number;
   /** 后端算好的速度文本；样本不足时为 "—" */
   speed_display: string;
+  /** 传输包含的全部文件完整绝对路径列表 */
+  file_paths?: string[];
 }
 
 /**
@@ -187,13 +191,12 @@ export const CAPS = {
 
 /** 可访问范围（后端 `AccessScope`） */
 export interface AccessScope {
-  /** all | allowlist | receive_only —— 默认 all（D1） */
-  mode: "all" | "allowlist" | "receive_only";
+  /** all | allowlist | denylist | receive_only —— 默认 all */
+  mode: "all" | "allowlist" | "denylist" | "receive_only";
   allow_volumes: string[];
   allow_paths: string[];
   deny_paths: string[];
   can_pull: boolean;
-  /** 默认 false（D2：写入与读取权限解耦） */
   can_push: boolean;
   updated_at: number;
 }
@@ -222,7 +225,9 @@ export interface TrustedDevice {
   public_key_hex: string;
   last_ip: string;
   bound_at: string;
+  /** 旧字段。分档以 `trust_level` 为准，不能用它把「每次匹配码」当成永久信任。 */
   is_trusted: boolean;
+  trust_level: TrustLevel;
 }
 
 export interface DiskFileInfo {
@@ -331,13 +336,19 @@ export interface BrowseTarget {
 /** 卷通配符（服务端会挑一个 scope 内的可读卷并回显真实卷 id） */
 export const VOLUME_ANY = "*";
 
-/** 一次目录浏览的完整结果 (右栏面包屑导航用) */
+/**
+ * 一次目录浏览的完整结果 (右栏面包屑导航用)。
+ *
+ * 后端 `RemoteBrowseListingDto` 按 camelCase 序列化。
+ * 本机目录 `LocalDirListing` 没有这层改名，仍是蛇形 —— 两边不能混用。
+ * 嵌套的文件条目、卷、常用位置没有改名，继续用蛇形。
+ */
 export interface RemoteBrowseListing {
   files: RemoteFileEntry[];
   /** 当前相对路径, 空串 = 卷根 / 落盘根 */
-  current_path: string;
+  currentPath: string;
   /** 上一级; 已在根目录时为 null */
-  parent_path: string | null;
+  parentPath: string | null;
   /** 还有更多条目（分页）—— 必须提示, 否则用户以为文件丢了 */
   truncated: boolean;
   message: string;
@@ -363,11 +374,11 @@ export interface RemoteBrowseListing {
   /** 本次返回的偏移 */
   offset: number;
   /** 对端是否走真实卷模式 */
-  volume_mode: boolean;
+  volumeMode: boolean;
   /** 实际使用的卷 id（请求发的是通配 `*` 时由服务端回显真实卷） */
   volume: string;
   /** 对端能力位（诊断用） */
-  peer_caps: number;
+  peerCaps: number;
 }
 
 export interface ApprovalRequest {
@@ -464,7 +475,11 @@ export interface SendOutcome {
    * 对端处于「每次匹配码」等级，需要用户抄码后重试。
    * 这是**一次正常的协商回合**，不是失败 —— 待发队列必须保留。
    */
-  grant_code_required: boolean;
+  /**
+   * 后端 `SendOutcome` 按 camelCase 序列化。写成蛇形时这个字段永远是
+   * undefined，协商回合会被当成发送成功，待发清单也被清掉。
+   */
+  grantCodeRequired: boolean;
   message: string;
   /**
    * **实际发出的文件数**（目录已递归展开）。
@@ -472,11 +487,13 @@ export interface SendOutcome {
    * 必须与"选中了几个"分开：选 1 个含 3000 个文件的文件夹时，
    * "已发送 1 个文件"是彻头彻尾的谎报。
    */
-  expanded_files: number;
+  expandedFiles: number;
   /** 展开时跳过的条目数（符号链接 / 隐藏 / 内部目录 / 超限） */
-  expand_skipped: number;
-  expand_symlinks_skipped: number;
-  expand_limit_hit: string | null;
+  expandSkipped: number;
+  expandSymlinksSkipped: number;
+  expandLimitHit: string | null;
+  /** 本机撤销。不是失败，也不是发送成功 —— 待发清单必须留下。 */
+  locallyAborted: boolean;
 }
 
 /** 一张生效中的短期授权（§2.3.1）。 */
@@ -518,11 +535,33 @@ export function parseTransferStatus(
 
 const isTauri = typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
 
+/** 浏览失败。`grantCodeRequired` 为真时是协商回合，不是普通错误。 */
+export interface BrowseFailure {
+  message: string;
+  grantCodeRequired: boolean;
+}
+
 /** 把后端返回的错误转成可读文案 */
 function toMessage(e: unknown, fallback: string): string {
   if (typeof e === "string") return e;
   if (e && typeof e === "object" && "message" in e) return String((e as { message: unknown }).message);
   return fallback;
+}
+
+/** 浏览命令的错误是结构化的：要码与真失败必须分开，不能靠文案猜。 */
+export function parseBrowseFailure(e: unknown, fallback: string): BrowseFailure {
+  if (e && typeof e === "object" && "grantCodeRequired" in e) {
+    const raw = e as { message?: unknown; grantCodeRequired?: unknown };
+    return {
+      message: typeof raw.message === "string" && raw.message ? raw.message : fallback,
+      grantCodeRequired: raw.grantCodeRequired === true,
+    };
+  }
+  const message = toMessage(e, fallback);
+  return {
+    message,
+    grantCodeRequired: message.includes("传输码") || message.includes("匹配码"),
+  };
 }
 
 /** 只有在"浏览器预览模式"下才回落到演示数据; Tauri 环境下失败必须抛错,
@@ -558,6 +597,7 @@ export class FeisuoBridge {
         max_log_size_mb: 5,
         max_history_records: 500,
         record_retention_days: 30,
+        max_concurrent_transfers: 3,
         close_action: "ask",
         theme: "dark",
         device_count: 1,
@@ -683,8 +723,9 @@ export class FeisuoBridge {
   /**
    * 读剪贴板并返回预览（**不落盘**）。
    *
-   * D5：预览默认开启。所以拆成两步 —— 先预览、用户确认后再
-   * [`stageClipboardPayload`] 落盘。"看了没发"不该在磁盘上留明文。
+   * D5：预览默认开启。所以拆成两步 —— 先预览、用户确认后再落盘。
+   * 落盘用的是**预览那一次读到的内容**，不是确认瞬间剪贴板上的新内容。
+   * "看了没发"不该在磁盘上留明文。
    */
   static async readClipboardPreview(): Promise<ClipboardContent> {
     return invokeSafe<ClipboardContent>("read_clipboard_preview", undefined, () => ({
@@ -764,6 +805,7 @@ export class FeisuoBridge {
         last_ip: targetIp,
         bound_at: new Date().toISOString(),
         is_trusted: true,
+        trust_level: "permanent",
       };
     }
     return invokeSafe<TrustedDevice>("pair_with_device", { targetIp, targetPort, pin });
@@ -796,7 +838,7 @@ export class FeisuoBridge {
   ): Promise<SendOutcome> {
     if (notInTauri()) {
       console.log(`[Bridge] 模拟发送到 ${targetName} (${targetIp}):`, files);
-      return { skipped: 0, grant_code_required: false, message: "", expanded_files: 0, expand_skipped: 0, expand_symlinks_skipped: 0, expand_limit_hit: null };
+      return { skipped: 0, grantCodeRequired: false, message: "", expandedFiles: 0, expandSkipped: 0, expandSymlinksSkipped: 0, expandLimitHit: null, locallyAborted: false };
     }
     return invokeSafe<SendOutcome>(
       "send_files",
@@ -809,7 +851,7 @@ export class FeisuoBridge {
         grantCode: grantCode || null,
         destSubPath: destSubPath || null,
       },
-      () => ({ skipped: 0, grant_code_required: false, message: "", expanded_files: 0, expand_skipped: 0, expand_symlinks_skipped: 0, expand_limit_hit: null })
+      () => ({ skipped: 0, grantCodeRequired: false, message: "", expandedFiles: 0, expandSkipped: 0, expandSymlinksSkipped: 0, expandLimitHit: null, locallyAborted: false })
     );
   }
 
@@ -965,10 +1007,10 @@ export class FeisuoBridge {
         places: [],
         total: 3,
         offset: target.offset,
-        volume_mode: !!target.volume,
+        volumeMode: !!target.volume,
         // 原型模式：`*` 假装挑了第一个卷
         volume: target.volume === VOLUME_ANY ? "C:" : target.volume,
-        peer_caps: target.volume ? 0xff : 0x07,
+        peerCaps: target.volume ? 0xff : 0x07,
       };
       if (relPath === "") {
         return {
@@ -978,8 +1020,8 @@ export class FeisuoBridge {
             { name: "VID_20260927_4K.mp4", is_dir: false, size: 673185792, size_formatted: "642 MB", modified: "09-27 21:10" },
             { name: "素材与设计稿", is_dir: true, size: 0, size_formatted: "文件夹", modified: "09-27 16:30" },
           ],
-          current_path: "",
-          parent_path: null,
+          currentPath: "",
+          parentPath: null,
           truncated: false,
           message: "OK",
         };
@@ -989,8 +1031,8 @@ export class FeisuoBridge {
         files: [
           { name: "封面_横版.png", is_dir: false, size: 2190443, size_formatted: "2.1 MB", modified: "09-26 10:03" },
         ],
-        current_path: relPath,
-        parent_path: relPath.includes("/") ? relPath.slice(0, relPath.lastIndexOf("/")) : "",
+        currentPath: relPath,
+        parentPath: relPath.includes("/") ? relPath.slice(0, relPath.lastIndexOf("/")) : "",
         truncated: false,
         message: "OK",
       };
@@ -1008,17 +1050,17 @@ export class FeisuoBridge {
       },
       () => ({
         files: [],
-        current_path: relPath,
-        parent_path: null,
+        currentPath: relPath,
+        parentPath: null,
         truncated: false,
         message: "",
         volumes: [],
         places: [],
         total: 0,
         offset: target.offset,
-        volume_mode: false,
+        volumeMode: false,
         volume: "",
-        peer_caps: 0,
+        peerCaps: 0,
       }),
     );
   }
@@ -1041,7 +1083,7 @@ export class FeisuoBridge {
     volume = ""
   ): Promise<SendOutcome> {
     if (notInTauri()) {
-      return { skipped: 0, grant_code_required: false, message: "", expanded_files: 0, expand_skipped: 0, expand_symlinks_skipped: 0, expand_limit_hit: null };
+      return { skipped: 0, grantCodeRequired: false, message: "", expandedFiles: 0, expandSkipped: 0, expandSymlinksSkipped: 0, expandLimitHit: null, locallyAborted: false };
     }
     return invokeSafe<SendOutcome>(
       "request_pull",
@@ -1053,7 +1095,7 @@ export class FeisuoBridge {
         grantCode: grantCode || null,
         volume: volume || null,
       },
-      () => ({ skipped: 0, grant_code_required: false, message: "", expanded_files: 0, expand_skipped: 0, expand_symlinks_skipped: 0, expand_limit_hit: null })
+      () => ({ skipped: 0, grantCodeRequired: false, message: "", expandedFiles: 0, expandSkipped: 0, expandSymlinksSkipped: 0, expandLimitHit: null, locallyAborted: false })
     );
   }
 
@@ -1138,6 +1180,11 @@ export class FeisuoBridge {
   static async openReceiveFolder(): Promise<void> {
     if (notInTauri()) return;
     await invokeSafe<void>("open_receive_folder");
+  }
+
+  static async openPathInFolder(path: string): Promise<void> {
+    if (notInTauri()) return;
+    await invokeSafe<void>("open_path_in_folder", { path });
   }
 
   static async openLogFolder(): Promise<void> {

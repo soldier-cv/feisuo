@@ -70,6 +70,9 @@ pub struct TransferRecord {
     /// 样本不足（< 100ms）或零字节时为 `"—"`。
     #[serde(default)]
     pub speed_display: String,
+    /// 传输包含的全部文件完整绝对路径列表
+    #[serde(default)]
+    pub file_paths: Vec<String>,
 }
 
 impl TransferRecord {
@@ -241,6 +244,20 @@ impl UnpairOutcome {
     pub fn is_applied(self) -> bool {
         matches!(self, UnpairOutcome::Applied)
     }
+}
+
+/// 单个文件分块断点续传数据库记录
+#[derive(Debug, Clone)]
+pub struct ChunkResumeRecord {
+    pub transfer_id: String,
+    pub file_index: u32,
+    pub relative_path: String,
+    pub blake3_hash: String,
+    pub file_size: u64,
+    pub staged_path: String,
+    pub next_chunk_index: u32,
+    pub bytes_resumed: u64,
+    pub updated_at: i64,
 }
 
 pub struct TrustStore {
@@ -420,6 +437,7 @@ impl TrustStore {
         Self::ensure_column(conn, "transfer_history", "duration_verify_ms", "INTEGER NOT NULL DEFAULT 0")?;
         Self::ensure_column(conn, "transfer_history", "over_overlay", "INTEGER NOT NULL DEFAULT 0")?;
         Self::ensure_column(conn, "transfer_history", "connect_ms", "INTEGER NOT NULL DEFAULT 0")?;
+        Self::ensure_column(conn, "transfer_history", "file_paths", "TEXT NOT NULL DEFAULT '[]'")?;
 
         // ---- v2：完整诊断记录（整条 JSON，供事后离线分析）----
         conn.execute(
@@ -474,6 +492,27 @@ impl TrustStore {
         // 清理靠这个索引 + 存在性检查, 不做级联删除（跨表无外键）。
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_parts_completed ON transfer_parts(completed_at DESC)",
+            [],
+        )?;
+
+        // ---- v2.1：分块级断点续传进度表 ----
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS transfer_chunk_progress (
+                transfer_id      TEXT NOT NULL,
+                file_index       INTEGER NOT NULL,
+                relative_path    TEXT NOT NULL,
+                blake3_hash      TEXT NOT NULL,
+                file_size        INTEGER NOT NULL,
+                staged_path      TEXT NOT NULL,
+                next_chunk_index INTEGER NOT NULL,
+                bytes_resumed    INTEGER NOT NULL,
+                updated_at       INTEGER NOT NULL,
+                PRIMARY KEY(transfer_id, file_index)
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunk_prog_transfer ON transfer_chunk_progress(transfer_id)",
             [],
         )?;
 
@@ -1059,15 +1098,17 @@ impl TrustStore {
         max_records: u32,
         retention_days: u32,
         metrics: TransferMetrics,
+        file_paths: &[String],
     ) -> Result<()> {
         let conn = self.conn();
         let now = chrono::Utc::now().timestamp();
+        let paths_json = serde_json::to_string(file_paths).unwrap_or_else(|_| "[]".to_string());
         conn.execute(
             "INSERT INTO transfer_history
                 (file_name, file_size, direction, peer_name, peer_ip, status, created_at,
                  declared_size, duration_active_ms, duration_wall_ms, duration_verify_ms,
-                 over_overlay, connect_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 over_overlay, connect_ms, file_paths)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 file_name,
                 bytes_transferred as i64,
@@ -1082,6 +1123,7 @@ impl TrustStore {
                 metrics.duration_verify_ms as i64,
                 if metrics.over_overlay { 1 } else { 0 },
                 metrics.connect_ms as i64,
+                paths_json,
             ],
         )?;
 
@@ -1109,7 +1151,7 @@ impl TrustStore {
         let mut stmt = conn.prepare(
             "SELECT id, file_name, file_size, direction, peer_name, peer_ip, status, created_at,
                     declared_size, duration_active_ms, duration_wall_ms, duration_verify_ms,
-                    over_overlay, connect_ms
+                    over_overlay, connect_ms, file_paths
              FROM transfer_history ORDER BY id DESC LIMIT ?1"
         )?;
         let rows = stmt.query_map(params![limit], |row| {
@@ -1128,6 +1170,8 @@ impl TrustStore {
             let duration_verify_ms = row.get::<_, i64>(11)?.max(0) as u64;
             let over_overlay = row.get::<_, i32>(12)? == 1;
             let connect_ms = row.get::<_, i64>(13)?.max(0) as u64;
+            let paths_json = row.get::<_, Option<String>>(14)?.unwrap_or_else(|| "[]".to_string());
+            let file_paths: Vec<String> = serde_json::from_str(&paths_json).unwrap_or_default();
 
             let size_formatted = format_bytes(file_size);
             let dt = chrono::DateTime::from_timestamp(created_at, 0)
@@ -1154,6 +1198,7 @@ impl TrustStore {
                 over_overlay,
                 connect_ms,
                 speed_display: String::new(),
+                file_paths,
             };
             let speed_display = rec.speed_display();
             Ok(TransferRecord { speed_display, ..rec })
@@ -1607,6 +1652,118 @@ impl TrustStore {
         let cutoff = chrono::Utc::now().timestamp() - keep_days * 86400;
         let n = conn.execute(
             "DELETE FROM transfer_parts WHERE completed_at < ?1",
+            params![cutoff],
+        )?;
+        Ok(n as u32)
+    }
+
+    // =======================================================================
+    // 分块级断点续传（transfer_chunk_progress）
+    // =======================================================================
+
+    /// 记录或更新某个未完成文件的分块断点续传进度。
+    pub fn record_chunk_progress(
+        &self,
+        transfer_id: &str,
+        file_index: u32,
+        relative_path: &str,
+        blake3_hash: &str,
+        file_size: u64,
+        staged_path: &str,
+        next_chunk_index: u32,
+        bytes_resumed: u64,
+    ) -> Result<()> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO transfer_chunk_progress (
+                transfer_id, file_index, relative_path, blake3_hash, file_size,
+                staged_path, next_chunk_index, bytes_resumed, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(transfer_id, file_index) DO UPDATE SET
+                relative_path = excluded.relative_path,
+                blake3_hash = excluded.blake3_hash,
+                file_size = excluded.file_size,
+                staged_path = excluded.staged_path,
+                next_chunk_index = excluded.next_chunk_index,
+                bytes_resumed = excluded.bytes_resumed,
+                updated_at = excluded.updated_at",
+            params![
+                transfer_id,
+                file_index as i64,
+                relative_path,
+                blake3_hash,
+                file_size as i64,
+                staged_path,
+                next_chunk_index as i64,
+                bytes_resumed as i64,
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 查询某次传输中某个文件的分块续传进度（若暂存文件不存在则返回 None）。
+    pub fn get_chunk_progress(
+        &self,
+        transfer_id: &str,
+        file_index: u32,
+    ) -> Result<Option<ChunkResumeRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT transfer_id, file_index, relative_path, blake3_hash, file_size,
+                    staged_path, next_chunk_index, bytes_resumed, updated_at
+             FROM transfer_chunk_progress
+             WHERE transfer_id = ?1 AND file_index = ?2",
+        )?;
+        let mut rows = stmt.query(params![transfer_id, file_index as i64])?;
+        if let Some(row) = rows.next()? {
+            let staged_path: String = row.get(5)?;
+            if !std::path::Path::new(&staged_path).is_file() {
+                return Ok(None);
+            }
+            Ok(Some(ChunkResumeRecord {
+                transfer_id: row.get(0)?,
+                file_index: row.get::<_, i64>(1)? as u32,
+                relative_path: row.get(2)?,
+                blake3_hash: row.get(3)?,
+                file_size: row.get::<_, i64>(4)? as u64,
+                staged_path,
+                next_chunk_index: row.get::<_, i64>(6)? as u32,
+                bytes_resumed: row.get::<_, i64>(7)? as u64,
+                updated_at: row.get(8)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// 单个文件提交成功或重试失败后，清理该文件的分块进度。
+    pub fn remove_chunk_progress(&self, transfer_id: &str, file_index: u32) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM transfer_chunk_progress WHERE transfer_id = ?1 AND file_index = ?2",
+            params![transfer_id, file_index as i64],
+        )?;
+        Ok(())
+    }
+
+    /// 清除某次传输的所有分块进度（如用户手动撤销本次传输时）。
+    pub fn remove_all_chunk_progress(&self, transfer_id: &str) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM transfer_chunk_progress WHERE transfer_id = ?1",
+            params![transfer_id],
+        )?;
+        Ok(())
+    }
+
+    /// 清理过期的暂存分块进度（超过 max_age_secs，例如 24 小时）。
+    pub fn purge_expired_chunk_progress(&self, max_age_secs: i64) -> Result<u32> {
+        let conn = self.conn();
+        let cutoff = chrono::Utc::now().timestamp() - max_age_secs;
+        let n = conn.execute(
+            "DELETE FROM transfer_chunk_progress WHERE updated_at < ?1",
             params![cutoff],
         )?;
         Ok(n as u32)

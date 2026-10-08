@@ -18,12 +18,15 @@ import android.util.Log
 import android.widget.Toast
 
 /**
- * 飞梭 Android 端前台常驻守护服务 (Foreground Service)。
- * 保证进程高优先级存活，防止系统在锁屏与休眠状态下杀死网络监听，
- * 同时持有 Wi-Fi 组播锁以持续响应局域网自动发现。
+ * 飞梭 Android 端前台守护服务 (Session-bound Foreground Service)。
+ *
+ * 设计定位：随应用启动运行，在应用活跃与锁屏期间持有 Wi-Fi 组播锁，
+ * 保证锁屏休眠状态下局域网 UDP 发现不被硬件过滤，文件传输零中断。
+ * 遵循非永久常驻原则：用户划掉多任务卡片或在通知栏点击停止时，彻底释放引擎与网络监听，
+ * 绝不长期后台驻留。
  *
  * @author xudong.hua,gemini
- * @since 2026-09-28 11:50 星期一
+ * @since 2026-10-08 19:40 星期四
  */
 class FeisuoDaemonService : Service() {
 
@@ -250,8 +253,14 @@ class FeisuoDaemonService : Service() {
             return START_NOT_STICKY
         }
         // 通知已在 onCreate 挂好(必须早于 5 秒限制), 这里只做状态日志。
-        Log.i(TAG, "前台服务已挂载通知，处于自连待命状态")
-        return START_STICKY
+        Log.i(TAG, "前台服务已挂载通知，处于局域网待命状态")
+        return START_NOT_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Log.i(TAG, "任务被用户移除，停止守护服务与引擎")
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onBind(intent: Intent?): IBinder? {

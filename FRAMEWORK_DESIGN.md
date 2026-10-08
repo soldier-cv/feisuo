@@ -44,7 +44,7 @@ Android 侧完整 UI（目前仅原生占位界面 + 服务常驻）。
 ## 目录
 1. [多端技术选型决策矩阵](#1-多端技术选型决策矩阵)
 2. [总体系统架构设计](#2-总体系统架构设计)
-3. [开机自启与后台常驻机制 (PC & Android)](#3-开机自启与后台常驻机制-pc--android)
+3. [运行生命周期与锁屏保障机制 (PC & Android)](#3-运行生命周期与锁屏保障机制-pc--android)
 4. [“开机即连通”：零配置网络发现协议](#4-开机即连通零配置网络发现协议)
 5. [一次配对·终生信任的安全通信模型](#5-一次配对终生信任的安全通信模型)
 6. [超高速文件传输引擎设计](#6-超高速文件传输引擎设计)
@@ -115,9 +115,7 @@ flowchart TB
 
 ---
 
-## 3. 开机自启与后台常驻机制 (PC & Android)
-
-要做到用户要求的“**开机就能够连通，关窗口也能收文件，方便传输**”，两端的后台常驻必须攻克以下关键技术点：
+## 3. 运行生命周期与锁屏保障机制 (PC & Android)
 
 ### 3.1 Windows 桌面端实现方案
 1. **开机自启注册**：
@@ -131,17 +129,17 @@ flowchart TB
 3. **防火墙静默穿透**：
    - 安装包（Inno Setup / MSI）在初次安装阶段自动向 Windows Defender 防火墙注册允许飞梭进程的入站 UDP/TCP 端口规则，避免日常使用弹出“Windows 安全警报”打扰用户。
 
-### 3.2 Android 移动端实现方案（破解系统杀后台痛点）
-Android 生态存在严格的电池限制策略（Doze 模式、应用待机分组），要实现“开机自连、随开随收”，必须完成以下四大配置：
-1. **开机自启广播响应**：
-   - 声明 `android.permission.RECEIVE_BOOT_COMPLETED` 权限；
-   - 编写 `BootReceiver` 静态广播接收器，在系统重启完成后自动激活应用服务。
-2. **前台服务 (Foreground Service) + 常驻不可消除通知**：
-   - 启动具有 `foregroundServiceType="connectedDevice|dataSync"` 的前台守护服务；
-   - 在通知栏置顶展示轻量静音通知（如：“`飞梭已就绪 · 已连通书房台式 (开机已自连)`”）；
-   - 操作系统将该进程标记为高优先级（Low OOM Score），杜绝被系统后台自动清理。
-3. **请求忽略电池优化 (Doze Whitelist)**：
-   - 首次启动引导用户开启 `android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`，避免息屏时 Wi-Fi 被休眠挂起导致传输中断。
+### 3.2 Android 移动端实现方案（随用随开 · 退出即停 · 锁屏保障）
+按用户与轻量无打扰产品设计，Android 端**彻底去除开机自启与 24x7 强行后台驻留**，杜绝偷跑流量与电量消耗：
+1. **去开机自启与去常驻**：
+   - 移除 `RECEIVE_BOOT_COMPLETED` 广播接收器；不向系统申请自启动；
+   - 随应用启动激活服务（`android:stopWithTask="true"`），在用户滑动清除卡片或退出时调用 `onTaskRemoved` 立即 `stopSelf()` 并完全关闭 Rust 网络引擎 (`FeisuoRuntime.shutdown()`)，零后台驻留。
+2. **锁屏与熄屏可用性保障**：
+   - 当应用处于打开状态且用户关闭手机屏幕（锁屏）时，为了防止 Android 系统休眠 Wi-Fi 网卡组播过滤机制导致局域网无法探测，服务持有 `WifiManager.MulticastLock`；
+   - 在活跃传输进行期间持有 `PowerManager.PARTIAL_WAKE_LOCK`，确保大文件传输在锁屏期间不被系统挂起中断。
+3. **会话级前台服务通知**：
+   - 启动具有 `foregroundServiceType="connectedDevice|dataSync"` 的临时会话通知；
+   - 通知文案明确提示：“`局域网待命中 · 锁屏状态下可正常接收`”，用户一眼可知运行状态并可一键停止服务。
 4. **网络状态动态自愈监听**：
    - 注册 `ConnectivityManager.NetworkCallback`，一旦手机连接至家庭/办公室 Wi-Fi，立即主动向局域网广播探测包，与电脑握手复联。
 
@@ -492,7 +490,7 @@ gantt
     Windows 托盘与任务计划自启插件集成   :b1, after a2, 10d
     Windows 拖拽落盘与原生通知          :b2, after b1, 7d
     section Phase 3: 安卓端
-    Android 前台守护与开机自启广播      :c1, after a2, 12d
+    Android 前台服务与锁屏组播穿透      :c1, after a2, 12d
     系统分享菜单 (Share Sheet) 接入     :c2, after c1, 8d
     section Phase 4: 联调与优化
     双端局域网穿梭联调与吞吐压测        :d1, after b2, 10d

@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">飞梭</string>
-    <string name="daemon_channel_name">飞梭后台自连服务</string>
-    <string name="daemon_channel_desc">保持局域网自发现与无人值守文件接收通道</string>
+    <string name="daemon_channel_name">飞梭局域网传输服务</string>
+    <string name="daemon_channel_desc">保持 Wi-Fi 组播监听与文件接收通道，锁屏期间可用</string>
     <string name="notification_title">飞梭局域网互传已就绪</string>
-    <string name="notification_text">开机自连已激活 · 受信设备直接接收</string>
-    <string name="action_stop_daemon">停止守护</string>
+    <string name="notification_text">局域网待命中 · 锁屏状态下可正常接收</string>
+    <string name="action_stop_daemon">停止待命</string>
     <string name="approval_channel_name">文件接收确认</string>
     <string name="approval_channel_desc">未配对设备请求发送文件时提醒你确认</string>
     <string name="action_allow">允许</string>

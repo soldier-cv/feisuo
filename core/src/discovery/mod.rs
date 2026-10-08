@@ -956,7 +956,7 @@ impl DiscoveryService {
                 // 让这张表无限增长（内存耗尽），而未受信设备本来就不走
                 // 落库路径，记账对它们毫无用处。
                 let throttle_key = format!("{}|{}", beacon.device_id, ip);
-                let skip_persist = if !is_trusted {
+                let mut skip_persist = if !is_trusted {
                     false
                 } else {
                     match l_verified.lock() {
@@ -981,7 +981,30 @@ impl DiscoveryService {
                     }
                 };
                 if skip_persist && is_trusted {
-                    l_stats.throttled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // 节流只省「内容和上次一样」的重复包。
+                    // 端口、名字、能力位变了必须重新验签：否则同一个来源地址
+                    // 在这 5 秒里发一个没签名的包，就能把在线端口改掉，
+                    // 随后的发送和浏览会连到那个端口上。
+                    let changed = {
+                        let map = l_devices.read().await;
+                        match map.get(&beacon.device_id) {
+                            Some(prev) => {
+                                prev.transfer_port != beacon.transfer_port
+                                    || prev.device_name != beacon.device_name
+                                    || prev.caps != beacon.caps
+                                    || prev.app_version != beacon.app_version
+                            }
+                            None => true,
+                        }
+                    };
+                    if changed {
+                        skip_persist = false;
+                        if let Ok(mut map) = l_verified.lock() {
+                            map.remove(&throttle_key);
+                        }
+                    } else {
+                        l_stats.throttled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
                 if is_trusted && !skip_persist {
                     match l_trust_store

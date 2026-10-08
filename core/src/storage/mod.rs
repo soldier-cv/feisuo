@@ -7,7 +7,7 @@ pub mod volumes;
 
 pub use chunk_store::{ChunkReader, ChunkStore, ChunkWriter};
 pub use folder_scan::{FolderScan, MAX_FOLDER_DEPTH, MAX_FOLDER_FILES};
-pub use path_manager::PathManager;
+pub use path_manager::{commit_staged_file, PathManager};
 pub use paths::{canonicalize_lenient, is_within, strip_verbatim_prefix};
 pub use places::{known_places, KnownPlace};
 pub use volumes::{

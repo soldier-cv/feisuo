@@ -499,9 +499,10 @@ impl FeisuoEngine {
         // 目标相对路径"，它不需要知道目标路径是怎么来的。
         let (items, scan) = crate::storage::folder_scan::expand_all(&files)?;
         if self.client.outgoing_aborted(target_device_id) {
-            return Err(FeisuoError::LocallyAborted(
-                "已在本机撤销，文件尚未发出".into(),
-            ));
+            return Err(FeisuoError::LocallyAborted {
+                message: "已在本机撤销，文件尚未发出".into(),
+                bytes_sent: 0,
+            });
         }
         if items.is_empty() {
             let hint = scan
@@ -679,6 +680,10 @@ impl FeisuoEngine {
             .iter()
             .map(|(p, _)| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
             .sum();
+        let file_paths: Vec<String> = files
+            .iter()
+            .map(|(p, _)| p.to_string_lossy().to_string())
+            .collect();
 
         // 走带诊断的通道: 旧实现把 elapsed 算出来后丢弃, 导致"速度"无从取数
         let res = self
@@ -700,12 +705,18 @@ impl FeisuoEngine {
         if matches!(res, Err(FeisuoError::GrantCodeRequired(_))) {
             return res.map(|_| 0);
         }
-        // 本机撤销同样不是失败：历史里写「失败」会让用户以为没撤成。
-        if matches!(res, Err(FeisuoError::LocallyAborted(_) | FeisuoError::Cancelled)) {
-            return res.map(|_| 0);
-        }
+        // 本机撤销不是失败，但不能当没发生过。写「失败」会让人以为没撤成，
+        // 什么都不写则关掉窗口后无从对账。记成「已取消」。
+        let locally_cancelled =
+            matches!(res, Err(FeisuoError::LocallyAborted { .. } | FeisuoError::Cancelled));
 
-        let status = if res.is_ok() { "completed" } else { "failed" };
+        let status = if locally_cancelled {
+            "cancelled"
+        } else if res.is_ok() {
+            "completed"
+        } else {
+            "failed"
+        };
         let label = if file_count > 1 {
             format!("{} 等 {} 个文件", first_name, file_count)
         } else {
@@ -725,9 +736,14 @@ impl FeisuoEngine {
                 ..Default::default()
             },
         };
+        let bytes_recorded = match &res {
+            Ok(r) => r.bytes_sent,
+            Err(FeisuoError::LocallyAborted { bytes_sent, .. }) => *bytes_sent,
+            Err(_) => 0,
+        };
         let _ = self.trust_store.add_transfer_record(
             &label,
-            report.map(|r| r.bytes_sent).unwrap_or(0),
+            bytes_recorded,
             "send",
             target_device_name,
             target_ip,
@@ -735,6 +751,7 @@ impl FeisuoEngine {
             max_records,
             retention_days,
             metrics,
+            &file_paths,
         );
 
         // 断点续传（P1 ⑪）：把跳过的文件追加到传输记录标签里。
@@ -838,7 +855,7 @@ impl FeisuoEngine {
         target_port: u16,
         sub_paths: Vec<String>,
         dest_sub_path: &str,
-    ) -> Result<()> {
+    ) -> Result<String> {
         self.request_pull_with_code(target_ip, target_port, sub_paths, dest_sub_path, "")
             .await
     }
@@ -854,7 +871,7 @@ impl FeisuoEngine {
         sub_paths: Vec<String>,
         dest_sub_path: &str,
         grant_code: &str,
-    ) -> Result<()> {
+    ) -> Result<String> {
         self.request_pull_in_volume(
             target_ip,
             target_port,
@@ -880,7 +897,7 @@ impl FeisuoEngine {
         dest_sub_path: &str,
         grant_code: &str,
         volume: &str,
-    ) -> Result<()> {
+    ) -> Result<String> {
         self.client
             .request_pull_in_volume(
                 target_ip,

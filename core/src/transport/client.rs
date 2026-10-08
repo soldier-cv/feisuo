@@ -157,6 +157,8 @@ pub struct RemoteBrowseListing {
     pub volume: String,
     /// 对端能力集（诊断用）
     pub peer_caps: u32,
+    /// 对端常用位置（已按访问范围过滤）。旧对端不发这个字段时为空。
+    pub places: Vec<crate::storage::KnownPlace>,
 }
 
 /// 卷通配符：让服务端挑一个可读卷（客户端不该猜盘符，见
@@ -474,6 +476,126 @@ impl TransferClient {
         resume_key: Option<String>,
         dest_sub_path: &str,
     ) -> Result<SendReport> {
+        let first_file_name = items
+            .first()
+            .map(|(_, name)| name.clone())
+            .unwrap_or_else(|| "文件".into());
+        let total_count = items.len();
+
+        let max_retries = 3;
+        let mut last_err = None;
+
+        for attempt in 0..=max_retries {
+            if attempt > 0 {
+                // 如果用户在本机点了取消，立刻中止重试
+                if self.take_local_abort(target_device_id) {
+                    let err = FeisuoError::LocallyAborted {
+                        message: "已在本机撤销本次传输".into(),
+                        bytes_sent: 0,
+                    };
+                    self.emit_terminal(
+                        "",
+                        target_device_id,
+                        target_device_name,
+                        &first_file_name,
+                        0,
+                        0,
+                        TransferStatus::Cancelled,
+                    );
+                    return Err(err);
+                }
+
+                let backoff_ms = attempt as u64 * 1000;
+                tracing::warn!(
+                    "网络异常断开，将在 {}ms 后尝试第 {}/{} 次自动重连与断点续传...",
+                    backoff_ms,
+                    attempt,
+                    max_retries
+                );
+                // 广播一个正在自动恢复的状态，通知 UI
+                let _ = self.progress_tx.send(TransferProgress {
+                    transfer_id: resume_key.clone().unwrap_or_default(),
+                    direction: TransferDirection::Send,
+                    peer_device_id: target_device_id.to_string(),
+                    peer_device_name: target_device_name.to_string(),
+                    current_file: format!("网络抖动，正在自动恢复中 ({}/{})...", attempt, max_retries),
+                    file_index: 0,
+                    total_files: total_count as u32,
+                    bytes_transferred: 0,
+                    total_bytes: 0,
+                    progress_percent: 0.0,
+                    speed_bytes_per_sec: 0,
+                    status: TransferStatus::Transferring,
+                });
+                tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+            }
+
+            let res = self
+                .send_files_as_diag_full_inner(
+                    target_ip,
+                    target_port,
+                    target_device_id,
+                    target_device_name,
+                    items.clone(),
+                    grant_code,
+                    resume_key.clone(),
+                    dest_sub_path,
+                )
+                .await;
+
+            match res {
+                Ok(report) => return Ok(report),
+                Err(e) => {
+                    // 「每次匹配码」、用户主动撤销、安全策略拒绝等致命或确定性错误直接退出，不重试
+                    if matches!(
+                        e,
+                        FeisuoError::GrantCodeRequired(_)
+                            | FeisuoError::LocallyAborted { .. }
+                            | FeisuoError::Cancelled
+                            | FeisuoError::Security(_)
+                    ) {
+                        return Err(e);
+                    }
+                    tracing::warn!("传输遭遇网络异常 (第 {} 次尝试): {}", attempt + 1, e);
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        let err = last_err.unwrap_or_else(|| FeisuoError::Network("重试次数耗尽，连接失败".into()));
+        let is_cancelled = matches!(err, FeisuoError::LocallyAborted { .. } | FeisuoError::Cancelled);
+        let status = if is_cancelled {
+            TransferStatus::Cancelled
+        } else {
+            TransferStatus::Failed(err.to_string())
+        };
+        self.emit_terminal(
+            "",
+            target_device_id,
+            target_device_name,
+            &if total_count > 1 {
+                format!("{} 个文件", total_count)
+            } else {
+                first_file_name
+            },
+            0,
+            0,
+            status,
+        );
+        Err(err)
+    }
+
+    async fn send_files_as_diag_full_inner(
+        &self,
+        target_ip: &str,
+        target_port: u16,
+        target_device_id: &str,
+        target_device_name: &str,
+        items: Vec<(PathBuf, String)>,
+        grant_code: &str,
+        resume_key: Option<String>,
+        dest_sub_path: &str,
+    ) -> Result<SendReport> {
         // 建档: 之后每个阶段都往里打点, 失败路径也要能产出可用记录
         let mut diag = TransferDiagnostics::start(
             uuid::Uuid::new_v4().to_string(),
@@ -552,9 +674,10 @@ impl TransferClient {
         // 预扫描（哈希整文件）可能要好几秒。用户在这期间点撤销时，
         // 还没有任何字节出站 —— 必须在开口之前就停下来，而不是建完连再传。
         if self.take_local_abort(target_device_id) {
-            return Err(FeisuoError::LocallyAborted(
-                "已在本机撤销，文件尚未发出".into(),
-            ));
+            return Err(FeisuoError::LocallyAborted {
+                message: "已在本机撤销，文件尚未发出".into(),
+                bytes_sent: 0,
+            });
         }
 
         // 2. 消息类型 + 握手
@@ -697,7 +820,10 @@ impl TransferClient {
             total_size,
             chunk_size: CHUNK_SIZE as u32,
             files: file_metas,
-            timestamp: now,
+            // 不用握手时的 `now`。对方确认框能等 60 秒，这份哈希又在确认之后才算。
+            // 沿用开口时的时间戳，大文件会被接收方判成「时间戳偏差过大」。
+            // 重放窗口仍由握手时间戳把守；清单只证明「这份清单是刚签的」。
+            timestamp: chrono::Utc::now().timestamp(),
             signature: String::new(),
         };
         // 清单必须签名: 接收方会用它验证文件名/大小/分块数未被篡改
@@ -715,9 +841,10 @@ impl TransferClient {
             .unwrap_or(false)
         {
             let _ = self.take_local_abort(target_device_id);
-            return Err(FeisuoError::LocallyAborted(
-                "已在本机撤销，文件尚未发出".into(),
-            ));
+            return Err(FeisuoError::LocallyAborted {
+                message: "已在本机撤销，文件尚未发出".into(),
+                bytes_sent: 0,
+            });
         }
 
         let manifest_started = std::time::Instant::now();
@@ -731,6 +858,7 @@ impl TransferClient {
         let mut needed_set: std::collections::HashSet<u32> =
             (0..plan.len() as u32).collect();
         let mut skipped_names: Vec<String> = Vec::new();
+        let mut file_resume_map: std::collections::HashMap<u32, (u32, u64)> = std::collections::HashMap::new();
         if hs_resp.caps & crate::protocol::caps::RESUME != 0 {
             let ack: ManifestAck = read_json_frame(&mut stream, "清单应答").await?;
             if !ack.success {
@@ -751,40 +879,48 @@ impl TransferClient {
             for c in &ack.completed {
                 skipped_names.push(c.relative_path.clone());
             }
-            if !skipped_names.is_empty() {
+            for r in &ack.file_resumes {
+                file_resume_map.insert(r.file_index, (r.next_chunk_index, r.bytes_resumed));
+            }
+            if !skipped_names.is_empty() || !ack.file_resumes.is_empty() {
                 info!(
-                    "断点续传: 对端已有 {} 个文件, 本次只发 {} 个（{}）",
+                    "断点续传: 对端跳过 {} 个完整文件, {} 个文件从分块断点续传（{}）",
                     skipped_names.len(),
-                    needed_set.len(),
+                    ack.file_resumes.len(),
                     ack.message
                 );
             }
         }
 
-        // 6. 流式发送分块
+        // 6. 流式发送分块（支持异步预读流水线与分块断点续传）
         let started_at = Instant::now();
-        let mut bytes_sent = 0u64;
+        // 初始已传字节数累加已跳过的分块量，确保断点续传进度平滑无缝
+        let mut bytes_sent: u64 = file_resume_map.values().map(|(_, b)| *b).sum();
         let mut last_chunk_at = started_at;
         // 本次传输是否已经尝试过二次调大（只试一次, 避免反复换手柄）
         let mut bdp_regrow_tried = false;
 
         for (file_idx, (path, _, name, _)) in plan.iter().enumerate() {
             // 断点续传（P1 ⑪）：只发接收方点名要的文件。
-            //
-            // ⚠️ `file_idx` 仍用**清单里的原始下标**（不是"第几个要发的文件"）——
-            // 接收端按 `file_index` 定位落盘路径与 `FileMeta`，改成本地连续下标
-            // 会让所有续传文件落到错误路径上，而且校验会通过（因为分块头里的
-            // hash 是对的）—— 这类 bug 极难发现。
             if !needed_set.contains(&(file_idx as u32)) {
-                // 名字已经在上面按 `ack.completed` 记过一次。
-                // 这里再 push 会让「对端已存在」变成真实数量的两倍，
-                // 界面上「跳过 2 个」其实只跳过了 1 个。
                 continue;
             }
             let meta = manifest.files[file_idx].clone();
+            let (start_chunk_idx, resumed_bytes) = file_resume_map
+                .get(&(file_idx as u32))
+                .copied()
+                .unwrap_or((0, 0));
+            if (start_chunk_idx as u64) >= meta.chunk_count {
+                continue;
+            }
+            if start_chunk_idx > 0 {
+                info!(
+                    "分块断点续传生效: 文件 {} 跳过前 {} 块 ({} 字节), 从第 {} 块继续",
+                    name, start_chunk_idx, resumed_bytes, start_chunk_idx
+                );
+            }
+
             // 整个文件只开一次句柄（§9.3 第 1 行）。
-            // 旧实现每块 `File::open`, 4 GiB 文件就是 1024 次 open + 1024 次 seek。
-            // 开句柄是同步 IO, 必须离开 runtime worker。
             let reader = match tokio::task::spawn_blocking({
                 let path = path.clone();
                 move || crate::storage::ChunkReader::open(&path, CHUNK_SIZE)
@@ -800,12 +936,35 @@ impl TransferClient {
                     )))
                 }
             };
-            for chunk_idx in 0..meta.chunk_count {
+
+            // ---- 异步预读流水线（Read-Ahead Pipeline Channel）----
+            // 构建深度为 3 的有限容量通道，内存最多占用 3 * 4MiB = 12MB。
+            // 预读 Worker 线程提前读取磁盘块并在后台计算 BLAKE3 哈希；
+            // 网络异步循环直接消费内存中已准备完毕的数据，磁盘与网络 100% 重叠并行！
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<(u64, Vec<u8>, String)>(3);
+            let prefetch_reader = reader.clone();
+            let total_chunks = meta.chunk_count;
+            let start_chunk = start_chunk_idx as u64;
+
+            let _prefetch_worker = tokio::task::spawn_blocking(move || {
+                for c_idx in start_chunk..total_chunks {
+                    let c_data = match prefetch_reader.read_chunk(c_idx) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            tracing::warn!("流水线预读分块 {} 失败: {}", c_idx, e);
+                            break;
+                        }
+                    };
+                    let c_hash = ChunkStore::hash_chunk(&c_data);
+                    if tx.blocking_send((c_idx, c_data, c_hash)).is_err() {
+                        // 消费端因取消或网络异常关闭
+                        break;
+                    }
+                }
+            });
+
+            while let Some((chunk_idx, chunk_data, hash)) = rx.recv().await {
                 // 本机撤销：停在分块边界，不再把下一块写出去。
-                //
-                // 进度事件要等这一块发完才有，所以用户在「第一块还在读盘」
-                // 时点的撤销，靠的就是这里，而不是对端的 cancelled 集合。
-                // 对端那一侧由引擎在拿到 transfer_id 之后补发 MSG_CANCEL。
                 if self.take_local_abort(target_device_id) {
                     self.emit_terminal(
                         &transfer_id,
@@ -817,20 +976,11 @@ impl TransferClient {
                         TransferStatus::Cancelled,
                     );
                     diag.finish("cancelled", Some("本机在传输过程中撤销".into()));
-                    return Err(FeisuoError::LocallyAborted(
-                        "已在本机撤销本次传输".into(),
-                    ));
+                    return Err(FeisuoError::LocallyAborted {
+                        message: format!("已在本机撤销本次传输（已发出 {} 字节）", bytes_sent),
+                        bytes_sent,
+                    });
                 }
-                // 4 MiB 的同步磁盘读绝不能占用 runtime worker:
-                // 一个 9 MB 的文件就要卡住 worker 三次, 并发传输时
-                // 会把发现广播、心跳、审批响应一起饿死。
-                let chunk_data = tokio::task::spawn_blocking({
-                    let reader = reader.clone();
-                    move || reader.read_chunk(chunk_idx)
-                })
-                .await
-                .map_err(|e| FeisuoError::Internal(format!("分块读取任务异常: {}", e)))??;
-                let hash = ChunkStore::hash_chunk(&chunk_data);
 
                 let header = ChunkHeader {
                     transfer_id: transfer_id.clone(),
@@ -845,9 +995,7 @@ impl TransferClient {
                 }
 
                 bytes_sent += chunk_data.len() as u64;
-                // 逐块采样吞吐 + 记录停顿。
-                // 停顿(相邻块间隔过大)通常意味着磁盘读阻塞或网络抖动,
-                // 是区分"链路慢"与"磁盘慢"的关键信号（§9.7）。
+                // 逐块采样吞吐 + 记录停顿
                 let now_instant = Instant::now();
                 let gap_ms = now_instant.duration_since(last_chunk_at).as_millis() as u64;
                 last_chunk_at = now_instant;
@@ -1113,6 +1261,7 @@ impl TransferClient {
             volume_mode: resp.volume_mode,
             volume: resp.volume,
             peer_caps: resp.caps,
+            places: resp.places,
         };
         // 协商结果写进诊断日志：事后分析"为什么界面没出现盘符下拉"时，
         // 一行日志就能定位是对端 1.x 还是本机 scope 配错。
@@ -1154,7 +1303,7 @@ impl TransferClient {
         target_port: u16,
         sub_paths: Vec<String>,
         dest_sub_path: &str,
-    ) -> Result<()> {
+    ) -> Result<String> {
         self.request_pull_with_code(target_ip, target_port, sub_paths, dest_sub_path, "")
             .await
     }
@@ -1171,7 +1320,7 @@ impl TransferClient {
         sub_paths: Vec<String>,
         dest_sub_path: &str,
         grant_code: &str,
-    ) -> Result<()> {
+    ) -> Result<String> {
         self.request_pull_in_volume(
             target_ip,
             target_port,
@@ -1195,7 +1344,7 @@ impl TransferClient {
         dest_sub_path: &str,
         grant_code: &str,
         volume: &str,
-    ) -> Result<()> {
+    ) -> Result<String> {
         if sub_paths.is_empty() {
             return Err(FeisuoError::Protocol("未选择要取回的文件".into()));
         }
@@ -1250,8 +1399,11 @@ impl TransferClient {
                 resp.message
             )));
         }
-        info!("Pull request accepted by {}", resp.receiver_name);
-        Ok(())
+        info!("Pull request accepted by {}: {}", resp.receiver_name, resp.message);
+        // 成功时的原文必须带回去。里面有实际要推的文件数，
+        // 也是对端唯一会写「这次其实没把某个目录算进去」的地方。
+        // 丢掉它，宿主只能自己写一句「已受理」，用户分不出取回了几个文件。
+        Ok(resp.message)
     }
 
     /// 双向解除配对（§14.5）：**先**通知对端，**再**改本地状态。

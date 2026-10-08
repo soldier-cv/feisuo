@@ -461,6 +461,21 @@ pub struct ManifestAck {
     /// 同名文件（`name (1).ext`），最终下标只有接收端知道。
     #[serde(default)]
     pub dest_paths: Vec<String>,
+    /// 分块级断点续传：对于 needed 中的未完成文件，已在暂存区接收并校验通过的分块进度。
+    /// 发送端直接从指定 chunk 开始读取与发送，实现断点秒续（P1 ⑪ 进阶）。
+    #[serde(default)]
+    pub file_resumes: Vec<FileResumeProgress>,
+}
+
+/// 单个文件的分块级断点续传进度信息。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileResumeProgress {
+    /// 对应 `manifest.files` 的原始下标
+    pub file_index: u32,
+    /// 接收端已完整接收并校验的起始连续分块数（发送端应从该 chunk_index 开始发送）
+    pub next_chunk_index: u32,
+    /// 该文件已就绪的有效字节数（供发送方统计已传字节与显示初始进度）
+    pub bytes_resumed: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

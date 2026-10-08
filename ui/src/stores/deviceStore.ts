@@ -49,27 +49,40 @@ export const useDeviceStore = defineStore("devices", {
       try {
         this.roster = await FeisuoBridge.getDeviceRoster();
       } catch {
-        // 名册拿不到时退回在线表, 至少别让侧栏空掉
+        // 名册拿不到时退回在线表, 至少别让侧栏空掉。
+        // 在线表只有 `is_trusted`，分不出「永久信任」和「每次匹配码」。
+        // 把已信任一律写成 permanent，名册一失败，每次匹配码就会静默收文件。
+        // 信任库还在时用它的真实等级；两边都失败才退回 pending，宁可多确认一次。
+        let trustedLevel = new Map<string, DeviceRosterEntry["trust_level"]>();
+        try {
+          const trusted = await FeisuoBridge.getTrustedDevices();
+          trustedLevel = new Map(trusted.map((d) => [d.device_id, d.trust_level]));
+        } catch {
+          trustedLevel = new Map();
+        }
         const online = await FeisuoBridge.getOnlineDevices();
-        this.roster = online.map((d) => ({
-          device_id: d.device_id,
-          device_name: d.device_name,
-          os_type: d.os_type,
-          trust_level: (d.is_trusted ? "permanent" : "pending") as DeviceRosterEntry["trust_level"],
-          visible: true,
-          presence: "online" as Presence,
-          last_seen_at: Math.floor(Date.now() / 1000),
-          last_seen_human: "刚刚",
-          ip: d.ip,
-          transfer_port: d.transfer_port,
-          last_ip: d.ip,
-          is_paired: d.is_trusted,
-          is_self: false,
-          // 退回在线表时也要带上 caps —— 否则名册接口一失败，
-          // 穿梭右栏就会以为所有设备都是 1.x，退回收件目录视图。
-          peer_caps: d.caps,
-          peer_version: d.app_version,
-        }));
+        this.roster = online.map((d) => {
+          const level = trustedLevel.get(d.device_id) ?? "pending";
+          return {
+            device_id: d.device_id,
+            device_name: d.device_name,
+            os_type: d.os_type,
+            trust_level: level,
+            visible: true,
+            presence: "online" as Presence,
+            last_seen_at: Math.floor(Date.now() / 1000),
+            last_seen_human: "刚刚",
+            ip: d.ip,
+            transfer_port: d.transfer_port,
+            last_ip: d.ip,
+            is_paired: level === "permanent" || level === "session",
+            is_self: false,
+            // 退回在线表时也要带上 caps —— 否则名册接口一失败，
+            // 穿梭右栏就会以为所有设备都是 1.x，退回收件目录视图。
+            peer_caps: d.caps,
+            peer_version: d.app_version,
+          };
+        });
       }
       // 选中的设备离线时**不**自动切走 —— 灰显保留比突然换目标更安全（§3.7）
       if (

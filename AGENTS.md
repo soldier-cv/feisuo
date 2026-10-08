@@ -9,9 +9,9 @@
 飞梭 (Feisuo) 是一款面向 **Windows 桌面端** 与 **Android 移动端** 的极致轻量、零配置、无人值守局域网传输工具。
 
 ### 核心体验准则
-1. **开机自启，入网自连**：
+1. **启动与生命周期**：
    - Windows 桌面端支持登录静默启动并常驻系统托盘，关窗不退出；
-   - Android 移动端具备开机自启广播 (`BOOT_COMPLETED`) 与前台保活服务 (`Foreground Service`)，杜绝被系统杀后台；
+   - Android 移动端按轻量无打扰设计**去常驻后台、去开机自启**：随应用打开启动服务，退出或划掉卡片彻底退出；运行期间（含锁屏）持有 `MulticastLock` 确保秒级互联与传输不中断；
    - 基于 **mDNS (Multicast DNS)** 与历史 IP 缓存并发探测，局域网内开机 50ms 内瞬间完成自连握手。
 2. **一次配对，终生免密**：
    - 首次绑定通过扫码或 6 位 PIN 码交换 Ed25519 设备指纹；
@@ -70,13 +70,12 @@ feisuo/
 │   │   └── src/
 │   │       ├── tray.rs        # 系统托盘菜单与窗口显示/隐藏拦截
 │   │       └── autostart.rs   # Windows 任务计划/注册表自启配置
-├── mobile/                    # [待构建] Android 移动端工程与保活服务
+├── mobile/                    # Android 移动端工程与传输服务
 │   ├── android/
 │   │   ├── app/src/main/
-│   │   │   ├── AndroidManifest.xml # BOOT_COMPLETED、前台服务权限声明
+│   │   │   ├── AndroidManifest.xml # 前台服务声明、无开机自启
 │   │   │   └── java/net/findfine/feisuo/
-│   │   │       ├── BootReceiver.kt          # 开机广播接收器
-│   │   │       ├── FeisuoDaemonService.kt   # 前台常驻保活服务 (Foreground Service)
+│   │   │       ├── FeisuoDaemonService.kt   # 会话级前台服务 (含 MulticastLock，支持锁屏互联)
 │   │   │       └── ShareTargetActivity.kt   # 系统“分享到飞梭”原生扩展
 └── ui/                        # [待构建] 前端跨端通用界面 (Vue 3 + Vite / HTML5)
     ├── src/
@@ -105,9 +104,9 @@ feisuo/
 
 | 工作流 | 触发 | 职责 |
 | :--- | :--- | :--- |
-| `ci.yml` | push / PR 到 `main` | 装 Rust + pnpm → 构建 UI（含 `vue-tsc` 类型检查）→ `cargo check --workspace --all-targets` → `cargo test --workspace` |
-| `release.yml` | tag `v*` / 手动 | 打版本号 → 构建 → 上传 `Feisuo-win-x64.exe` → 发 GitHub Release → 同步 Gitee Release |
-| `sync-gitee.yml` | push 到 `main` / tag `v*` / 手动 | 镜像分支与全部 Tag 到 Gitee |
+| `ci.yml` | push / PR 到 `main`/`master` | 快速执行代码编译与语法检查（Rust + UI 类型检查 + 架构守卫），不打包、不发版 |
+| `sync-gitee.yml` | push 到 `main`/`master` / 手动 | 仅将主分支最新提交镜像推送到 Gitee（30秒内结束，源码实时同步，不推 Tag、不触发发版） |
+| `release.yml` | tag `v*` 唯一独占 / 手动 | 提取 CHANGELOG 说明 → 构建双端正式包（Win exe + Android APK）→ 发 GitHub Release → 一次性交付 Gitee（推 Tag + 创 Release + 传附件） |
 
 ### 🔴 规则 5：Gitee 镜像（强制）
 
@@ -138,11 +137,12 @@ feisuo/
 
 ### 🔴 规则 7：发版产物
 
-- 绿色版单文件 `Feisuo-win-x64.exe`，**不做 ZIP、不做安装器**。
-- 该文件名被客户端 `updater.rs` 精确匹配，改名会让所有在线用户
-  永远解析不到附件（守卫 `update_guard::current_version_must_come_from_cargo_pkg` 会拦截）。
-- 产物体积下限由 `release.yml` 断言（`< 1MB` 视为构建失败），
-  防止"构建成功但只产出了残缺 exe"被发版出去。
+- **Windows 桌面端**：绿色版单文件 `Feisuo-win-x64.exe`，**不做 ZIP、不做安装器**。
+  - 该文件名被客户端 `updater.rs` 精确匹配，改名会让所有在线用户永远解析不到附件（守卫 `update_guard::current_version_must_come_from_cargo_pkg` 会拦截）。
+  - 产物体积下限由 `release.yml` 断言（`< 1MB` 视为构建失败），防止残缺产物发版。
+- **Android 移动端**：Release 单文件 `Feisuo-v${ver}-arm64.apk`。
+  - 产物体积下限由 `release.yml` 断言（`< 2MB` 视为构建失败）。
+  - Release 工作流同时向 GitHub Release 和 Gitee Release 镜像上传 Windows exe 与 Android APK，并严格验证双端产物上传完整性。
 
 ### 常见命令
 

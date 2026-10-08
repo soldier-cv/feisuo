@@ -205,3 +205,60 @@ impl PathManager {
         )))
     }
 }
+
+/// 把暂存文件提交到已经占好的最终路径。
+///
+/// `dest` 是 `resolve_unique_subpath` 刚用 `create_new` 占出来的空文件。
+/// Windows 上 `std::fs::rename` **不能覆盖已有文件**，所以那条路每次都会失败，
+/// 再退化为整文件复制。复制中途失败时，这个 0 字节占位会留在收件目录里，
+/// 下一次同名传输又会变成 `file (1).ext`。
+///
+/// Windows 用 `MoveFileExW` 直接替换这个占位（同卷移动仍是元数据操作）。
+/// 其它平台 `rename` 本来就能覆盖。移动失败才复制，并且复制失败时删掉占位。
+pub fn commit_staged_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    if replace_move(from, to).is_ok() {
+        return Ok(());
+    }
+    match std::fs::copy(from, to) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(from);
+            Ok(())
+        }
+        Err(e) => {
+            // 占位是空的。留着它，用户会看到一个 0 字节的「成功文件」。
+            let _ = std::fs::remove_file(to);
+            Err(e)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn replace_move(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING};
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    let src = wide(from);
+    let dst = wide(to);
+    // SAFETY: 两个缓冲区都以 NUL 结尾，且在调用期间有效。
+    unsafe {
+        MoveFileExW(
+            PCWSTR(src.as_ptr()),
+            PCWSTR(dst.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING,
+        )
+    }
+    .map_err(|e| std::io::Error::from_raw_os_error(e.code().0))
+}
+
+#[cfg(not(windows))]
+fn replace_move(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::rename(from, to)
+}

@@ -22,11 +22,9 @@
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
 
-    <!-- Autostart & Persistence Permissions -->
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Session-bound Foreground Service Permissions -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!--
@@ -90,48 +88,17 @@
             </intent-filter>
         </activity>
 
-        <!-- Boot / App Update Receiver -->
-        <receiver
-            android:name=".BootReceiver"
-            android:enabled="true"
-            android:exported="true"
-            android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
-                <!--
-                  更新安装时系统会主动 kill 进程, START_STICKY 不会重新拉起,
-                  自连能力会静默消失直到下次重启手机。
-                -->
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-        </receiver>
-
         <!--
-          Persistent Foreground Service.
-
-          为什么是 connectedDevice 而不是 dataSync:
-          Android 15 (targetSdk 35) 给 **dataSync** 与 **mediaProcessing**
-          两类各加了"24 小时内累计 6 小时"的硬上限, 超时且未重写
-          Service.onTimeout() 会抛 RemoteServiceException 直接杀掉进程。
-          与"开机自连 7x24 无人值守"的产品承诺直接互斥。
-
-          ⚠️ 那个 6 小时上限**只**适用于 dataSync / mediaProcessing 这两类
-          (两者各自独立计时, 见
-          https://developer.android.com/develop/background-work/services/fgs/timeout),
-          **connectedDevice 没有这个限制** —— 所以本服务不需要 onTimeout()。
-
-          这条注释以前写的是"只保留 connectedDevice: dataSync 在 Android 15 上有
-          6 小时上限", 少了"哪一类"的前提, 容易被读成 connectedDevice 也受限,
-          进而有人去加一个不必要的 onTimeout。
+          Session-bound Foreground Service.
+          随应用启动运行，持有 Wi-Fi 组播锁以保证锁屏期间仍能被局域网发现并高速传输。
+          非永久常驻：用户划掉多任务卡片或在通知栏停止时彻底销毁，不占用后台。
         -->
         <service
             android:name=".FeisuoDaemonService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="connectedDevice"
-            android:stopWithTask="false" />
+            android:stopWithTask="true" />
 
         <!-- System Share Target Activity -->
         <activity

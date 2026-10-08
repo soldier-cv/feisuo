@@ -20,6 +20,7 @@ fn default_theme() -> String { "dark".to_string() }
 fn default_discovery_bind() -> String { "0.0.0.0".to_string() }
 fn default_approval_timeout() -> u64 { 60 }
 fn default_auto_check_update() -> bool { true }
+fn default_max_concurrent_transfers() -> u32 { 3 }
 
 /// 「同类操作短期授权」的默认秒数（§2.3.1）：5 分钟。
 fn default_session_grant_ttl() -> u64 { SESSION_GRANT_DEFAULT_SECS }
@@ -126,6 +127,9 @@ pub struct AppConfig {
     /// 该字段由桌面端宿主读写, core 本身不消费它。
     #[serde(default = "default_auto_check_update")]
     pub auto_check_update: bool,
+    /// 最大并发传输任务数，默认 3，取值范围 1..=10
+    #[serde(default = "default_max_concurrent_transfers")]
+    pub max_concurrent_transfers: u32,
 }
 
 impl Default for AppConfig {
@@ -147,6 +151,7 @@ impl Default for AppConfig {
             close_action: default_close_action(),
             theme: "dark".to_string(),
             auto_check_update: default_auto_check_update(),
+            max_concurrent_transfers: default_max_concurrent_transfers(),
             approval_timeout_secs: default_approval_timeout(),
             session_grant_ttl_secs: default_session_grant_ttl(),
             // 空 = 不限制来源网段。见 `allowed_peer_subnets` 的注释：

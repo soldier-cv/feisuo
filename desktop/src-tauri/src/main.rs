@@ -240,6 +240,7 @@ async fn main() {
             commands::send_files,
             commands::generate_pair_pin,
             commands::open_receive_folder,
+            commands::open_path_in_folder,
             commands::set_autostart,
             commands::list_directory_files,
             commands::list_remote_files,

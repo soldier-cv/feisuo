@@ -293,7 +293,13 @@ pub fn authorize(
                 )
             }
         };
-        if let Some(reason) = check_scope(&scope, op, ctx) {
+        // 收件目录是「仅收件目录」唯一还允许看见的地方。
+        // `can_read` 在这个模式下对任何路径都返回 false —— 那是在说
+        // "真实磁盘一律不给"，不是"连收件目录自己也不给"。
+        // 不在这里豁免的话，用户选了最严一档之后，对方连刚收下的文件
+        // 都打不开，界面上像是功能坏了。
+        let inbox = cfg.receive_dir.clone();
+        if let Some(reason) = check_scope(&scope, op, ctx, &inbox) {
             return Decision::deny(DenyCode::ScopeDenied, reason);
         }
     }
@@ -302,28 +308,37 @@ pub fn authorize(
 }
 
 /// 范围与能力检查。返回 `Some(拒绝原因)` 表示拒绝。
-fn check_scope(scope: &AccessScope, op: Op, ctx: &AuthContext<'_>) -> Option<String> {
+///
+/// `receive_dir` 是本机收件目录。`ReceiveOnly` 下它（以及它的子路径）
+/// 仍然可读、可取回 —— 模式名说的就是这件事。收件目录之外的路径继续拒绝。
+fn check_scope(
+    scope: &AccessScope,
+    op: Op,
+    ctx: &AuthContext<'_>,
+    receive_dir: &std::path::Path,
+) -> Option<String> {
+    let in_inbox = path_is_in_receive_dir(ctx.path, receive_dir);
     match op {
         Op::Browse => {
-            if !scope.can_read(ctx.volume, ctx.path) {
-                return Some(format!(
-                    "该设备无权浏览此路径（可访问范围: {}）",
-                    scope.mode.as_db_str()
-                ));
+            if in_inbox || scope.can_read(ctx.volume, ctx.path) {
+                return None;
             }
-            None
+            Some(format!(
+                "该设备无权浏览此路径（可访问范围: {}）",
+                scope.mode.as_db_str()
+            ))
         }
         Op::Pull => {
             if !scope.can_pull {
                 return Some("该设备无权取走本机文件".into());
             }
-            if !scope.can_read(ctx.volume, ctx.path) {
-                return Some(format!(
-                    "该设备无权取走此路径（可访问范围: {}）",
-                    scope.mode.as_db_str()
-                ));
+            if in_inbox || scope.can_read(ctx.volume, ctx.path) {
+                return None;
             }
-            None
+            Some(format!(
+                "该设备无权取走此路径（可访问范围: {}）",
+                scope.mode.as_db_str()
+            ))
         }
         Op::Push | Op::Receive => {
             // D2 决策: 写入权限与读取权限解耦, 默认只允许写收件目录。
@@ -338,6 +353,18 @@ fn check_scope(scope: &AccessScope, op: Op, ctx: &AuthContext<'_>) -> Option<Str
         }
         _ => None,
     }
+}
+
+/// 路径是否落在收件目录之内（含收件目录自身）。
+///
+/// 空路径不算：入站传输故意传空串，不能被这条豁免误放成"能读任意盘"。
+/// 判定与列举阶段同一套 `is_within`，避免"列表里看得见、点进去被拒"。
+fn path_is_in_receive_dir(path: &str, receive_dir: &std::path::Path) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    crate::storage::is_within(std::path::Path::new(trimmed), receive_dir)
 }
 
 /// 读取对端信任等级；查不到或出错一律按 [`TrustLevel::Pending`]（最严）。

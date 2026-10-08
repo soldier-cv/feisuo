@@ -43,6 +43,8 @@ pub struct LocalDeviceInfo {
     /// 设置页要能**读回已保存的值**，否则用户存完刷新就看到空的，
     /// 以为没保存成功。
     pub allowed_peer_subnets: Vec<String>,
+    /// 最大并发传输任务数
+    pub max_concurrent_transfers: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -176,6 +178,7 @@ pub async fn get_local_info(state: State<'_, AppState>) -> Result<LocalDeviceInf
         app_version: crate::updater::current_version(),
         auto_check_update: cfg.auto_check_update,
         allowed_peer_subnets: cfg.allowed_peer_subnets.clone(),
+        max_concurrent_transfers: cfg.max_concurrent_transfers,
     })
 }
 
@@ -371,6 +374,8 @@ pub struct SendOutcome {
     pub expand_symlinks_skipped: u32,
     /// 展开时触发的限制说明
     pub expand_limit_hit: Option<String>,
+    /// 本机撤销。返回 Ok 是为了不走红色失败，但界面不能把它当成「已发送」。
+    pub locally_aborted: bool,
 }
 
 /// 发送文件到目标设备。
@@ -428,11 +433,21 @@ pub async fn send_files(
     {
         // 本机在 5 秒窗口里撤销。不是失败 —— 当成失败的话前端会弹红色
         // 「发送失败」，用户会以为没撤成，然后把同一批文件再发一遍。
-        Err(FeisuoError::LocallyAborted(_)) | Err(FeisuoError::Cancelled) => {
+        Err(e @ (FeisuoError::LocallyAborted { .. } | FeisuoError::Cancelled)) => {
+            let sent = match &e {
+                FeisuoError::LocallyAborted { bytes_sent, .. } => *bytes_sent,
+                _ => 0,
+            };
+            let message = if sent == 0 {
+                "已撤销，文件未发出".to_string()
+            } else {
+                "已撤销，未传完的内容不会保留".to_string()
+            };
             Ok(SendOutcome {
                 skipped: 0,
                 grant_code_required: false,
-                message: "已撤销，文件未发出".into(),
+                locally_aborted: true,
+                message,
                 expanded_files: 0,
                 expand_skipped: 0,
                 expand_symlinks_skipped: 0,
@@ -444,6 +459,7 @@ pub async fn send_files(
             Ok(SendOutcome {
                 skipped,
                 grant_code_required: false,
+                locally_aborted: false,
                 message: String::new(),
                 expanded_files: scan.as_ref().map(|s| s.items.len() as u32).unwrap_or(0),
                 expand_skipped: scan.as_ref().map(|s| s.skipped).unwrap_or(0),
@@ -457,6 +473,7 @@ pub async fn send_files(
         Err(FeisuoError::GrantCodeRequired(msg)) => Ok(SendOutcome {
             skipped: 0,
             grant_code_required: true,
+            locally_aborted: false,
             message: if msg.trim().is_empty() {
                 format!("「{}」被设置为「每次匹配码」", target_name)
             } else {
@@ -481,6 +498,22 @@ pub fn generate_pair_pin(state: State<'_, AppState>) -> Result<String, String> {
 pub async fn open_receive_folder(state: State<'_, AppState>) -> Result<(), String> {
     let recv_dir = state.engine.config.read().await.receive_dir.clone();
     open_in_explorer(&recv_dir)
+}
+
+#[tauri::command]
+pub fn open_path_in_folder(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if p.exists() {
+        open_in_explorer(p)
+    } else if let Some(parent) = p.parent() {
+        if parent.exists() {
+            open_in_explorer(parent)
+        } else {
+            Err("目标文件及其所在目录不存在".into())
+        }
+    } else {
+        Err("目标路径不存在".into())
+    }
 }
 
 #[tauri::command]
@@ -773,7 +806,7 @@ pub async fn list_remote_files(
     limit: Option<u32>,
     grant_code: Option<String>,
     state: State<'_, AppState>,
-) -> Result<RemoteBrowseListingDto, String> {
+) -> Result<RemoteBrowseListingDto, BrowseDenied> {
     let target = feisuo_core::BrowseTarget {
         volume: volume.unwrap_or_default(),
         rel_path: rel_path.unwrap_or_default(),
@@ -785,7 +818,16 @@ pub async fn list_remote_files(
         .engine
         .list_remote_files(&target_ip, target_port, &target)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| match e {
+            FeisuoError::GrantCodeRequired(message) => BrowseDenied {
+                message,
+                grant_code_required: true,
+            },
+            other => BrowseDenied {
+                message: other.to_string(),
+                grant_code_required: false,
+            },
+        })?;
     Ok(RemoteBrowseListingDto {
         files: listing.files,
         current_path: listing.current_path,
@@ -798,7 +840,19 @@ pub async fn list_remote_files(
         volume_mode: listing.volume_mode,
         volume: listing.volume,
         peer_caps: listing.peer_caps,
+        places: listing.places,
     })
+}
+
+/// 浏览失败时的结构化原因。
+///
+/// `grant_code_required` 必须是字段，不能让前端去 `message` 里找「匹配码」三个字。
+/// 文案一改，浏览就会把协商回合当成普通失败，用户只看到红字，不知道该去对方窗口抄码。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseDenied {
+    pub message: String,
+    pub grant_code_required: bool,
 }
 
 /// 目录浏览结果的前端 DTO (serde 默认按 snake_case, 前端桥接层做 camelCase 转换)。
@@ -823,6 +877,8 @@ pub struct RemoteBrowseListingDto {
     pub volume: String,
     /// 对端能力位（诊断用）
     pub peer_caps: u32,
+    /// 对端常用位置（已按该设备的访问范围过滤）
+    pub places: Vec<feisuo_core::storage::KnownPlace>,
 }
 
 /// 回应审批请求。
@@ -1001,6 +1057,11 @@ pub async fn cancel_incoming_transfer(
     transfer_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
+    // 先停本机这一侧。下面查地址失败会直接返回，
+    // 若停放在查到端口之后，设备暂时不在名册里时发送循环完全不知道，
+    // 界面报「找不到该设备」，文件却继续发出去。
+    // 发送任务在读文件之前就已经记了开始时间，这次标记不会被当成上一次清掉。
+    state.engine.client.abort_outgoing(&peer_device_id);
     // 撤销需要实时地址：清单里离线设备只有 last_ip。
     let roster = state.engine.get_roster().await.map_err(|e| e.to_string())?;
     let peer = roster
@@ -1276,10 +1337,13 @@ pub async fn request_pull(
         )
         .await
     {
-        Ok(()) => Ok(SendOutcome {
+        // 对端原文里有实际要推的文件数。空字符串会让界面只能写死「已受理」，
+        // 用户分不出这次取回了几个文件、有没有目录被跳过。
+        Ok(peer_message) => Ok(SendOutcome {
             skipped: 0,
             grant_code_required: false,
-            message: String::new(),
+            locally_aborted: false,
+            message: peer_message,
             expanded_files: 0,
             expand_skipped: 0,
             expand_symlinks_skipped: 0,
@@ -1288,6 +1352,7 @@ pub async fn request_pull(
         Err(FeisuoError::GrantCodeRequired(msg)) => Ok(SendOutcome {
             skipped: 0,
             grant_code_required: true,
+            locally_aborted: false,
             message: msg,
             expanded_files: 0,
             expand_skipped: 0,
@@ -1404,6 +1469,10 @@ pub async fn update_app_config(
 ) -> Result<bool, String> {
     let patch: serde_json::Value = payload;
     let mut cfg = state.engine.config.write().await;
+    // 改副本。校验或落盘失败时，运行中的配置保持原样。
+    // 早先直接改锁里的那份：前面几项已经换上，后面某项失败就返回，
+    // 内存是新的，磁盘仍是旧的。局域网里已经能看到新名字，重启之后又变回去。
+    let mut next = cfg.clone();
 
     if let Some(name) = patch.get("device_name").and_then(|v| v.as_str()) {
         // 必须在这里消毒, 而不是等到广播时再消毒。
@@ -1417,27 +1486,27 @@ pub async fn update_app_config(
         if cleaned == "飞梭设备" && name.trim() != "飞梭设备" {
             return Err("设备名称含有无效字符 (控制字符 / 纯空白)".into());
         }
-        cfg.device_name = cleaned;
+        next.device_name = cleaned;
     }
     if let Some(ar) = patch.get("auto_receive").and_then(|v| v.as_bool()) {
-        cfg.auto_receive = ar;
+        next.auto_receive = ar;
     }
     if let Some(ll) = patch.get("log_level").and_then(|v| v.as_str()) {
         let normalized = ll.to_uppercase();
         if !matches!(normalized.as_str(), "INFO" | "DEBUG" | "WARN" | "ERROR") {
             return Err("日志级别取值非法".into());
         }
-        cfg.log_level = normalized;
+        next.log_level = normalized;
     }
     if let Some(ca) = patch.get("close_action").and_then(|v| v.as_str()) {
         if !matches!(ca, CLOSE_ACTION_ASK | CLOSE_ACTION_TRAY | CLOSE_ACTION_EXIT) {
             return Err("关闭方式取值非法".into());
         }
-        cfg.close_action = ca.to_string();
+        next.close_action = ca.to_string();
     }
     if let Some(theme) = patch.get("theme").and_then(|v| v.as_str()) {
         if matches!(theme, "dark" | "light") {
-            cfg.theme = theme.to_string();
+            next.theme = theme.to_string();
         }
     }
     // 来源网段白名单。**必须逐条校验后再落盘** ——
@@ -1470,20 +1539,23 @@ pub async fn update_app_config(
             }
             cleaned.push(t.to_string());
         }
-        cfg.allowed_peer_subnets = cleaned;
+        next.allowed_peer_subnets = cleaned;
     }
     if let Some(size) = patch.get("max_log_size_mb").and_then(|v| v.as_u64()) {
         // 0 会让日志写入每一条都触发轮转, 必须夹到下限
-        cfg.max_log_size_mb = size.clamp(1, 100) as u32;
+        next.max_log_size_mb = size.clamp(1, 100) as u32;
     }
     if let Some(records) = patch.get("max_history_records").and_then(|v| v.as_u64()) {
-        cfg.max_history_records = records.clamp(50, 100_000) as u32;
+        next.max_history_records = records.clamp(50, 100_000) as u32;
     }
     if let Some(days) = patch.get("record_retention_days").and_then(|v| v.as_u64()) {
         if days > 3650 {
             return Err("保留天数过大 (上限 3650 天)".into());
         }
-        cfg.record_retention_days = days as u32;
+        next.record_retention_days = days as u32;
+    }
+    if let Some(mct) = patch.get("max_concurrent_transfers").and_then(|v| v.as_u64()) {
+        next.max_concurrent_transfers = mct.clamp(1, 10) as u32;
     }
     if let Some(dir) = patch.get("receive_dir").and_then(|v| v.as_str()) {
         let candidate = PathBuf::from(dir.trim());
@@ -1491,17 +1563,19 @@ pub async fn update_app_config(
             return Err("保存目录不能为空".into());
         }
         std::fs::create_dir_all(&candidate).map_err(|e| format!("创建目录失败: {}", e))?;
-        cfg.receive_dir = candidate;
+        next.receive_dir = candidate;
     }
     if let Some(v) = patch.get("auto_check_update").and_then(|v| v.as_bool()) {
-        cfg.auto_check_update = v;
+        next.auto_check_update = v;
     }
 
     // 必须保存到引擎实际使用的数据目录, 不能用 resolve_app_dir() 再猜一次:
     // Android 宿主是显式注入目录的, 这里猜会写回错误位置。
+    // 先落盘再换上。落盘失败时 `next` 被丢掉，锁里的配置仍是改之前的那份。
     let app_dir = state.engine.app_dir.clone();
-    cfg.save_in(&app_dir).map_err(|e| e.to_string())?;
-    let new_level = cfg.log_level.clone();
+    next.save_in(&app_dir).map_err(|e| e.to_string())?;
+    let new_level = next.log_level.clone();
+    *cfg = next;
     drop(cfg);
 
     // 日志级别立即生效, 无需重启

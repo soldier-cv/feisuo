@@ -130,6 +130,7 @@ impl Node {
             max_log_size_mb: 1,
             max_history_records: 200,
             record_retention_days: 30,
+            max_concurrent_transfers: 3,
             discovery_bind: discovery_bind.into(),
             close_action: "ask".into(),
             theme: "dark".into(),
@@ -2449,6 +2450,7 @@ fn test_config_roundtrip_and_defaults() {
         max_log_size_mb: 5,
         max_history_records: 500,
         record_retention_days: 30,
+        max_concurrent_transfers: 3,
         discovery_bind: "0.0.0.0".into(),
         close_action: "tray".into(),
         theme: "light".into(),
@@ -3018,6 +3020,7 @@ fn test_transfer_history_retention_policy() {
                 5,     // 最多保留 5 条
                 30,    // 30 天
                 feisuo_core::security::TransferMetrics::default(),
+                &[],
             )
             .expect("写入历史");
     }
@@ -3066,7 +3069,7 @@ fn test_transfer_history_retention_policy() {
 ///
 /// `can_push=false` → 传输被拒（走 `refuse_transfer`）
 /// `can_pull=false` → 取回被拒（走 `refuse_by_msg_type(MSG_PULL)`）
-/// `mode=ReceiveOnly` → 浏览被拒（走 `refuse_by_msg_type(MSG_BROWSE)`）
+/// `mode=ReceiveOnly` → 收件目录仍可浏览，收件目录之外被拒
 fn deny_scope(push: bool, pull: bool, mode: feisuo_core::security::AccessMode) -> feisuo_core::security::AccessScope {
     feisuo_core::security::AccessScope {
         mode,
@@ -3199,9 +3202,12 @@ async fn test_browse_rejection_reaches_requester_in_browse_shape() {
     let b = Node::spawn("B", true).await;
     setup_pair(&a, &b).await;
 
-    // ReceiveOnly 下 `can_read` 对任何路径返回 false ⇒ 浏览必被拒。
-    // 这一条同时守住 `refuse_by_msg_type(MSG_BROWSE)`：回错结构的话对端会先撞
-    // `Serialization error: missing field 'files'` —— 那样断言就过不了。
+    // 「仅收件目录」拒绝的是真实磁盘，不是收件目录自己。
+    //
+    // 旧断言要求浏览收件根也被拒。那会把这个模式做成"什么都看不见"：
+    // 用户选了最严一档之后，对方连刚收下的文件都打不开。
+    // 这里改成：收件根必须能打开，收件根之外的卷必须被拒，
+    // 并且拒绝原因要出站（不能退化成 early eof / 结构错位）。
     b.engine
         .trust_store
         .set_access_scope(
@@ -3210,12 +3216,49 @@ async fn test_browse_rejection_reaches_requester_in_browse_shape() {
         )
         .expect("写访问范围应成功");
 
-    let err = a
+    let listing = a
         .engine
         .list_remote_files("127.0.0.1", b.port(), &feisuo_core::BrowseTarget::legacy(""))
         .await
-        .expect_err("ReceiveOnly 范围下浏览应被拒");
+        .expect("仅收件目录时，收件根必须能浏览");
+    assert!(
+        !listing.volume_mode,
+        "仅收件目录不得回真实卷模式"
+    );
 
+    // 盘根一定在收件目录之外。用它而不是临时目录：临时目录有可能
+    // 恰好落在测试收件箱里，断言就会被跳过，守卫变成空的。
+    let outside = feisuo_core::storage::volumes::split_browse_path(std::path::Path::new(
+        &std::env::temp_dir(),
+    ))
+    .map(|(vol, _)| (vol, String::new()));
+    let Some((vol, rel)) = outside else {
+        panic!("本机临时目录必须能拆出卷号，否则这条守卫测不到「盘外拒绝」");
+    };
+    assert!(
+        !feisuo_core::storage::is_within(
+            feisuo_core::storage::volumes::resolve_browse_path(&vol, &rel)
+                .expect("盘根必须能解析")
+                .as_path(),
+            &b.inbox()
+        ),
+        "测试收件目录不得就是盘根，否则「盘外拒绝」没有可拒的目标"
+    );
+    let err = a
+        .engine
+        .list_remote_files(
+            "127.0.0.1",
+            b.port(),
+            &feisuo_core::transport::BrowseTarget {
+                volume: vol,
+                rel_path: rel,
+                offset: 0,
+                limit: 0,
+                grant_code: String::new(),
+            },
+        )
+        .await
+        .expect_err("仅收件目录时，收件目录之外的卷必须被拒");
     assert_tells_the_sender_why(&err, "无权浏览", "浏览被可访问范围拒绝");
 
     cleanup(&[a, b]);

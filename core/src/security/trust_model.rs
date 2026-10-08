@@ -82,11 +82,13 @@ impl TrustLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessMode {
-    /// 只暴露飞梭收件目录 —— **最严格，等同旧行为**
+    /// 只暴露飞梭收件目录 —— 最严格
     ReceiveOnly,
-    /// 白名单：仅 [`AccessScope::allow_volumes`] 列出的卷
+    /// 白名单：仅允许指定的盘符或目录
     Allowlist,
-    /// 全部可浏览卷（默认），但仍强制套用系统敏感路径排除清单
+    /// 黑名单：允许所有盘符，除了排除的目录
+    Denylist,
+    /// 全部：所有内容均可访问，不区分系统目录
     All,
 }
 
@@ -95,20 +97,17 @@ impl AccessMode {
         match self {
             AccessMode::ReceiveOnly => "receive_only",
             AccessMode::Allowlist => "allowlist",
+            AccessMode::Denylist => "denylist",
             AccessMode::All => "all",
         }
     }
 
-    /// 未知值回落为 `all` —— **与 D1 决策一致**（默认全部）。
-    ///
-    /// 这里不 fail-closed 是**有意的**：这是"用户自己机器的暴露范围"，
-    /// 回落成 `receive_only` 会让用户困惑（"我明明选了全部，怎么又只能看收件箱"）。
-    /// 真正的安全下限由 [`AccessScope::MANDATORY_DENY`] 与
-    /// `can_push` 默认关闭来保证（§8.2 / §8.3）。
+    /// 未知值回落为 `all` —— 与 D1 决策一致（默认全部）。
     pub fn from_db_str(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
             "receive_only" | "receive-only" => AccessMode::ReceiveOnly,
             "allowlist" | "allow_list" => AccessMode::Allowlist,
+            "denylist" | "deny_list" => AccessMode::Denylist,
             _ => AccessMode::All,
         }
     }
@@ -206,29 +205,32 @@ impl AccessScope {
 
     /// 综合判断某个路径是否可读。
     ///
-    /// 判定顺序：强制排除 → 用户排除 → 模式 → 卷白名单 → 目录白名单。
+    /// 判定顺序：用户排除黑名单 → 模式判断（全部/黑名单/白名单/仅收件）。
     pub fn can_read(&self, volume: &str, abs_path: &str) -> bool {
         let norm = normalize_for_compare(abs_path);
-        if Self::is_mandatory_denied(&norm) {
-            return false;
-        }
+        // 命中自定义黑名单排除目录，一律拒绝访问
         if matches_any_pattern_with_ancestors(&self.deny_paths, &norm) {
             return false;
         }
         match self.mode {
             // 收件目录之外的任何路径都不可读
             AccessMode::ReceiveOnly => false,
+            // 全部模式：所有盘符与目录均可访问，不区分系统目录
+            AccessMode::All => true,
+            // 黑名单模式：排除项已在上方拦截，未被排除的均允许访问
+            AccessMode::Denylist => true,
+            // 白名单模式：命中指定目录或指定卷即放行
             AccessMode::Allowlist => {
-                if !self.allow_volumes.iter().any(|v| v.eq_ignore_ascii_case(volume)) {
-                    return false;
-                }
-                // 卷内白名单非空时, 路径必须落在其中之一之下
-                if self.allow_paths.is_empty() {
+                if !self.allow_paths.is_empty() && is_under_any_pattern(&self.allow_paths, &norm) {
                     return true;
                 }
-                is_under_any_pattern(&self.allow_paths, &norm)
+                if !self.allow_volumes.is_empty()
+                    && self.allow_volumes.iter().any(|v| v.eq_ignore_ascii_case(volume))
+                {
+                    return true;
+                }
+                false
             }
-            AccessMode::All => true,
         }
     }
 }

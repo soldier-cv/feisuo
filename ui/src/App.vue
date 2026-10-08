@@ -174,9 +174,6 @@
               >
                 <i class="ph-bold ph-timer"></i>
               </button>
-              <button v-else class="btn-quick-pair" title="配对" @click.stop="pairDevice(dev)">
-                配对
-              </button>
               <!-- 隐藏（§3.1）：不想再看到它，但保留已建立的信任与推送 -->
               <button
                 class="hide-device-btn"
@@ -455,39 +452,52 @@
               </div>
 
               <div class="scope-body" v-if="scopeDraft">
+                <!-- 访问模式 -->
                 <div class="scope-field">
-                  <p class="scope-label">它能看到什么</p>
+                  <p class="scope-label">可访问范围</p>
                   <div class="scope-modes">
                     <label
                       v-for="m in scopeModes"
                       :key="m.value"
                       class="scope-mode"
                       :class="{ 'is-on': scopeDraft.mode === m.value }"
+                      :title="m.tip"
                     >
                       <input type="radio" :value="m.value" v-model="scopeDraft.mode" />
                       <span class="scope-mode-title">{{ m.label }}</span>
-                      <span class="scope-mode-hint">{{ m.hint }}</span>
                     </label>
                   </div>
                 </div>
 
+                <!-- 全部模式视图 -->
+                <div class="scope-field" v-if="scopeDraft.mode === 'all'">
+                  <div class="scope-status-chip">
+                    <i class="ph-fill ph-check-circle"></i>
+                    <span>所有盘符与目录均允许访问（不设系统目录限制）</span>
+                  </div>
+                </div>
+
+                <!-- 仅收件目录视图 -->
+                <div class="scope-field" v-if="scopeDraft.mode === 'receive_only'">
+                  <div class="scope-status-chip">
+                    <i class="ph-fill ph-tray"></i>
+                    <span>仅允许访问收件目录：<code class="path-mono">{{ localInfo.receive_dir }}</code></span>
+                  </div>
+                </div>
+
+                <!-- 白名单模式视图 -->
                 <div class="scope-field" v-if="scopeDraft.mode === 'allowlist'">
-                  <p class="scope-label">
-                    允许的盘符
-                    <span class="scope-label-hint">
-                      一个都不勾 = 什么都不给（不是"全部给"，那正是白名单的含义）
-                    </span>
-                  </p>
+                  <p class="scope-sub-label">允许的盘符</p>
                   <div class="scope-volumes">
                     <label
                       v-for="v in localVolumes"
                       :key="v.id"
                       class="scope-vol"
-                      :class="{ 'is-on': scopeDraft.allow_volumes.includes(v.id) }"
+                      :class="{ 'is-on': scopeDraft.allow_volumes?.includes(v.id) }"
                     >
                       <input
                         type="checkbox"
-                        :checked="scopeDraft.allow_volumes.includes(v.id)"
+                        :checked="scopeDraft.allow_volumes?.includes(v.id)"
                         @change="toggleScopeVolume(v.id)"
                       />
                       <span>{{ v.label }}</span>
@@ -496,39 +506,88 @@
                       </span>
                     </label>
                   </div>
-                  <p class="scope-warn" v-if="localVolumes.length === 0">
-                    还没取到本机卷列表，白名单暂时无法配置。
-                  </p>
+
+                  <p class="scope-sub-label" style="margin-top: 12px;">允许的指定目录</p>
+                  <div class="path-input-group">
+                    <input
+                      type="text"
+                      class="standard-text-input"
+                      v-model="newScopeAllowPath"
+                      placeholder="输入目录路径，例如 D:\Projects"
+                      aria-label="输入允许访问的目录路径"
+                      @keyup.enter="addScopeAllowPath()"
+                    />
+                    <button type="button" class="btn-clean-subtle" @click="pickFolderForAllow" title="从文件系统中选择目录">
+                      <i class="ph ph-folder-open"></i> 选择目录
+                    </button>
+                    <button type="button" class="btn-clean-primary" @click="addScopeAllowPath()">
+                      <i class="ph ph-plus"></i> 添加
+                    </button>
+                  </div>
+                  <div class="path-tags-list" v-if="scopeDraft.allow_paths && scopeDraft.allow_paths.length > 0">
+                    <div v-for="(p, idx) in scopeDraft.allow_paths" :key="p + idx" class="path-tag-item">
+                      <i class="ph ph-folder"></i>
+                      <span class="path-tag-text" :title="p">{{ p }}</span>
+                      <button type="button" class="path-tag-remove" @click="removeScopeAllowPath(idx)" title="移除">
+                        <i class="ph ph-x"></i>
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
+                <!-- 排除模式视图 -->
+                <div class="scope-field" v-if="scopeDraft.mode === 'denylist'">
+                  <p class="scope-sub-label">排除的目录</p>
+                  <div class="path-input-group">
+                    <input
+                      type="text"
+                      class="standard-text-input"
+                      v-model="newScopeDenyPath"
+                      placeholder="输入要排除的目录，例如 D:\Private"
+                      aria-label="输入要排除的目录路径"
+                      @keyup.enter="addScopeDenyPath()"
+                    />
+                    <button type="button" class="btn-clean-subtle" @click="pickFolderForDeny" title="从文件系统中选择目录">
+                      <i class="ph ph-folder-open"></i> 选择目录
+                    </button>
+                    <button type="button" class="btn-clean-primary" @click="addScopeDenyPath()">
+                      <i class="ph ph-plus"></i> 添加
+                    </button>
+                  </div>
+
+                  <!-- 常用排除快捷添加 -->
+                  <div class="quick-preset-row">
+                    <span class="quick-preset-label">快捷排除：</span>
+                    <button type="button" class="quick-preset-btn" @click="addScopeDenyPath('C:\\Windows')">+ C:\Windows</button>
+                    <button type="button" class="quick-preset-btn" @click="addScopeDenyPath('C:\\Program Files')">+ Program Files</button>
+                    <button type="button" class="quick-preset-btn" @click="addScopeDenyPath('C:\\Users\\*\\AppData')">+ AppData</button>
+                  </div>
+
+                  <div class="path-tags-list" v-if="scopeDraft.deny_paths && scopeDraft.deny_paths.length > 0">
+                    <div v-for="(p, idx) in scopeDraft.deny_paths" :key="p + idx" class="path-tag-item is-deny">
+                      <i class="ph ph-shield-slash"></i>
+                      <span class="path-tag-text" :title="p">{{ p }}</span>
+                      <button type="button" class="path-tag-remove" @click="removeScopeDenyPath(idx)" title="移除">
+                        <i class="ph ph-x"></i>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 权限开关 -->
                 <div class="scope-field">
-                  <p class="scope-label">它能对本机做什么</p>
-                  <label class="scope-toggle">
-                    <input type="checkbox" v-model="scopeDraft.can_pull" />
-                    <span>
-                      <b>可以取回本机文件</b>
-                      <em>关掉后它仍能浏览目录，但取回会被拒绝</em>
-                    </span>
-                  </label>
-                  <label class="scope-toggle">
-                    <input type="checkbox" v-model="scopeDraft.can_push" />
-                    <span>
-                      <b>可以往本机写入文件</b>
-                      <em>
-                        无论此项如何设置，文件<b>只落在</b>飞梭收件目录之内。
-                        对方在「双栏穿梭」里可以把文件送到收件目录下的
-                        某一层（跟着对方地址栏走），但无法写到收件目录之外，
-                        这一层限制不可关闭（D2）。
-                      </em>
-                    </span>
-                  </label>
+                  <p class="scope-label">操作权限</p>
+                  <div class="scope-toggles-row">
+                    <label class="scope-toggle-clean" title="关闭后对端无法从本机取回文件">
+                      <input type="checkbox" v-model="scopeDraft.can_pull" />
+                      <span>允许取回本机文件</span>
+                    </label>
+                    <label class="scope-toggle-clean" title="对端发送的文件将安全保存于本机收件目录">
+                      <input type="checkbox" v-model="scopeDraft.can_push" />
+                      <span>允许往本机写入文件</span>
+                    </label>
+                  </div>
                 </div>
-
-                <p class="scope-note">
-                  <i class="ph ph-info"></i>
-                  系统与程序目录（<code>C:\Windows</code>、<code>C:\Program Files</code>
-                  等）<b>永远</b>不可被浏览或取回，这一层无法在此关闭。
-                </p>
               </div>
 
               <div class="scope-body" v-else>
@@ -537,7 +596,7 @@
 
               <div class="scope-foot">
                 <button class="scope-btn ghost" @click="resetScopeToDefault">
-                  恢复默认（全部可见）
+                  恢复默认
                 </button>
                 <span style="flex: 1"></span>
                 <button class="scope-btn ghost" @click="closeScopeEditor">取消</button>
@@ -668,7 +727,7 @@
       <h2 class="view-heading-sr">发送文件</h2>
           <div
             class="drag-drop-card"
-            :class="{ 'is-dragging': isDragOver, 'is-busy': isTransferring }"
+            :class="{ 'is-dragging': isDragOver, 'is-busy': isConcurrencyFull }"
             @dragover.prevent="isDragOver = true"
             @dragleave.prevent="isDragOver = false"
             @drop.prevent="isDragOver = false"
@@ -676,42 +735,16 @@
             <div class="drop-illustration-icon">
               <i class="ph-bold ph-arrow-fat-lines-up"></i>
             </div>
-            <h3>{{ isTransferring ? '正在传输…' : '把文件拖到这里' }}</h3>
-            <!--
-              把规则**写在拖放区上**，而不是让用户拖一次、困惑一次。
-
-              规则本身只有一条，但它反直觉：文件直发、文件夹要确认。
-              而"反直觉且不说明"的规则，用户只会得出"这软件有毛病"，
-              不会得出"哦它是要确认文件夹"。所以两句话的成本换一次困惑，
-              值得。
-            -->
-            <p class="drop-rule">
-              <i class="ph ph-paper-plane-tilt"></i>
-              <span><b>文件</b>松手即发，5 秒内可撤销</span>
-            </p>
-            <p class="drop-rule">
-              <i class="ph ph-folder-open"></i>
-              <span><b>文件夹</b>先展开成文件列表让你确认，避免误发整个目录</span>
-            </p>
-            <!--
-              剪贴板是第三类要确认的，理由与"文件夹"**不同**：
-              文件夹的问题是"发太多"，剪贴板的问题是"发错"——
-              它常混着密码、验证码、聊天记录，且来源不可见。
-              两条规则不是一回事，所以都写出来。
-            -->
-            <p class="drop-rule">
-              <i class="ph ph-clipboard-text"></i>
-              <span><b>剪贴板</b>先预览内容再发，因为它可能含密码或验证码</span>
-            </p>
-            <p class="drop-hint">
-              没选目标设备时会先进待发清单，选好设备后再点「发送」
+            <h3>{{ isConcurrencyFull ? '并发传输已满，请稍候' : (runningCount > 0 ? '正在传输中 · 可继续添加或拖放' : '拖放文件或文件夹到此处') }}</h3>
+            <p class="drop-sub-tip" title="文件松手即发，5秒内可撤销；文件夹递归展开；剪贴板支持预览确认">
+              <i class="ph ph-info"></i> 支持拖放单个或多个文件，也可点击下方按钮选取
             </p>
 
             <div class="drop-cta-buttons">
-              <button class="btn-fluent-primary" :disabled="isTransferring" @click="pickFilesToSend">
+              <button class="btn-fluent-primary" @click="pickFilesToSend">
                 <i class="ph-bold ph-folder-open"></i> 选取本地文件
               </button>
-              <button class="btn-fluent-secondary" :disabled="isTransferring" @click="handleSendClipboard">
+              <button class="btn-fluent-secondary" @click="handleSendClipboard">
                 <i class="ph-bold ph-clipboard-text"></i> 发送剪贴板
               </button>
             </div>
@@ -760,11 +793,11 @@
             <div class="tray-action-bottom">
               <button
                 class="btn-fluent-primary execute-send-btn"
-                :disabled="isTransferring || !store.selectedDevice"
+                :disabled="isConcurrencyFull || !store.selectedDevice"
                 :title="stagedDestTitle"
                 @click="startSendTransfer"
               >
-                <i class="ph-bold" :class="isTransferring ? 'ph-arrows-clockwise spinning' : 'ph-paper-plane-tilt'"></i>
+                <i class="ph-bold" :class="isConcurrencyFull ? 'ph-arrows-clockwise spinning' : 'ph-paper-plane-tilt'"></i>
                 <span>{{ sendButtonText }}</span>
               </button>
             </div>
@@ -793,37 +826,66 @@
                 就紧，而"选根"本来就是**一个**动作。资源管理器的地址栏下拉
                 也是这个结构。
               -->
-              <label
+              <div
                 v-if="localVolumes.length > 0 || localPlaces.length > 0"
-                class="volume-select-wrap"
-                title="选择要浏览的位置"
+                class="custom-dropdown-wrap"
               >
-                <i class="ph ph-hard-drives"></i>
-                <select
-                  class="volume-select"
-                  :value="localRootToken"
-                  :disabled="isTransferring"
-                  @change="onRootTokenPick('local', ($event.target as HTMLSelectElement).value)"
+                <button
+                  type="button"
+                  class="custom-dropdown-trigger"
+                  :class="{ 'is-active': localDropdownOpen }"
+                  @click="localDropdownOpen = !localDropdownOpen"
+                  title="选择要浏览的位置"
                 >
-                  <option value="">{{ receiveRootLabel }}</option>
-                  <optgroup v-if="localPlaces.length > 0" label="常用位置">
-                    <option v-for="p in localPlaces" :key="p.key" :value="'p:' + p.key" :title="p.path">
-                      {{ p.label }}
-                    </option>
-                  </optgroup>
-                  <optgroup v-if="localVolumes.length > 0" label="磁盘">
-                    <option v-for="v in localVolumes" :key="v.id" :value="'v:' + v.id">
-                      {{ v.label }}{{ v.free_bytes > 0 ? ` · 剩 ${formatRemoteVolumeSize(v.free_bytes)}` : '' }}
-                    </option>
-                  </optgroup>
-                </select>
-              </label>
+                  <i class="ph ph-hard-drives"></i>
+                  <span class="dropdown-trigger-text">{{ localCurrentLabel }}</span>
+                  <i class="ph ph-caret-down dropdown-trigger-caret" :class="{ 'is-open': localDropdownOpen }"></i>
+                </button>
+                <div v-if="localDropdownOpen" class="custom-dropdown-panel">
+                  <button
+                    type="button"
+                    class="dropdown-menu-item"
+                    :class="{ 'is-selected': localRootToken === '' }"
+                    @click="handlePickLocalToken('')"
+                  >
+                    <i class="ph ph-tray"></i>
+                    <span class="item-main-text">{{ receiveRootLabel }}</span>
+                    <span class="item-tag-text">收件目录</span>
+                  </button>
+                  <div v-if="localPlaces.length > 0" class="dropdown-group-header">常用位置</div>
+                  <button
+                    v-for="p in localPlaces"
+                    :key="p.key"
+                    type="button"
+                    class="dropdown-menu-item"
+                    :class="{ 'is-selected': localRootToken === 'p:' + p.key }"
+                    @click="handlePickLocalToken('p:' + p.key)"
+                    :title="p.path"
+                  >
+                    <i class="ph ph-folder"></i>
+                    <span class="item-main-text">{{ p.label }}</span>
+                  </button>
+                  <div v-if="localVolumes.length > 0" class="dropdown-group-header">本地磁盘</div>
+                  <button
+                    v-for="v in localVolumes"
+                    :key="v.id"
+                    type="button"
+                    class="dropdown-menu-item"
+                    :class="{ 'is-selected': localRootToken === 'v:' + v.id }"
+                    @click="handlePickLocalToken('v:' + v.id)"
+                  >
+                    <i class="ph ph-hard-drive"></i>
+                    <span class="item-main-text">{{ v.label }}</span>
+                    <span v-if="v.free_bytes > 0" class="item-sub-text">剩 {{ formatRemoteVolumeSize(v.free_bytes) }}</span>
+                  </button>
+                </div>
+              </div>
               <span class="address-text" :title="localAddressDisplay">{{ localAddressDisplay }}</span>
             </div>
             <div class="pane-breadcrumb">
               <button
                 class="crumb-up"
-                :disabled="localParentPath === null || isTransferring"
+                :disabled="localParentPath === null"
                 @click="goLocalParent"
                 title="返回上一级"
               >
@@ -888,7 +950,6 @@
                 class="shuttle-file-line"
                 :class="{
                   'is-selected': selectedLocalNames.has(localEntryKey(item)),
-                  'is-disabled': isTransferring,
                   'is-drop-armed': shuttleDropArmed('remote')
                 }"
                 draggable="true"
@@ -901,8 +962,8 @@
                 @click="item.is_dir ? enterLocalDir(item.name) : toggleLocalSelection(item)"
               >
                 <div class="check-box-square">
-                  <template v-if="!item.is_dir">{{ selectedLocalNames.has(localEntryKey(item)) ? '✓' : '' }}</template>
-                  <i v-else class="ph-bold ph-caret-right"></i>
+                  <i v-if="!item.is_dir && selectedLocalNames.has(localEntryKey(item))" class="ph-bold ph-check"></i>
+                  <i v-else-if="item.is_dir" class="ph-bold ph-caret-right"></i>
                 </div>
                 <i :class="item.is_dir ? 'ph-fill ph-folder file-glyph dir' : getFileIcon(item.name)"></i>
                 <span class="file-label-col" :title="item.name + ' · ' + item.modified">{{ item.name }}</span>
@@ -917,7 +978,7 @@
                   v-if="item.is_dir"
                   class="dir-send-btn"
                   :class="{ 'is-on': selectedLocalNames.has(localEntryKey(item)) }"
-                  :disabled="isTransferring"
+                  :disabled="isConcurrencyFull"
                   :title="
                     selectedLocalNames.has(localEntryKey(item))
                       ? '取消选择整个文件夹'
@@ -942,15 +1003,9 @@
           </div>
 
           <div class="shuttle-control-divider">
-            <!--
-              按钮提示里**必须写明落到哪**。
-              早先只写"将选中的本机文件推送到对方"，而落点规则刚刚改成
-              "跟着对方地址栏走" —— 提示不跟着改，用户就无从知道文件会出现在
-              对方机器的哪一层，也就不会去核对。
-            -->
             <button
               class="shuttle-op-button send-op"
-              :disabled="selectedLocalNames.size === 0 || !store.selectedDevice || isTransferring"
+              :disabled="selectedLocalNames.size === 0 || !store.selectedDevice || isConcurrencyFull"
               @click="shuttleSend"
               :title="'把选中的 ' + selectedLocalNames.size + ' 项送到对方 ' + sendDestLabel"
             >
@@ -959,16 +1014,13 @@
             </button>
             <button
               class="shuttle-op-button fetch-op"
-              :disabled="selectedRemoteNames.size === 0 || !store.selectedDevice || isTransferring"
+              :disabled="selectedRemoteNames.size === 0 || !store.selectedDevice || isConcurrencyFull"
               @click="shuttleFetch"
               :title="'把选中的 ' + selectedRemoteNames.size + ' 项取回到本机 ' + fetchDestLabel"
             >
               <i class="ph-bold ph-arrow-left"></i>
               <span>取回到本机</span>
             </button>
-            <p class="shuttle-drag-hint">
-              也可以直接把文件<strong>拖到对面那一栏</strong>
-            </p>
           </div>
 
           <div class="shuttle-side-pane">
@@ -986,36 +1038,56 @@
             <div class="pane-address-bar">
               <!-- 与左栏同构：常用位置 + 磁盘。对端的是**对端机器**的
                    目录，已按该设备的访问范围过滤过（服务端做的）。 -->
-              <label
+              <div
                 v-if="remoteVolumes.length > 0 || remotePlaces.length > 0"
-                class="volume-select-wrap"
-                title="选择要浏览的位置"
+                class="custom-dropdown-wrap"
               >
-                <i class="ph ph-hard-drives"></i>
-                <select
-                  class="volume-select"
-                  :value="remoteRootToken"
-                  :disabled="isTransferring"
-                  @change="onRootTokenPick('remote', ($event.target as HTMLSelectElement).value)"
+                <button
+                  type="button"
+                  class="custom-dropdown-trigger"
+                  :class="{ 'is-active': remoteDropdownOpen }"
+                  @click="remoteDropdownOpen = !remoteDropdownOpen"
+                  title="选择要浏览的位置"
                 >
-                  <optgroup v-if="remotePlaces.length > 0" label="常用位置">
-                    <option v-for="p in remotePlaces" :key="p.key" :value="'p:' + p.key" :title="p.path">
-                      {{ p.label }}
-                    </option>
-                  </optgroup>
-                  <optgroup v-if="remoteVolumes.length > 0" label="磁盘">
-                    <option v-for="v in remoteVolumes" :key="v.id" :value="'v:' + v.id">
-                      {{ v.label }}{{ v.free_bytes > 0 ? ` · 剩 ${formatRemoteVolumeSize(v.free_bytes)}` : '' }}
-                    </option>
-                  </optgroup>
-                </select>
-              </label>
+                  <i class="ph ph-hard-drives"></i>
+                  <span class="dropdown-trigger-text">{{ remoteCurrentLabel }}</span>
+                  <i class="ph ph-caret-down dropdown-trigger-caret" :class="{ 'is-open': remoteDropdownOpen }"></i>
+                </button>
+                <div v-if="remoteDropdownOpen" class="custom-dropdown-panel">
+                  <div v-if="remotePlaces.length > 0" class="dropdown-group-header">常用位置</div>
+                  <button
+                    v-for="p in remotePlaces"
+                    :key="p.key"
+                    type="button"
+                    class="dropdown-menu-item"
+                    :class="{ 'is-selected': remoteRootToken === 'p:' + p.key }"
+                    @click="handlePickRemoteToken('p:' + p.key)"
+                    :title="p.path"
+                  >
+                    <i class="ph ph-folder"></i>
+                    <span class="item-main-text">{{ p.label }}</span>
+                  </button>
+                  <div v-if="remoteVolumes.length > 0" class="dropdown-group-header">磁盘</div>
+                  <button
+                    v-for="v in remoteVolumes"
+                    :key="v.id"
+                    type="button"
+                    class="dropdown-menu-item"
+                    :class="{ 'is-selected': remoteRootToken === 'v:' + v.id }"
+                    @click="handlePickRemoteToken('v:' + v.id)"
+                  >
+                    <i class="ph ph-hard-drive"></i>
+                    <span class="item-main-text">{{ v.label }}</span>
+                    <span v-if="v.free_bytes > 0" class="item-sub-text">剩 {{ formatRemoteVolumeSize(v.free_bytes) }}</span>
+                  </button>
+                </div>
+              </div>
               <span class="address-text" :title="remoteAddressDisplay">{{ remoteAddressDisplay }}</span>
             </div>
             <div class="pane-breadcrumb">
               <button
                 class="crumb-up"
-                :disabled="remoteParentPath === null || isTransferring"
+                :disabled="remoteParentPath === null"
                 @click="goRemoteParent"
                 title="返回上一级"
               >
@@ -1064,7 +1136,6 @@
                 class="shuttle-file-line"
                 :class="{
                   'is-selected': selectedRemoteNames.has(remoteEntryKey(item)),
-                  'is-disabled': isTransferring,
                   'is-drop-armed': shuttleDropArmed('local')
                 }"
                 draggable="true"
@@ -1077,8 +1148,8 @@
                 @click="item.is_dir ? enterRemoteDir(item.name) : toggleRemoteSelection(item)"
               >
                 <div class="check-box-square">
-                  <template v-if="!item.is_dir">{{ selectedRemoteNames.has(remoteEntryKey(item)) ? '✓' : '' }}</template>
-                  <i v-else class="ph-bold ph-caret-right"></i>
+                  <i v-if="!item.is_dir && selectedRemoteNames.has(remoteEntryKey(item))" class="ph-bold ph-check"></i>
+                  <i v-else-if="item.is_dir" class="ph-bold ph-caret-right"></i>
                 </div>
                 <i :class="item.is_dir ? 'ph-fill ph-folder file-glyph dir' : getFileIcon(item.name)"></i>
                 <span class="file-label-col" :title="item.name + ' · ' + item.modified">{{ item.name }}</span>
@@ -1096,7 +1167,7 @@
                 <button
                   v-if="item.is_dir"
                   class="dir-send-btn dir-pull-btn"
-                  :disabled="isTransferring"
+                  :disabled="isConcurrencyFull"
                   title="取回整个文件夹（递归展开，保留目录层级）"
                   @click.stop="pullRemoteDir(item.name)"
                 >
@@ -1114,10 +1185,6 @@
                 <template v-else>加载更多</template>
               </button>
               <div v-if="remoteMessage" class="shuttle-empty-tip">{{ remoteMessage }}</div>
-              <div v-if="isTransferring" class="shuttle-busy-hint">
-                <i class="ph ph-circle-notch spinning"></i>
-                传输进行中，完成后可继续选择
-              </div>
             </div>
           </div>
         </div>
@@ -1127,8 +1194,7 @@
           <div class="fluent-card-panel">
             <div class="panel-header-row">
               <div class="header-titles">
-                <h2>传输记录</h2>
-                <p>速度按「纯数据流耗时」计算，已排除审批等待与落盘校验（§9.6）</p>
+                <h2>传输记录 <i class="ph ph-question" title="传输速度基于纯数据传输耗时计算，已排除审批与落盘等待"></i></h2>
               </div>
               <div class="header-actions">
                 <!-- 诊断报告导出：复现问题后把这份文件交给开发者即可定位瓶颈（§9.7） -->
@@ -1146,7 +1212,18 @@
                   <i :class="log.direction === 'recv' ? 'ph-bold ph-arrow-down-left' : 'ph-bold ph-arrow-up-right'"></i>
                 </div>
                 <div class="log-body-info">
-                  <div class="entry-title">{{ log.file_name }}</div>
+                  <div class="entry-title-wrap">
+                    <span class="entry-title">{{ log.file_name }}</span>
+                    <button
+                      v-if="log.file_paths && log.file_paths.length > 0"
+                      class="btn-view-paths-badge"
+                      @click.stop="openPathsModal(log)"
+                      :title="log.file_paths.length === 1 ? '查看完整路径并在文件夹中定位' : `查看全部 ${log.file_paths.length} 个文件的完整路径`"
+                    >
+                      <i class="ph ph-folder-open"></i>
+                      <span>{{ log.file_paths.length === 1 ? '查看路径' : `完整路径 (${log.file_paths.length})` }}</span>
+                    </button>
+                  </div>
                   <div class="entry-sub">
                     {{ log.direction === 'recv' ? '来自 ' + log.peer_name : '发送至 ' + log.peer_name }}
                     · {{ log.time_formatted }}
@@ -1178,8 +1255,8 @@
                   <span class="entry-speed-text" :class="{ unknown: log.speed_display === '—' }">
                     {{ log.speed_display }}
                   </span>
-                  <span class="entry-status-badge" :class="{ failed: log.status === 'failed' }">
-                    {{ log.status === 'failed' ? '失败' : '已完成' }}
+                  <span class="entry-status-badge" :class="{ failed: log.status === 'failed' || log.status === 'cancelled' }">
+                    {{ historyStatusText(log.status) }}
                   </span>
                 </div>
               </div>
@@ -1274,7 +1351,6 @@
             <div class="panel-header-row">
               <div class="header-titles">
                 <h2>系统设置</h2>
-                <p>所有设置改动即时生效并写入本地配置文件</p>
               </div>
             </div>
 
@@ -1284,8 +1360,7 @@
 
             <div class="setting-item-block">
               <div class="setting-desc-text">
-                <strong>本机设备名称</strong>
-                <span>局域网内其他设备看到的名字，失焦或回车后立即生效</span>
+                <strong title="局域网内其他设备看到的名字">本机设备名称</strong>
               </div>
               <div class="setting-action-group">
                 <input
@@ -1301,8 +1376,7 @@
 
             <div class="setting-item-block">
               <div class="setting-desc-text">
-                <strong>开机自启动</strong>
-                <span>登录系统时自动在后台启动并驻留托盘</span>
+                <strong title="登录系统时自动在后台启动并驻留托盘">开机自启动</strong>
               </div>
               <label class="fluent-switch">
                 <input aria-label="开机自启动" type="checkbox" v-model="localInfo.autostart" @change="toggleAutostart" />
@@ -1312,8 +1386,7 @@
 
             <div class="setting-item-block">
               <div class="setting-desc-text">
-                <strong>自动接收文件</strong>
-                <span>关闭后，即使来自已信任设备的传输也会先请求确认</span>
+                <strong title="关闭后，即使来自已信任设备的传输也会先请求确认">自动接收文件</strong>
               </div>
               <label class="fluent-switch">
                 <input aria-label="自动接收文件" type="checkbox" v-model="localInfo.auto_receive" @change="saveSettings" />
@@ -1323,30 +1396,43 @@
 
             <div class="setting-item-block">
               <div class="setting-desc-text">
-                <strong>关闭窗口时</strong>
-                <span>点击右上角 × 或按下 Alt+F4 时的行为</span>
+                <strong title="同时进行的文件传输任务上限，超出时需等待当前任务完成">最大并发传输数</strong>
               </div>
-              <div class="fluent-select-wrapper select-compact">
-                <select class="standard-select" v-model="localInfo.close_action" @change="saveSettings" aria-label="关闭窗口时">
-                  <option value="ask">每次询问（最小化 / 退出）</option>
-                  <option value="tray">直接最小化到托盘</option>
-                  <option value="exit">直接退出程序</option>
-                </select>
-                <i class="ph ph-caret-down select-caret"></i>
+              <div class="select-compact">
+                <CustomSelect
+                  v-model="concurrentTransfersSelect"
+                  :options="concurrentOptions"
+                  @change="saveSettings"
+                  aria-label="最大并发传输数"
+                />
+              </div>
+            </div>
+
+            <div class="setting-item-block">
+              <div class="setting-desc-text">
+                <strong title="点击右上角关闭按钮或按下快捷键时的行为">关闭窗口时</strong>
+              </div>
+              <div class="select-compact">
+                <CustomSelect
+                  v-model="localInfo.close_action"
+                  :options="closeActionOptions"
+                  @change="saveSettings"
+                  aria-label="关闭窗口时"
+                />
               </div>
             </div>
 
             <div class="setting-item-block">
               <div class="setting-desc-text">
                 <strong>界面外观</strong>
-                <span>深色适合夜间，浅色适合白天强光环境</span>
               </div>
-              <div class="fluent-select-wrapper select-compact">
-                <select class="standard-select" v-model="themeSelect" @change="onThemeSelect" aria-label="界面外观">
-                  <option value="dark">深色主题</option>
-                  <option value="light">浅色主题</option>
-                </select>
-                <i class="ph ph-caret-down select-caret"></i>
+              <div class="select-compact">
+                <CustomSelect
+                  v-model="themeSelect"
+                  :options="themeOptions"
+                  @change="onThemeSelect"
+                  aria-label="界面外观"
+                />
               </div>
             </div>
 
@@ -1381,7 +1467,7 @@
             <div class="trust-table-wrap">
               <div v-if="trustedDevices.length === 0" class="empty-trust-hint">
                 <i class="ph ph-shield-check"></i>
-                <span>暂无已信任设备，使用 6 位配对码或扫码完成首次绑定</span>
+                <span>暂无已信任设备</span>
               </div>
               <div v-else class="trust-item-row" v-for="dev in trustedDevices" :key="dev.device_id">
                 <div class="trust-meta">
@@ -1398,23 +1484,21 @@
 
             <div class="setting-item-block">
               <div class="setting-desc-text">
-                <strong>日志级别</strong>
-                <span>排查连接或发现异常时可切换为 DEBUG，切换后立即生效</span>
+                <strong title="常规运行使用 INFO，排障时可切换为 DEBUG">日志级别</strong>
               </div>
-              <div class="fluent-select-wrapper select-compact">
-                <select class="standard-select" v-model="localInfo.log_level" @change="saveSettings" aria-label="日志级别">
-                  <option value="INFO">INFO（常规运行）</option>
-                  <option value="DEBUG">DEBUG（详细排障）</option>
-                  <option value="WARN">WARN（仅告警）</option>
-                </select>
-                <i class="ph ph-caret-down select-caret"></i>
+              <div class="select-compact">
+                <CustomSelect
+                  v-model="localInfo.log_level"
+                  :options="logLevelOptions"
+                  @change="saveSettings"
+                  aria-label="日志级别"
+                />
               </div>
             </div>
 
             <div class="setting-item-block">
               <div class="setting-desc-text">
-                <strong>本地日志文件</strong>
-                <span>单文件达到上限后自动轮转归档，最多保留 3 个归档</span>
+                <strong title="单文件达到上限后自动轮转归档，最多保留 3 个归档">本地日志文件</strong>
               </div>
               <button class="btn-fluent-secondary" @click="openLogFolder">
                 <i class="ph ph-folder-open"></i> 打开日志目录
@@ -1427,39 +1511,35 @@
 
             <div class="setting-item-block">
               <div class="setting-desc-text">
-                <strong>记录存储上限</strong>
-                <span>超出后自动清理最老记录，避免持续占用系统资源</span>
+                <strong title="超出数量上限后自动清理最老记录">记录存储上限</strong>
               </div>
-              <div class="fluent-select-wrapper select-compact">
-                <select class="standard-select" v-model.number="localInfo.max_history_records" @change="saveSettings" aria-label="记录存储上限">
-                  <option :value="200">保留最近 200 条</option>
-                  <option :value="500">保留最近 500 条</option>
-                  <option :value="1000">保留最近 1000 条</option>
-                </select>
-                <i class="ph ph-caret-down select-caret"></i>
-              </div>
-            </div>
-
-            <div class="setting-item-block">
-              <div class="setting-desc-text">
-                <strong>记录保存周期</strong>
-                <span>超过周期的历史记录自动清理</span>
-              </div>
-              <div class="fluent-select-wrapper select-compact">
-                <select class="standard-select" v-model.number="localInfo.record_retention_days" @change="saveSettings" aria-label="记录保存周期">
-                  <option :value="7">保留 7 天</option>
-                  <option :value="30">保留 30 天</option>
-                  <option :value="90">保留 90 天</option>
-                  <option :value="0">永久保留（仅受条数限制）</option>
-                </select>
-                <i class="ph ph-caret-down select-caret"></i>
+              <div class="select-compact">
+                <CustomSelect
+                  v-model="localInfo.max_history_records"
+                  :options="maxHistoryOptions"
+                  @change="saveSettings"
+                  aria-label="记录存储上限"
+                />
               </div>
             </div>
 
             <div class="setting-item-block">
               <div class="setting-desc-text">
-                <strong>一键清理历史</strong>
-                <span>清空数据库中的所有历史传输记录</span>
+                <strong title="超过保留天数的历史记录自动清理">记录保存周期</strong>
+              </div>
+              <div class="select-compact">
+                <CustomSelect
+                  v-model="localInfo.record_retention_days"
+                  :options="retentionDaysOptions"
+                  @change="saveSettings"
+                  aria-label="记录保存周期"
+                />
+              </div>
+            </div>
+
+            <div class="setting-item-block">
+              <div class="setting-desc-text">
+                <strong title="清空数据库中的所有历史传输记录">一键清理历史</strong>
               </div>
               <button class="btn-fluent-secondary danger-action" @click="clearHistory">
                 <i class="ph ph-trash"></i> 清空传输记录
@@ -1565,8 +1645,7 @@
 
             <div class="setting-item-block">
               <div class="setting-desc-text">
-                <strong>自动检查更新</strong>
-                <span>启动 8 秒后首次检查，之后每 12 小时一次；国内走 Gitee 高速通道</span>
+                <strong title="启动及周期性自动检查最新版本并提醒更新">自动检查更新</strong>
               </div>
               <label class="fluent-switch">
                 <input aria-label="自动检查更新" type="checkbox" v-model="localInfo.auto_check_update" @change="toggleAutoUpdate" />
@@ -1630,14 +1709,32 @@
     </div>
 
     <!-- 4. 底部实时传输进度条 -->
-    <footer v-if="activeProgress" class="desktop-speed-dock" :class="{ failed: activeProgress.failed }">
+    <footer v-if="activeProgress" class="desktop-speed-dock" :class="{ failed: activeProgress.settled === 'failed' || activeProgress.settled === 'cancelled' }">
       <div class="speed-dock-meta">
-        <span class="speed-file-title">
-          <i class="ph-bold" :class="activeProgress.failed ? 'ph-warning' : 'ph-arrows-clockwise spinning'"></i>
-          {{ activeProgress.direction === 'Send' ? '正在发送' : '正在接收' }}：
+        <button type="button" class="speed-file-title" @click="showActiveTransfersModal = true" style="cursor: pointer" title="点击查看所有进行中的任务列表">
+          <i class="ph-bold" :class="activeProgress.settled ? (activeProgress.settled === 'ok' ? 'ph-check' : 'ph-warning') : 'ph-arrows-clockwise spinning'"></i>
+          {{ progressDockLabel }}：
           <strong :title="activeProgress.current_file">{{ activeProgress.current_file }}</strong>
-        </span>
-        <span class="speed-bandwidth-rate">{{ activeProgress.speedFormatted }}</span>
+        </button>
+        <div class="speed-dock-actions">
+          <span class="speed-bandwidth-rate">{{ activeProgress.speedFormatted }}</span>
+          <button
+            class="speed-dock-list-btn"
+            title="查看当前所有进行中的传输任务清单"
+            @click.stop="showActiveTransfersModal = true"
+          >
+            <i class="ph ph-list-dashes"></i>
+            任务列表 ({{ runningCount }})
+          </button>
+          <button
+            v-if="!activeProgress.settled"
+            class="speed-dock-cancel-btn"
+            title="取消当前传输"
+            @click.stop="cancelActiveTransfer()"
+          >
+            取消
+          </button>
+        </div>
       </div>
       <div class="speed-dock-track">
         <div class="speed-dock-fill" :style="{ transform: `scaleX(${activeProgress.progress_percent / 100})` }"></div>
@@ -1762,13 +1859,7 @@
           两边**不用同时操作**，但被念的一方要在 30 秒内敲进去（码一次性）。
           这些话写在界面上，比让用户点错一次再回头看文档便宜得多。
         -->
-        <p v-if="pairMode !== 'success'" class="pair-flow-hint">
-          <i class="ph ph-info"></i>
-          <span>
-            让对方点「查看本机配对码」，把屏幕上的 6 位码念给你，
-            你在这里输入即可。两边不用同时操作，码 30 秒内有效、只能用一次。
-          </span>
-        </p>
+
 
         <div class="pair-mode-selector" v-if="pairMode !== 'success'">
           <button :class="{ active: pairMode === 'input' }" @click="pairMode = 'input'">
@@ -1809,17 +1900,13 @@
               </button>
             </div>
 
-            <div v-if="discoveredPeerDevices.length > 1 && !isManualIpMode" class="fluent-select-wrapper">
-              <select class="standard-select" v-model="inputTargetIp" aria-labelledby="pair-ip-label">
-                <option
-                  v-for="dev in discoveredPeerDevices"
-                  :key="dev.device_id"
-                  :value="dev.ip || ''"
-                >
-                  {{ dev.device_name }} ({{ dev.ip }})
-                </option>
-              </select>
-              <i class="ph ph-caret-down select-caret"></i>
+            <div v-if="discoveredPeerDevices.length > 1 && !isManualIpMode" class="pair-select-wrapper">
+              <CustomSelect
+                v-model="inputTargetIp"
+                :options="discoveredPeerDeviceOptions"
+                aria-label="选择附近设备"
+                placeholder="选择附近设备"
+              />
             </div>
 
             <div v-else-if="discoveredPeerDevices.length === 1 && !isManualIpMode" class="auto-ip-box">
@@ -2061,15 +2148,13 @@
             <button class="btn-approval-reject" @click="handleApproval('reject')">
               <i class="ph-bold ph-x"></i> 拒绝
             </button>
-            </div>
+          </div>
           <p class="approval-hint">
             <i class="ph ph-info"></i>
             「允许一次」只放行本次传输，<strong>不会</strong>把该设备加入长期信任。
             <template v-if="pendingApproval?.grant_challenge">
               <br />
-              「{{ grantWindowMinutes }} 分钟内免重复确认」只对
-              <strong>本次这类操作</strong>生效（发文件不会解锁浏览），
-              到期自动失效，也能在信任列表里随时取消。
+              「{{ grantWindowMinutes }} 分钟免确认」只对 <strong>本次这类操作</strong> 生效，到期自动失效，可随时取消。
             </template>
           </p>
         </div>
@@ -2132,11 +2217,6 @@
               <i class="ph-bold ph-paper-plane-tilt"></i> 加入待发清单
             </button>
           </div>
-          <p class="approval-hint">
-            <i class="ph ph-shield-check"></i>
-            剪贴板内容常含密码或验证码，暂存文件将在
-            <strong>24 小时后自动清理</strong>；发送成功后立即删除。
-          </p>
         </div>
       </div>
     </div>
@@ -2164,6 +2244,182 @@
       </div>
     </transition>
 
+    <!-- 7.7 传输记录：文件完整路径清单弹窗 -->
+    <div v-if="showPathsModal && selectedLogForPaths" class="fluent-modal-overlay" @click.self="showPathsModal = false">
+      <div
+        v-modal-focus
+        class="fluent-modal-dialog paths-list-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="paths-dialog-title"
+        tabindex="-1"
+      >
+        <div class="modal-dialog-titlebar">
+          <div class="paths-dialog-title-group">
+            <h3 id="paths-dialog-title">
+              <i class="ph ph-folder-open"></i>
+              传输文件清单 ({{ selectedLogForPaths.file_paths?.length || 0 }} 项)
+            </h3>
+            <span class="paths-dialog-sub">
+              {{ selectedLogForPaths.file_name }} ·
+              {{ selectedLogForPaths.direction === 'recv' ? '来自 ' + selectedLogForPaths.peer_name : '发送至 ' + selectedLogForPaths.peer_name }} ·
+              {{ selectedLogForPaths.time_formatted }}
+            </span>
+          </div>
+          <button class="modal-close-icon" @click="showPathsModal = false" title="关闭"><i class="ph ph-x"></i></button>
+        </div>
+
+        <div class="paths-dialog-toolbar">
+          <div class="paths-search-box">
+            <i class="ph ph-magnifying-glass"></i>
+            <input
+              v-model="pathsSearchKeyword"
+              type="text"
+              placeholder="搜索路径或文件名…"
+              aria-label="搜索路径或文件名"
+            />
+            <button v-if="pathsSearchKeyword" class="btn-clear-search" @click="pathsSearchKeyword = ''" title="清空搜索">
+              <i class="ph ph-x-circle"></i>
+            </button>
+          </div>
+          <button class="btn-fluent-secondary copy-all-btn" @click="copyAllSelectedPaths" title="一键复制全部文件的绝对路径">
+            <i class="ph" :class="copyAllSuccess ? 'ph-check-bold text-success' : 'ph-copy'"></i>
+            <span>{{ copyAllSuccess ? '已复制全部' : '复制全部路径' }}</span>
+          </button>
+        </div>
+
+        <div class="paths-list-container">
+          <div v-if="filteredSelectedPaths.length === 0" class="empty-paths-box">
+            <i class="ph ph-tray"></i>
+            <span>没有匹配的文件路径</span>
+          </div>
+          <div
+            v-for="(pathItem, pIdx) in filteredSelectedPaths"
+            :key="pIdx"
+            class="path-item-row"
+          >
+            <div class="path-item-icon">
+              <i class="ph ph-file-text"></i>
+            </div>
+            <div class="path-item-content" :title="pathItem">
+              <div class="path-item-basename">{{ getBasename(pathItem) }}</div>
+              <div class="path-item-fullpath">{{ pathItem }}</div>
+            </div>
+            <div class="path-item-actions">
+              <button
+                class="btn-path-action"
+                @click="copySinglePath(pathItem, pIdx)"
+                :title="'复制完整路径: ' + pathItem"
+              >
+                <i class="ph" :class="copiedPathIndex === pIdx ? 'ph-check-bold text-success' : 'ph-copy'"></i>
+                <span>{{ copiedPathIndex === pIdx ? '已复制' : '复制' }}</span>
+              </button>
+              <button
+                class="btn-path-action"
+                @click="openFileInFolder(pathItem)"
+                title="在资源管理器中定位并打开文件"
+              >
+                <i class="ph ph-arrow-square-out"></i>
+                <span>定位</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="paths-dialog-footer">
+          <span class="paths-footer-hint">
+            共 {{ selectedLogForPaths.file_paths?.length || 0 }} 个文件 · 点击「定位」直接在文件夹中选中文件
+          </span>
+          <button class="btn-fluent-secondary" @click="showPathsModal = false">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 7.8 正在进行的传输任务列表弹窗 -->
+    <div v-if="showActiveTransfersModal" class="fluent-modal-overlay" @click.self="showActiveTransfersModal = false">
+      <div
+        v-modal-focus
+        class="fluent-modal-dialog active-transfers-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="active-transfers-title"
+        tabindex="-1"
+      >
+        <div class="modal-dialog-titlebar">
+          <div class="active-dialog-title-group">
+            <h3 id="active-transfers-title">
+              <i class="ph-bold ph-arrows-clockwise spinning"></i>
+              正在进行的传输任务 ({{ runningCount }})
+            </h3>
+            <span class="active-dialog-sub">
+              最大并发限制: {{ maxConcurrency }} · 当前活跃任务数: {{ Array.from(activeTransfers.values()).length }}
+            </span>
+          </div>
+          <button class="modal-close-icon" @click="showActiveTransfersModal = false" title="关闭"><i class="ph ph-x"></i></button>
+        </div>
+
+        <div class="active-transfers-list-container">
+          <div v-if="Array.from(activeTransfers.values()).length === 0" class="empty-active-box">
+            <i class="ph ph-check-circle"></i>
+            <span>当前没有正在进行的传输任务</span>
+          </div>
+          <div
+            v-for="item in Array.from(activeTransfers.values())"
+            :key="item.transfer_id"
+            class="active-transfer-card"
+            :class="{ 'card-settled': !!item.settled }"
+          >
+            <div class="card-header-row">
+              <div class="card-direction-tag" :class="item.direction === 'Receive' ? 'recv' : 'send'">
+                <i :class="item.direction === 'Receive' ? 'ph-bold ph-arrow-down-left' : 'ph-bold ph-arrow-up-right'"></i>
+                <span>{{ item.direction === 'Receive' ? '接收自' : '发送至' }} {{ item.peer_device_name || '对端设备' }}</span>
+              </div>
+              <span class="card-speed-badge">{{ item.speedFormatted }}</span>
+            </div>
+            <div class="card-file-row">
+              <i class="ph ph-file-text"></i>
+              <span class="card-filename" :title="item.current_file">{{ item.current_file }}</span>
+            </div>
+            <div class="card-progress-track">
+              <div class="card-progress-fill" :style="{ width: item.progress_percent + '%' }"></div>
+            </div>
+            <div class="card-footer-row">
+              <span class="card-bytes-text">
+                {{ formatBytes(item.bytes_transferred) }} / {{ formatBytes(item.total_bytes) }} ({{ item.progress_percent }}%)
+              </span>
+              <div class="card-action-wrap">
+                <button
+                  v-if="!item.settled"
+                  class="btn-card-cancel"
+                  @click="cancelActiveTransfer(item.transfer_id)"
+                  title="单独取消此任务"
+                >
+                  <i class="ph ph-x"></i>
+                  取消
+                </button>
+                <span v-else class="card-settled-text" :class="item.settled">
+                  {{ item.settled === 'ok' ? '已完成' : (item.settled === 'cancelled' ? '已取消' : '失败') }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="active-dialog-footer">
+          <button
+            v-if="runningCount > 0"
+            class="btn-danger-solid"
+            @click="cancelActiveTransfer()"
+            title="一键取消所有进行中的任务"
+          >
+            <i class="ph ph-stop-circle"></i> 全部取消 ({{ runningCount }})
+          </button>
+          <div class="footer-spacer"></div>
+          <button class="btn-fluent-secondary" @click="showActiveTransfersModal = false">关闭</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 8. 全局提示 -->
     <transition name="toast-fade">
       <div v-if="toastMessage" class="fluent-toast" :class="{ error: toastIsError }">
@@ -2186,8 +2442,10 @@ import {
   nextTick
 } from "vue";
 import { useDeviceStore } from "./stores/deviceStore";
+import CustomSelect, { type SelectOption } from "./components/CustomSelect.vue";
 import {
   FeisuoBridge,
+  parseBrowseFailure,
   parseTransferStatus,
   LocalDeviceInfo,
   DiscoveredDevice,
@@ -2269,6 +2527,7 @@ const localInfo = reactive<LocalDeviceInfo>({
   max_log_size_mb: 5,
   max_history_records: 500,
   record_retention_days: 30,
+  max_concurrent_transfers: 3,
   close_action: "ask",
   theme: "dark",
   device_count: 0,
@@ -2367,6 +2626,71 @@ const diagnostics = ref<import("./api/feisuoBridge").TransferDiagnostic[]>([]);
 const showDiagnostics = ref(false);
 /** 诊断拉取失败。区别于"没有记录"，要在界面上说出来而不是显示一个空列表。 */
 const diagnosticsFailed = ref(false);
+/** 传输历史路径清单查看弹窗 */
+const showPathsModal = ref(false);
+const selectedLogForPaths = ref<TransferRecord | null>(null);
+const pathsSearchKeyword = ref("");
+const copiedPathIndex = ref<number | null>(null);
+const copyAllSuccess = ref(false);
+
+function openPathsModal(log: TransferRecord) {
+  selectedLogForPaths.value = log;
+  pathsSearchKeyword.value = "";
+  copiedPathIndex.value = null;
+  copyAllSuccess.value = false;
+  showPathsModal.value = true;
+}
+
+const filteredSelectedPaths = computed(() => {
+  if (!selectedLogForPaths.value || !selectedLogForPaths.value.file_paths) return [];
+  const list = selectedLogForPaths.value.file_paths;
+  const kw = pathsSearchKeyword.value.trim().toLowerCase();
+  if (!kw) return list;
+  return list.filter((p) => p.toLowerCase().includes(kw));
+});
+
+function getBasename(path: string): string {
+  if (!path) return "";
+  const normalized = path.replace(/\\/g, "/");
+  const segs = normalized.split("/");
+  return segs[segs.length - 1] || path;
+}
+
+async function copySinglePath(path: string, index: number) {
+  try {
+    await navigator.clipboard.writeText(path);
+    copiedPathIndex.value = index;
+    showToast("路径已复制");
+    setTimeout(() => {
+      if (copiedPathIndex.value === index) copiedPathIndex.value = null;
+    }, 2000);
+  } catch (_e) {
+    showToast("复制失败", true);
+  }
+}
+
+async function copyAllSelectedPaths() {
+  if (!selectedLogForPaths.value || !selectedLogForPaths.value.file_paths) return;
+  try {
+    const text = selectedLogForPaths.value.file_paths.join("\n");
+    await navigator.clipboard.writeText(text);
+    copyAllSuccess.value = true;
+    showToast(`已复制全部 ${selectedLogForPaths.value.file_paths.length} 条路径`);
+    setTimeout(() => {
+      copyAllSuccess.value = false;
+    }, 2000);
+  } catch (_e) {
+    showToast("复制失败", true);
+  }
+}
+
+async function openFileInFolder(path: string) {
+  try {
+    await FeisuoBridge.openPathInFolder(path);
+  } catch (e: any) {
+    showToast(`定位失败: ${e?.message || e}`, true);
+  }
+}
 const trustedDevices = ref<TrustedDevice[]>([]);
 const pendingApproval = ref<ApprovalRequest | null>(null);
 /** 审批界面里用户输入的本次传输码（§2.3） —— **已删**。
@@ -2434,17 +2758,114 @@ const updatePercent = computed(() => {
   return Math.min(100, Math.round((bytesReceived / bytesTotal) * 100));
 });
 
-// ---------------- 传输进度（由后端事件驱动，取代此前的假进度条） ----------------
-const activeProgress = ref<{
+// ---------------- 传输任务池（支持多任务并发传输） ----------------
+export interface ActiveTransferItem {
+  transfer_id: string;
   current_file: string;
   direction: "Send" | "Receive";
   progress_percent: number;
+  speed_bytes_per_sec: number;
   speedFormatted: string;
-  failed: boolean;
-} | null>(null);
-let progressClearTimer: any = null;
-const isTransferring = computed(() => {
-  return activeProgress.value !== null && !activeProgress.value.failed;
+  bytes_transferred: number;
+  total_bytes: number;
+  peer_device_id: string;
+  peer_device_name: string;
+  settled: "ok" | "failed" | "cancelled" | null;
+  last_updated_at: number;
+  cleanupTimer?: any;
+}
+
+const activeTransfers = ref<Map<string, ActiveTransferItem>>(new Map());
+/** 进行中传输任务管理面板 */
+const showActiveTransfersModal = ref(false);
+let transferWatchdogTimer: any = null;
+let lastProgressAt = 0;
+
+const runningTransfers = computed(() => {
+  const list: ActiveTransferItem[] = [];
+  for (const item of activeTransfers.value.values()) {
+    if (item.settled === null) {
+      list.push(item);
+    }
+  }
+  return list;
+});
+
+const runningCount = computed(() => runningTransfers.value.length);
+const isTransferring = computed(() => runningCount.value > 0);
+// 供组件与生命周期跟踪
+void isTransferring;
+
+const maxConcurrency = computed(() => {
+  const val = Number(localInfo.max_concurrent_transfers);
+  return val > 0 ? val : 3;
+});
+
+const isConcurrencyFull = computed(() => runningCount.value >= maxConcurrency.value);
+
+/** 汇总/单项进度（供底部进度条消费，向下兼容） */
+const activeProgress = computed(() => {
+  const running = runningTransfers.value;
+  if (running.length === 0) {
+    const all = Array.from(activeTransfers.value.values());
+    if (all.length === 0) return null;
+    return all[all.length - 1];
+  }
+  if (running.length === 1) {
+    return running[0];
+  }
+  // 多任务并行汇总
+  let totalBytes = 0;
+  let transferredBytes = 0;
+  let totalSpeed = 0;
+  for (const t of running) {
+    totalBytes += t.total_bytes;
+    transferredBytes += t.bytes_transferred;
+    totalSpeed += t.speed_bytes_per_sec;
+  }
+  const pct = totalBytes > 0 ? Math.min(100, Math.round((transferredBytes / totalBytes) * 100)) : 0;
+  return {
+    transfer_id: "aggregate",
+    current_file: `${running.length} 个传输任务并行中`,
+    direction: "Send" as const,
+    progress_percent: pct,
+    speed_bytes_per_sec: totalSpeed,
+    speedFormatted: formatSpeed(totalSpeed),
+    bytes_transferred: transferredBytes,
+    total_bytes: totalBytes,
+    peer_device_id: "",
+    peer_device_name: "",
+    settled: null,
+    last_updated_at: Date.now(),
+  };
+});
+
+/** 底部进度条文案。结束后不能继续说「正在」。 */
+const progressDockLabel = computed(() => {
+  const p = activeProgress.value;
+  if (!p) return "";
+  const sending = p.direction === "Send";
+  if (p.settled === "ok") return sending ? "发送完成" : "接收完成";
+  if (p.settled === "failed") return sending ? "发送失败" : "接收失败";
+  if (p.settled === "cancelled") return sending ? "发送已取消" : "接收已取消";
+  if (runningCount.value > 1) return `正在传输 (${runningCount.value} 个并发)`;
+  return sending ? "正在发送" : "正在接收";
+});
+
+const concurrentOptions: SelectOption[] = [
+  { value: "1", label: "1 个任务（单任务串行）" },
+  { value: "2", label: "2 个任务并发" },
+  { value: "3", label: "3 个任务并发（推荐）" },
+  { value: "5", label: "5 个任务并发" },
+  { value: "8", label: "8 个任务并发" },
+];
+
+const concurrentTransfersSelect = computed({
+  get: () => String(localInfo.max_concurrent_transfers || 3),
+  set: (v: string) => {
+    localInfo.max_concurrent_transfers = Number(v) || 3;
+    void saveSettings();
+  },
 });
 
 const themeSelect = computed({
@@ -2452,13 +2873,43 @@ const themeSelect = computed({
   set: (v: "dark" | "light") => store.applyTheme(v),
 });
 
+const closeActionOptions: SelectOption[] = [
+  { value: "ask", label: "每次询问（最小化 / 退出）" },
+  { value: "tray", label: "直接最小化到托盘" },
+  { value: "exit", label: "直接退出程序" },
+];
+
+const themeOptions: SelectOption[] = [
+  { value: "dark", label: "深色主题" },
+  { value: "light", label: "浅色主题" },
+];
+
+const logLevelOptions: SelectOption[] = [
+  { value: "INFO", label: "INFO（常规运行）" },
+  { value: "DEBUG", label: "DEBUG（详细排障）" },
+  { value: "WARN", label: "WARN（仅告警）" },
+];
+
+const maxHistoryOptions: SelectOption[] = [
+  { value: 200, label: "保留最近 200 条" },
+  { value: 500, label: "保留最近 500 条" },
+  { value: 1000, label: "保留最近 1000 条" },
+];
+
+const retentionDaysOptions: SelectOption[] = [
+  { value: 7, label: "保留 7 天" },
+  { value: 30, label: "保留 30 天" },
+  { value: 90, label: "保留 90 天" },
+  { value: 0, label: "永久保留（仅受条数限制）" },
+];
+
 /** 设备名称编辑框的独立副本: 只有失焦/回车才提交, 避免每敲一个字就写一次磁盘 */
 const deviceNameInput = ref(localInfo.device_name);
 const nameSaved = ref(false);
 let nameSavedTimer: any = null;
 
 const sendButtonText = computed(() => {
-  if (isTransferring.value) return "正在传输…";
+  if (isConcurrencyFull.value) return `并发已满 (${runningCount.value}/${maxConcurrency.value})`;
   if (!store.selectedDevice) return "请先选择目标设备";
   return `发送至 ${store.selectedDevice.device_name}`;
 });
@@ -2693,6 +3144,13 @@ const discoveredPeerDevices = computed<DeviceRosterEntry[]>(() =>
   )
 );
 
+const discoveredPeerDeviceOptions = computed<SelectOption[]>(() => {
+  return discoveredPeerDevices.value.map((dev) => ({
+    value: dev.ip || "",
+    label: `${dev.device_name} (${dev.ip})`,
+  }));
+});
+
 /**
  * 目标设备的可达端点。
  *
@@ -2786,9 +3244,13 @@ async function pinDeviceEndpoint(deviceId: string, ep: DeviceEndpoint | null) {
 
 async function refreshEndpoint(deviceId: string) {
   try {
-    preferredEndpoint.value = await FeisuoBridge.getPreferredEndpoint(deviceId);
+    const ep = await FeisuoBridge.getPreferredEndpoint(deviceId);
+    // 返回时可能已经换成另一台。preferredEndpoint 不按设备分开存，
+    // 写上去之后，新设备还没自己的地址时会拿上一台的 IP 去连。
+    if (store.selectedDeviceId !== deviceId) return;
+    preferredEndpoint.value = ep;
   } catch {
-    preferredEndpoint.value = null;
+    if (store.selectedDeviceId === deviceId) preferredEndpoint.value = null;
   }
 }
 
@@ -3011,12 +3473,22 @@ watch(
   }
 );
 
+function handleWindowClickForDropdowns(e: MouseEvent) {
+  const t = e.target as HTMLElement | null;
+  if (!t?.closest(".custom-dropdown-wrap")) {
+    localDropdownOpen.value = false;
+    remoteDropdownOpen.value = false;
+  }
+}
+
 onMounted(() => {
   window.addEventListener("keydown", handleDialogKeydown, true);
+  window.addEventListener("click", handleWindowClickForDropdowns, true);
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleDialogKeydown, true);
+  window.removeEventListener("click", handleWindowClickForDropdowns, true);
   document.body.style.overflow = "";
 });
 
@@ -3126,9 +3598,12 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopPinCountdown();
+  clearTransferWatchdog();
   if (deviceTimer) clearInterval(deviceTimer);
   if (deviceRefreshTimer) clearTimeout(deviceRefreshTimer);
-  if (progressClearTimer) clearTimeout(progressClearTimer);
+  for (const item of activeTransfers.value.values()) {
+    if (item.cleanupTimer) clearTimeout(item.cleanupTimer);
+  }
   if (toastTimer) clearTimeout(toastTimer);
   if (nameSavedTimer) clearTimeout(nameSavedTimer);
   unlisteners.forEach((fn) => {
@@ -3260,9 +3735,12 @@ async function loadLocalFiles(subPath?: string) {
     localParentPath.value = listing.parent_path;
     localTruncated.value = listing.truncated;
     localTotal.value = listing.total;
-    if (listing.volumes.length > 0) {
-      localVolumes.value = listing.volumes;
-    }
+    // 卷列表每次都按这次应答覆盖，包括空数组。
+    //
+    // 早先「只在非空时写入」会把上一轮的盘符留在下拉里。收件目录模式
+    // 或这台机器当前没有可浏览的盘时，用户仍能点到那个盘，请求却已经
+    // 不在卷模式里。右栏已经按「空也要写」处理，左栏必须同一套。
+    localVolumes.value = listing.volumes ?? [];
     localMessage.value = localDiskFiles.value.length === 0
       ? "该目录下没有可发送的文件（文件夹要进入后再选里面的文件）。"
       : listing.truncated
@@ -3378,7 +3856,7 @@ function onRootTokenPick(side: "local" | "remote", token: string) {
   if (token.startsWith(PLACE_PREFIX)) {
     const key = token.slice(PLACE_PREFIX.length);
     const place = places.find((p) => p.key === key);
-    if (!place) return; // 列表已经变了，选中项失效 —— 什么都不做比跳错地方好
+    if (!place) return; // 列表已经变了，选中项失效
     volRef.value = place.volume;
     pathRef.value = "";
     parentRef.value = null;
@@ -3392,6 +3870,49 @@ function onRootTokenPick(side: "local" | "remote", token: string) {
   parentRef.value = null;
   if (side === "local") selectedLocalNames.value.clear();
   void (side === "local" ? loadLocalFiles("") : loadRemoteFiles(""));
+}
+
+const localDropdownOpen = ref(false);
+const remoteDropdownOpen = ref(false);
+
+const localCurrentLabel = computed(() => {
+  const tok = localRootToken.value;
+  if (!tok) return receiveRootLabel.value || "收件目录";
+  if (tok.startsWith(PLACE_PREFIX)) {
+    const key = tok.slice(PLACE_PREFIX.length);
+    return localPlaces.value.find((p) => p.key === key)?.label || key;
+  }
+  if (tok.startsWith(VOLUME_PREFIX)) {
+    const id = tok.slice(VOLUME_PREFIX.length);
+    const v = localVolumes.value.find((vol) => vol.id === id);
+    return v?.label || id;
+  }
+  return tok;
+});
+
+const remoteCurrentLabel = computed(() => {
+  const tok = remoteRootToken.value;
+  if (!tok) return "收件目录";
+  if (tok.startsWith(PLACE_PREFIX)) {
+    const key = tok.slice(PLACE_PREFIX.length);
+    return remotePlaces.value.find((p) => p.key === key)?.label || key;
+  }
+  if (tok.startsWith(VOLUME_PREFIX)) {
+    const id = tok.slice(VOLUME_PREFIX.length);
+    const v = remoteVolumes.value.find((vol) => vol.id === id);
+    return v?.label || id;
+  }
+  return tok;
+});
+
+function handlePickLocalToken(tok: string) {
+  localDropdownOpen.value = false;
+  onRootTokenPick("local", tok);
+}
+
+function handlePickRemoteToken(tok: string) {
+  remoteDropdownOpen.value = false;
+  onRootTokenPick("remote", tok);
 }
 
 /**
@@ -3474,8 +3995,14 @@ async function loadRemoteFiles(subPath?: string) {
     remoteMessage.value = "请先在左侧选择一个对端设备。";
     return;
   }
+  // 请求发出去之后用户可能已经换了设备。回来时对不上就整份丢掉：
+  // 写进去的话，右栏文件、路径、盘符都属于上一台，地址栏却写着这一台的名字。
+  const deviceId = dev.device_id;
   isLoadingRemote.value = true;
   remoteMessage.value = "";
+  // 要码之后会递归重试。外层不能在重试还没回来时把转圈关掉，
+  // 但也不能靠「码还在不在」判断 —— 成功后码会被清掉，取消时码本来就是空的。
+  let retrying = false;
   // ---- 自愈：不要静默落到收件目录去 ----
   //
   // 卷下拉里有内容 = 对端**已经声明支持**真实卷浏览。此时若 `remoteVolume`
@@ -3517,6 +4044,7 @@ async function loadRemoteFiles(subPath?: string) {
         grant_code: remoteGrantCode.value,
       }
     );
+    if (store.selectedDeviceId !== deviceId) return;
     remoteLoadMorePending = false;
     // 浏览已通过（说明这次带了码或对端是永久信任）—— 清掉码，
     // 下次再需要时重新弹。
@@ -3530,23 +4058,24 @@ async function loadRemoteFiles(subPath?: string) {
     } else {
       remoteDiskFiles.value = listing.files;
     }
-    remotePath.value = listing.current_path;
-    remoteParentPath.value = listing.parent_path;
+    remotePath.value = listing.currentPath;
+    remoteParentPath.value = listing.parentPath;
     remoteTruncated.value = listing.truncated;
     remoteTotal.value = listing.total;
-    remoteVolumeMode.value = listing.volume_mode;
+    remoteVolumeMode.value = listing.volumeMode;
     // 服务端回显真实卷（我们可能发的是通配 `*`）。不接住它的话，
     // 地址栏会一直显示 `*`，用户无法确认自己在哪个盘上。
-    if (listing.volume_mode && listing.volume) {
+    if (listing.volumeMode && listing.volume) {
       remoteVolume.value = listing.volume;
     }
-    // 卷列表只在第一次拿到时定下来（它来自对端的可访问范围配置，
-    // 一次浏览里不会变）。1.x 对端返回空数组 → 隐藏下拉，退回面包屑。
-    if (listing.volumes.length > 0) {
-      remoteVolumes.value = listing.volumes;
-    }
-    // 同上：空也要写，否则切设备后会残留上一个设备的常用位置 ——
-    // 界面上就是"这台机器没有桌面，但下拉里还能选到"。
+    // 卷列表每次都按这次应答覆盖，包括空数组。
+    //
+    // 早先「只在非空时写入」是想省一次赋值：服务端在卷模式里每次都会带回
+    // 当前可访问的盘，空数组只出现在收件目录模式。但换设备时下拉不会跟着清，
+    // 于是上一台的 C/D 盘留在这一台的地址栏里。用户点那个盘，请求发到新设备，
+    // 要么打开一个碰巧同名的盘，要么报「未知的卷」。
+    // 常用位置已经按「空也要写」处理，卷列表必须同一套。
+    remoteVolumes.value = listing.volumes;
     remotePlaces.value = listing.places ?? [];
     // 对端不支持真实卷，但我们已经在卷模式 → 退回 1.x 语义并说清楚。
     // 静默退回会让用户以为"这台设备的 C 盘是空的"。
@@ -3555,7 +4084,7 @@ async function loadRemoteFiles(subPath?: string) {
     // 后者在"本来就没设卷"的情况下也是空，于是**最需要解释的那种降级
     // 恰好一句都不说** —— 面包屑悄悄从 "C:\" 变成"落盘目录"，
     // 用户完全不知道发生了什么。
-    if (!listing.volume_mode && (remoteVolume.value || remoteVolumes.value.length > 0)) {
+    if (!listing.volumeMode && (remoteVolume.value || remoteVolumes.value.length > 0)) {
       const hadVolumes = remoteVolumes.value.length > 0;
       remoteVolume.value = "";
       remoteMessage.value = hadVolumes
@@ -3573,23 +4102,34 @@ async function loadRemoteFiles(subPath?: string) {
     // （"加载更多"是同一目录，不能清）
     if (!append) selectedRemoteNames.value.clear();
   } catch (e) {
+    if (store.selectedDeviceId !== deviceId) return;
     remoteLoadMorePending = false;
     remoteDiskFiles.value = [];
-    const msg = FeisuoBridge.describeError(e, "无法浏览对端目录");
+    const denied = parseBrowseFailure(e, "无法浏览对端目录");
+    const msg = denied.message;
     // 「每次匹配码」等级下浏览失败 = 需要出示码（§2.3）。
-    // 弹一次码并自动重试, 而不是把"请出示授权码"这句话丢给用户 ——
-    // 用户看到那句话也不知道该去哪儿拿码。
-    const needsCode = msg.includes("传输码") || msg.includes("匹配码");
-    if (needsCode && dev.trust_level === "session") {
+    // 认的是结构化字段。文案里的「匹配码」只留给还没升级的旧桌面端。
+    // 认对端给的信号，不认本机花名册上的信任等级。
+    // 花名册可能还是上一次的「永久信任」，对端已经改成每次匹配码。
+    // 用本地等级当门槛，用户只会看到一句失败，不知道该去对方窗口抄码。
+    if (denied.grantCodeRequired) {
       const entered = await promptGrantCodeFromPeer(dev.device_name, "浏览它的文件", msg);
+      // 抄码期间换了设备：码是给上一台的，不能拿去打开这一台的目录。
+      if (store.selectedDeviceId !== deviceId) return;
       if (entered) {
         remoteGrantCode.value = entered;
+        // 重试自己会管加载状态。这里先返回，finally 里不能把转圈关掉 ——
+        // 否则用户在重试还没回来时又能点刷新，两份目录抢着写右栏。
+        retrying = true;
         return loadRemoteFiles(subPath);
       }
     }
     remoteMessage.value = msg;
   } finally {
-    isLoadingRemote.value = false;
+    // 换了设备，或正在用刚抄的码重试：加载状态留给当前那次请求。
+    if (store.selectedDeviceId === deviceId && !retrying) {
+      isLoadingRemote.value = false;
+    }
   }
 }
 
@@ -3667,6 +4207,10 @@ function resetRemotePath() {
   remoteVolume.value = "";
   remoteVolumeMode.value = false;
   remoteLoadMorePending = false;
+  // 卷和常用位置属于**上一台设备**。只清路径不清这两份，
+  // 下拉里还能点到上一台的盘，下一次浏览会拿那个盘符去问新设备。
+  remoteVolumes.value = [];
+  remotePlaces.value = [];
 }
 
 async function loadTransferHistory() {
@@ -3696,6 +4240,14 @@ function diagOutcomeText(outcome: string): string {
   if (outcome === "completed") return "已完成";
   if (outcome === "cancelled") return "已取消";
   return "失败";
+}
+
+/** 传输记录的状态。不认识的值不能显示成「已完成」。 */
+function historyStatusText(status: string): string {
+  if (status === "completed") return "已完成";
+  if (status === "failed") return "失败";
+  if (status === "cancelled") return "已取消";
+  return "未知";
 }
 
 async function loadSettingsData() {
@@ -3752,11 +4304,15 @@ async function removeTrusted(deviceId: string) {
       default:
         // 本机一定已经降级了（core 保证），所以**不能**报"失败" ——
         // 那会让用户以为什么都没发生，于是反复点。
+        //
+        // 也不能一律说「对方不在线」。签名不过、时钟对不上、目标不符
+        // 都会落到这里，对方其实在线并且明确拒绝了。有对方的话就用它。
         showToast(
           r.local_applied
-            ? "本机已解除配对，但未能同步通知对方（对方当前不在线）；对方仍可能给你推送文件"
+            ? r.user_message?.trim() ||
+              "本机已解除配对，但未能同步通知对方；对方仍可能给你推送文件"
             : "本机未做任何改动（该设备可能已解除）",
-          !r.local_applied,
+          true,
         );
     }
   } catch (e) {
@@ -3809,18 +4365,45 @@ function formatSpeed(bytesPerSec: number): string {
   return formatBytes(bytesPerSec) + "/s";
 }
 
-function handleTransferProgress(p: TransferProgress) {
-  if (progressClearTimer) {
-    clearTimeout(progressClearTimer);
-    progressClearTimer = null;
+function clearTransferWatchdog() {
+  if (transferWatchdogTimer) {
+    clearInterval(transferWatchdogTimer);
+    transferWatchdogTimer = null;
   }
+}
 
+function resetTransferWatchdog() {
+  lastProgressAt = Date.now();
+  if (!transferWatchdogTimer) {
+    transferWatchdogTimer = setInterval(() => {
+      const running = runningTransfers.value;
+      if (running.length > 0) {
+        const idleSec = (Date.now() - lastProgressAt) / 1000;
+        // 超过 45 秒无任何进度事件更新，判定为底层连接卡死，看门狗自动中止
+        if (idleSec >= 45) {
+          console.warn(`[飞梭] 传输已超过 ${idleSec} 秒无响应，看门狗强制重置所有卡顿任务`);
+          for (const t of running) {
+            t.settled = "failed";
+            t.speedFormatted = "—";
+            setTimeout(() => {
+              activeTransfers.value.delete(t.transfer_id);
+            }, 2500);
+          }
+          showToast("传输超时无响应，已自动中止", true);
+          clearTransferWatchdog();
+        }
+      } else {
+        clearTransferWatchdog();
+      }
+    }, 3000);
+  }
+}
+
+function handleTransferProgress(p: TransferProgress) {
   const { kind, reason } = parseTransferStatus(p.status);
+  const id = p.transfer_id || (p.peer_device_id ? `dev-${p.peer_device_id}` : "default");
 
   // 回填 transfer_id：撤销必须带它，而它只能从进度事件里拿到
-  // （`compute_resume_key` 在 core 内部算出来的，调用方无从得知）。
-  //
-  // 只在**发送方向**且尚未回填时写，避免后续事件覆盖成别的传输。
   if (p.direction === "Send" && p.transfer_id) {
     const u = undoableSend.value;
     if (u && !u.transferId && u.deviceId === p.peer_device_id) {
@@ -3828,48 +4411,106 @@ function handleTransferProgress(p: TransferProgress) {
     }
   }
 
-  activeProgress.value = {
-    current_file: p.current_file || (p.total_files > 1 ? `${p.total_files} 个文件` : "文件"),
+  const existing = activeTransfers.value.get(id);
+  const settled =
+    kind === "Completed" ? "ok" : kind === "Failed" ? "failed" : kind === "Cancelled" ? "cancelled" : null;
+
+  const item: ActiveTransferItem = {
+    transfer_id: id,
+    current_file: p.current_file || existing?.current_file || (p.total_files > 1 ? `${p.total_files} 个文件` : "文件"),
     direction: p.direction,
     progress_percent: Math.max(0, Math.min(100, Number(p.progress_percent) || 0)),
+    speed_bytes_per_sec: p.speed_bytes_per_sec || 0,
     speedFormatted: formatSpeed(p.speed_bytes_per_sec),
-    failed: kind === "Failed" || kind === "Cancelled",
+    bytes_transferred: p.bytes_transferred || 0,
+    total_bytes: p.total_bytes || 0,
+    peer_device_id: p.peer_device_id,
+    peer_device_name: p.peer_device_name,
+    settled,
+    last_updated_at: Date.now(),
   };
 
-  if (kind === "Completed") {
-    // 托盘常驻时窗口是隐藏的, 应用内 toast 用户根本看不到。
-    // "文件已经到电脑上了"必须让人知道, 否则无人值守场景等于白等。
-    FeisuoBridge.ensureWindowVisible().catch(() => {});
-    showToast(p.direction === "Send" ? "发送完成" : "接收完成");
-    afterTransferSettled();
-  } else if (kind === "Failed") {
-    FeisuoBridge.ensureWindowVisible().catch(() => {});
-    showToast(reason || "传输失败", true);
-    afterTransferSettled();
-  } else if (kind === "Cancelled") {
-    showToast("传输已取消", true);
-    afterTransferSettled();
+  activeTransfers.value.set(id, item);
+
+  if (!settled) {
+    resetTransferWatchdog();
+  } else {
+    // 该任务已结单，安排 2.5 秒后从 Map 中清理该任务
+    setTimeout(() => {
+      activeTransfers.value.delete(id);
+      if (runningCount.value === 0) {
+        clearTransferWatchdog();
+        loadTransferHistory();
+        if (p.direction === "Receive") {
+          loadLocalFiles();
+        }
+      }
+    }, 2500);
+
+    if (kind === "Completed") {
+      FeisuoBridge.ensureWindowVisible().catch(() => {});
+      showToast(`${item.current_file} ${p.direction === "Send" ? "发送完成" : "接收完成"}`);
+    } else if (kind === "Failed") {
+      FeisuoBridge.ensureWindowVisible().catch(() => {});
+      showToast(`${item.current_file} 传输失败: ${reason || "未知原因"}`, true);
+    } else if (kind === "Cancelled") {
+      showToast(`${item.current_file} 传输已取消`, true);
+    }
+  }
+}
+
+/** 主动取消当前进行中的传输（来自底部进度栏或超时应急） */
+async function cancelActiveTransfer(transferId?: string) {
+  const running = runningTransfers.value;
+  if (running.length === 0) return;
+
+  const targets = transferId ? running.filter((t) => t.transfer_id === transferId) : running;
+  if (targets.length === 0) return;
+
+  showToast(targets.length > 1 ? `已取消 ${targets.length} 个传输任务` : "已取消传输", true);
+  closeUndoWindow();
+
+  for (const t of targets) {
+    t.settled = "cancelled";
+    t.speedFormatted = "—";
+    const devId = t.peer_device_id || undoableSend.value?.deviceId || store.selectedDevice?.device_id || "";
+    if (devId) {
+      undoneTransferIds.add(devId);
+      FeisuoBridge.cancelIncomingTransfer(
+        devId,
+        t.transfer_id && t.transfer_id !== "aggregate" ? t.transfer_id : undefined
+      ).catch((e) => {
+        console.warn("通知底层取消传输异常:", e);
+      });
+    }
+    setTimeout(() => {
+      activeTransfers.value.delete(t.transfer_id);
+    }, 2500);
+  }
+
+  if (runningTransfers.value.length === 0) {
+    clearTransferWatchdog();
+  }
+}
+
+function settleTransfersForDevice(deviceId: string, status: "failed" | "cancelled") {
+  for (const [id, item] of activeTransfers.value.entries()) {
+    if (item.peer_device_id === deviceId && !item.settled) {
+      item.settled = status;
+      item.speedFormatted = "—";
+      setTimeout(() => {
+        activeTransfers.value.delete(id);
+      }, 2500);
+    }
+  }
+  if (runningCount.value === 0) {
+    clearTransferWatchdog();
   }
 }
 
 function afterTransferSettled() {
-  const wasReceiving = activeProgress.value?.direction === "Receive";
-
-  progressClearTimer = setTimeout(() => {
-    activeProgress.value = null;
-    progressClearTimer = null;
-  }, 2500);
-
-  // 收完之后刷新落盘目录与传输记录
-  if (wasReceiving) {
-    loadLocalFiles();
-  }
+  clearTransferWatchdog();
   loadTransferHistory();
-  // 这里**故意不**清理暂存文件, 也不移除待发清单里的临时项。
-  // 本函数对任意传输(含对端推过来的接收)都会触发, 而暂存目录里可能还躺着
-  // 用户排队等待发送的剪贴板文件 —— 在这里清空会把它从磁盘上删掉,
-  // 表现为"排队中的文件莫名消失, 点发送才报文件不存在"。
-  // 暂存项的生命周期只由发送成功那一条路径负责 (见 doSend)。
 }
 
 // =======================================================================
@@ -4073,7 +4714,7 @@ function canDropTo(dev: DeviceRosterEntry): boolean {
 }
 
 function onDeviceDragOver(e: DragEvent, dev: DeviceRosterEntry) {
-  if (isTransferring.value) return;
+  if (isConcurrencyFull.value) return;
   if (!canDropTo(dev)) return;
   dragOverDeviceId.value = dev.device_id;
   const dt = e.dataTransfer;
@@ -4109,8 +4750,8 @@ async function canDirectSendTo(dev: DeviceRosterEntry): Promise<{
   ok: boolean;
   endpoint?: { ip: string; port: number };
 }> {
-  if (isTransferring.value) {
-    showToast("正在传输中，请等本次完成后再发送", true);
+  if (isConcurrencyFull.value) {
+    showToast(`当前已有 ${runningCount.value} 个传输任务在进行，已达最大并发数上限 (${maxConcurrency.value})`, true);
     return { ok: false };
   }
   if (dev.is_self) {
@@ -4277,7 +4918,8 @@ async function directSendTo(
     );
     // 「每次匹配码」是**协商回合**不是失败：待发队列必须原样保留,
     // 由 promptGrantCode() 弹码后重新调用本函数。
-    if (outcome.grant_code_required) {
+    if (abortedSend(outcome)) return;
+    if (outcome.grantCodeRequired) {
       // 协商回合里一个字节都还没传。撤销窗口留着会让用户点一个
       // 此刻对不上任何传输的「撤销」。弹码期间关掉，重试成功再开。
       closeUndoWindow();
@@ -4304,6 +4946,11 @@ async function directSendTo(
     undoTimer.value = null;
     const undone = undoneTransferIds.delete(dev.device_id);
     undoableSend.value = null;
+    settleTransfersForDevice(dev.device_id, isLocalAbort(e) ? "cancelled" : "failed");
+    if (activeProgress.value && !activeProgress.value.settled) {
+      activeProgress.value.settled = isLocalAbort(e) ? "cancelled" : "failed";
+      afterTransferSettled();
+    }
     // 撤销成功后的失败是**预期结果**，不是错误。
     // 照样弹红色报错的话，用户会以为撤销没生效 —— 于是再点一次撤销，
     // 或者干脆重发（那就把刚撤销的文件又发了一遍）。
@@ -4348,7 +4995,8 @@ async function promptGrantCodeAndRetry(
       trimmed,
       destSubPath
     );
-    if (outcome.grant_code_required) {
+    if (abortedSend(outcome, dev.device_id)) return false;
+    if (outcome.grantCodeRequired) {
       // 用户已经敲过一次码了还不行 —— 说明是**对端那边**还有一轮
       // （同一个码、同一个请求指纹，理论上应该能过）。
       //
@@ -4356,7 +5004,7 @@ async function promptGrantCodeAndRetry(
       // 而用户已经**照做了**一次 —— 于是他以为自己没输对，
       // 开始反复重敲，把一个可能的对端问题当成自己的错。
       showToast(
-        `${dev.device_name} 仍未接受这个码。请确认你念的是**它审批窗口上**` +
+        `${dev.device_name} 仍未接受这个码。请确认你念的是它审批窗口上` +
           "现在显示的那 6 位（不是上一次那个 —— 换了请求就会换码）",
         true
       );
@@ -4366,12 +5014,45 @@ async function promptGrantCodeAndRetry(
     // 只清本次发出去的条目，理由见 `directSendTo` 里的同名注释：
     // 穿梭 / 拖进窗口的直发路径里，待发清单可能装着**另一批**文件
     // （比如用户先前暂存的剪贴板内容），整体清空会把它们一起弄丢。
-    stagedFiles.value = stagedFiles.value.filter((f) => !files.includes(f.path));
+    const sent = new Set(files);
+    const leftover = stagedFiles.value.filter((f) => !sent.has(f.path));
+    const sentTemps = stagedFiles.value
+      .filter((f) => sent.has(f.path) && f.temporary)
+      .map((f) => f.path);
+    stagedFiles.value = leftover;
+    if (sentTemps.length > 0) {
+      FeisuoBridge.cleanupTempPayloads(sentTemps).catch(() => undefined);
+      FeisuoBridge.cleanupClipboardStaging(sentTemps).catch(() => undefined);
+    }
     return true;
   } catch (e) {
+    settleTransfersForDevice(dev.device_id, isLocalAbort(e) ? "cancelled" : "failed");
+    if (activeProgress.value && !activeProgress.value.settled) {
+      activeProgress.value.settled = isLocalAbort(e) ? "cancelled" : "failed";
+      afterTransferSettled();
+    }
     showToast(FeisuoBridge.describeError(e, "带码重试失败"), true);
     return false;
   }
+}
+
+/**
+ * 本机撤销走的是成功返回，不能再落到「已发送」。
+ *
+ * 待发清单、暂存文件、选中项都留给调用方不动。这里只关撤销窗口并提示。
+ */
+function abortedSend(outcome: import("./api/feisuoBridge").SendOutcome, deviceId?: string): boolean {
+  if (!outcome.locallyAborted) return false;
+  closeUndoWindow();
+  if (deviceId) {
+    settleTransfersForDevice(deviceId, "cancelled");
+  }
+  if (activeProgress.value && !activeProgress.value.settled) {
+    activeProgress.value.settled = "cancelled";
+    afterTransferSettled();
+  }
+  showToast(outcome.message || "已撤销", true);
+  return true;
 }
 
 /**
@@ -4390,7 +5071,7 @@ function showSendResult(
   selectedCount: number,
   outcome: import("./api/feisuoBridge").SendOutcome
 ) {
-  const sent = outcome.expanded_files > 0 ? outcome.expanded_files : selectedCount;
+  const sent = outcome.expandedFiles > 0 ? outcome.expandedFiles : selectedCount;
   const isFolder = sent !== selectedCount;
   const head = isFolder
     ? `已发送 ${sent} 个文件（来自 ${selectedCount} 个选中项）到 ${deviceName}`
@@ -4400,15 +5081,15 @@ function showSendResult(
   if (outcome.skipped > 0) {
     notes.push(`${outcome.skipped} 个对端已存在（断点续传跳过）`);
   }
-  if (outcome.expand_symlinks_skipped > 0) {
-    notes.push(`${outcome.expand_symlinks_skipped} 个符号链接（不跟随）`);
+  if (outcome.expandSymlinksSkipped > 0) {
+    notes.push(`${outcome.expandSymlinksSkipped} 个符号链接（不跟随）`);
   }
-  if (outcome.expand_skipped > outcome.expand_symlinks_skipped) {
+  if (outcome.expandSkipped > outcome.expandSymlinksSkipped) {
     notes.push(
-      `${outcome.expand_skipped - outcome.expand_symlinks_skipped} 个隐藏/内部条目`
+      `${outcome.expandSkipped - outcome.expandSymlinksSkipped} 个隐藏/内部条目`
     );
   }
-  if (outcome.expand_limit_hit) notes.push(outcome.expand_limit_hit);
+  if (outcome.expandLimitHit) notes.push(outcome.expandLimitHit);
 
   showToast(notes.length > 0 ? `${head}；跳过 ${notes.join("、")}` : head, notes.length > 0);
 }
@@ -4476,7 +5157,8 @@ function onShuttleRowDragStart(
   side: "local" | "remote",
   item: { name: string; is_dir: boolean }
 ) {
-  if (isTransferring.value) {
+  if (isConcurrencyFull.value) {
+    showToast(`当前已有 ${runningCount.value} 个传输任务在运行，已达并发上限`, true);
     e.preventDefault();
     return;
   }
@@ -4507,7 +5189,7 @@ function onShuttleRowDragEnd() {
 
 /** 某一栏是否接受当前的拖拽（用于高亮落点） */
 function shuttleDropArmed(side: "local" | "remote"): boolean {
-  if (!shuttleDrag.value || isTransferring.value) return false;
+  if (!shuttleDrag.value || isConcurrencyFull.value) return false;
   // 只能往**对面**拖：自己拖自己没意义
   return shuttleDrag.value.side !== side;
 }
@@ -4548,11 +5230,14 @@ async function onShuttlePaneDrop(e: DragEvent, side: "local" | "remote") {
     await sendPathsIntoRemote(paths);
   } else {
     // 右 → 左：取回到**本机当前地址栏目录**
+    const devId = store.selectedDeviceId;
     const saved = new Set(selectedRemoteNames.value);
     selectedRemoteNames.value = new Set(drag.names);
     try {
       await shuttleFetch();
     } finally {
+      // 取回期间换了设备：saved 是上一台的选中，不能盖到这一台上。
+      if (store.selectedDeviceId !== devId) return;
       if (selectedRemoteNames.value.size > 0) selectedRemoteNames.value = saved;
     }
   }
@@ -4644,7 +5329,8 @@ async function sendPathsIntoRemote(paths: string[]) {
       "",
       dest.path
     );
-    if (outcome.grant_code_required) {
+    if (abortedSend(outcome, dev.device_id)) return;
+    if (outcome.grantCodeRequired) {
       closeUndoWindow();
       const retried = await promptGrantCodeAndRetry(
         dev, gate.endpoint, paths, outcome.message, dest.path
@@ -4656,7 +5342,11 @@ async function sendPathsIntoRemote(paths: string[]) {
       return;
     }
     showSendResult(dev.device_name, paths.length, outcome);
-    if (!dest.fallback) void loadRemoteFiles(dest.path);
+    // 刷新的是发送时那一台的目录。传输期间换了设备，
+    // 这个子路径属于上一台，不能拿去打开现在选中的那一台。
+    if (!dest.fallback && store.selectedDeviceId === dev.device_id) {
+      void loadRemoteFiles(dest.path);
+    }
     // 穿梭按钮与拖拽都经由这里，所以左栏选中也在这里清。
     // 放在函数末尾而不是调用方：两个调用方都会漏掉其中一个。
     selectedLocalNames.value.clear();
@@ -4666,6 +5356,11 @@ async function sendPathsIntoRemote(paths: string[]) {
     // 5 秒后自行消失 —— 界面上在说一件没发生的事。
     const undone = undoneTransferIds.delete(dev.device_id);
     closeUndoWindow();
+    settleTransfersForDevice(dev.device_id, isLocalAbort(e) ? "cancelled" : "failed");
+    if (activeProgress.value && !activeProgress.value.settled) {
+      activeProgress.value.settled = isLocalAbort(e) ? "cancelled" : "failed";
+      afterTransferSettled();
+    }
     if (!undone && !isLocalAbort(e)) {
       showToast(FeisuoBridge.describeError(e, "穿梭发送失败"), true);
     }
@@ -4674,6 +5369,7 @@ async function sendPathsIntoRemote(paths: string[]) {
 
 async function pullRemoteDir(dirName: string) {
   const key = remotePath.value ? `${remotePath.value}/${dirName}` : dirName;
+  const devId = store.selectedDeviceId;
   // 目录**不进** selectedRemoteNames：那里的每一项都会被当作"要取回的文件"，
   // 而展开发生在**对端**。这里只在调用期间借用它。
   const saved = new Set(selectedRemoteNames.value);
@@ -4681,7 +5377,10 @@ async function pullRemoteDir(dirName: string) {
   try {
     await shuttleFetch();
   } finally {
-    // 无论成败都恢复：失败时保留原选中项，用户改一下就能重试
+    // 取回期间换了设备：saved 是上一台的选中。这时再写回去，
+    // 会把这一台刚选中的文件换成上一台的路径。
+    if (store.selectedDeviceId !== devId) return;
+    // 失败时保留原选中项，用户改一下就能重试
     if (selectedRemoteNames.value.size === 1) {
       selectedRemoteNames.value = saved;
     }
@@ -4715,29 +5414,102 @@ const scopeIsRestricted = computed(
     !scopeForDevice.value.can_push
 );
 
-const scopeModes: Array<{ value: AccessScope["mode"]; label: string; hint: string }> = [
-  { value: "all", label: "全部", hint: "能浏览除系统目录外的所有内容" },
-  { value: "allowlist", label: "白名单", hint: "只能浏览下面勾选的盘符" },
-  { value: "receive_only", label: "仅收件目录", hint: "看不到本机任何其它文件" },
+const scopeModes: Array<{ value: AccessScope["mode"]; label: string; tip: string }> = [
+  { value: "all", label: "全部", tip: "所有内容均可访问，不区分系统目录" },
+  { value: "allowlist", label: "白名单", tip: "仅允许访问勾选的盘符或添加的目录" },
+  { value: "denylist", label: "排除名单", tip: "允许所有盘符，除了排除的目录" },
+  { value: "receive_only", label: "仅收件目录", tip: "仅可访问接收目录，不可浏览其他位置" },
 ];
+
+const newScopeAllowPath = ref("");
+const newScopeDenyPath = ref("");
+
+async function pickFolderForAllow() {
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const res = await open({ directory: true, multiple: false });
+    if (typeof res === "string" && res.trim()) {
+      addScopeAllowPath(res.trim());
+    }
+  } catch (e) {
+    console.warn("选取目录失败:", e);
+  }
+}
+
+function addScopeAllowPath(pathToAdd?: string) {
+  const p = (pathToAdd ?? newScopeAllowPath.value).trim();
+  if (!p || !scopeDraft.value) return;
+  if (!scopeDraft.value.allow_paths) scopeDraft.value.allow_paths = [];
+  if (!scopeDraft.value.allow_paths.includes(p)) {
+    scopeDraft.value.allow_paths.push(p);
+  }
+  newScopeAllowPath.value = "";
+}
+
+function removeScopeAllowPath(index: number) {
+  if (scopeDraft.value?.allow_paths) {
+    scopeDraft.value.allow_paths.splice(index, 1);
+  }
+}
+
+async function pickFolderForDeny() {
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const res = await open({ directory: true, multiple: false });
+    if (typeof res === "string" && res.trim()) {
+      addScopeDenyPath(res.trim());
+    }
+  } catch (e) {
+    console.warn("选取目录失败:", e);
+  }
+}
+
+function addScopeDenyPath(pathToAdd?: string) {
+  const p = (pathToAdd ?? newScopeDenyPath.value).trim();
+  if (!p || !scopeDraft.value) return;
+  if (!scopeDraft.value.deny_paths) scopeDraft.value.deny_paths = [];
+  if (!scopeDraft.value.deny_paths.includes(p)) {
+    scopeDraft.value.deny_paths.push(p);
+  }
+  newScopeDenyPath.value = "";
+}
+
+function removeScopeDenyPath(index: number) {
+  if (scopeDraft.value?.deny_paths) {
+    scopeDraft.value.deny_paths.splice(index, 1);
+  }
+}
 
 /** 读当前选中设备的范围（打开弹层时 + 切换设备时都会调） */
 async function refreshScope(deviceId: string) {
   try {
-    scopeForDevice.value = await FeisuoBridge.getAccessScope(deviceId);
+    const scope = await FeisuoBridge.getAccessScope(deviceId);
+    if (store.selectedDeviceId !== deviceId) return;
+    scopeForDevice.value = scope;
   } catch {
-    // 读失败就保持默认视图，**不要**把界面显示成"已收窄"或"全开"的猜测值
+    // 读失败保持默认
   }
 }
 
 async function openScopeEditor() {
   const dev = store.selectedDevice;
   if (!dev) return;
+  const deviceId = dev.device_id;
   scopeEditorOpen.value = true;
   scopeDraft.value = null;
-  await refreshScope(dev.device_id);
+  newScopeAllowPath.value = "";
+  newScopeDenyPath.value = "";
+  await refreshScope(deviceId);
+  if (store.selectedDeviceId !== deviceId) {
+    scopeEditorOpen.value = false;
+    return;
+  }
   // 深拷贝，避免草稿与已保存值共享同一个对象
-  scopeDraft.value = JSON.parse(JSON.stringify(scopeForDevice.value));
+  const d = JSON.parse(JSON.stringify(scopeForDevice.value));
+  if (!d.allow_volumes) d.allow_volumes = [];
+  if (!d.allow_paths) d.allow_paths = [];
+  if (!d.deny_paths) d.deny_paths = [];
+  scopeDraft.value = d;
 }
 
 function closeScopeEditor() {
@@ -4748,6 +5520,7 @@ function closeScopeEditor() {
 function toggleScopeVolume(id: string) {
   const d = scopeDraft.value;
   if (!d) return;
+  if (!d.allow_volumes) d.allow_volumes = [];
   const i = d.allow_volumes.indexOf(id);
   if (i >= 0) d.allow_volumes.splice(i, 1);
   else d.allow_volumes.push(id);
@@ -4763,25 +5536,34 @@ function resetScopeToDefault() {
     can_push: true,
     updated_at: 0,
   };
+  newScopeAllowPath.value = "";
+  newScopeDenyPath.value = "";
 }
 
 async function saveScope() {
   const dev = store.selectedDevice;
   const d = scopeDraft.value;
   if (!dev || !d) return;
-  // 白名单模式下"一个都不勾"是个很容易点到的状态，而它的后果是
-  // **什么都看不到**。不拦一下的话，用户会以为飞梭坏了。
-  if (d.mode === "allowlist" && d.allow_volumes.length === 0) {
-    showToast("白名单模式下至少要勾一个盘符，否则该设备什么都看不到", true);
+  const deviceId = dev.device_id;
+  const deviceName = dev.device_name;
+  // 白名单模式下，若盘符和目录均未指定，则给出提示
+  if (
+    d.mode === "allowlist" &&
+    (!d.allow_volumes || d.allow_volumes.length === 0) &&
+    (!d.allow_paths || d.allow_paths.length === 0)
+  ) {
+    showToast("白名单模式下请至少勾选一个盘符或添加一个目录", true);
     return;
   }
   scopeSaving.value = true;
   try {
-    await FeisuoBridge.setAccessScope(dev.device_id, d);
-    scopeForDevice.value = JSON.parse(JSON.stringify(d));
+    await FeisuoBridge.setAccessScope(deviceId, d);
+    if (store.selectedDeviceId === deviceId) {
+      scopeForDevice.value = JSON.parse(JSON.stringify(d));
+    }
     scopeEditorOpen.value = false;
     scopeDraft.value = null;
-    showToast(`已更新 ${dev.device_name} 的访问范围`);
+    showToast(`已更新 ${deviceName} 的访问范围`);
   } catch (e) {
     showToast(FeisuoBridge.describeError(e, "保存失败"), true);
   } finally {
@@ -4789,7 +5571,7 @@ async function saveScope() {
   }
 }
 
-// 切换设备时同步刷新范围（头部那个"被收窄"标记要跟着设备走）
+// 切换设备时同步刷新范围
 watch(
   () => store.selectedDeviceId,
   (id) => {
@@ -4804,7 +5586,7 @@ watch(
     };
     if (id) void refreshScope(id);
   },
-  { immediate: true }
+  { immediate: true },
 );
 
 /** 撤销直发 */
@@ -4883,8 +5665,8 @@ function handleNativeDrop(paths: string[]) {
   // 表现为"把文件拖过去, 什么都没发生"。托盘常驻是本产品的核心形态,
   // 所以这条路径必须自己保证可见性。
   FeisuoBridge.ensureWindowVisible().catch(() => {});
-  if (isTransferring.value) {
-    showToast("正在传输中，请等本次完成后再添加", true);
+  if (isConcurrencyFull.value) {
+    showToast(`当前已有 ${runningCount.value} 个传输任务在运行，请等部分完成后再添加`, true);
     return;
   }
   // 跳过隐藏的**顶层**条目。目录内部的过滤交给后端递归展开
@@ -5131,7 +5913,8 @@ async function startSendTransfer() {
       "",
       destSub
     );
-    if (outcome.grant_code_required) {
+    if (abortedSend(outcome, dev.device_id)) return;
+    if (outcome.grantCodeRequired) {
       // 「每次匹配码」是**协商回合**，不是发送失败。
       //
       // 此时**必须先关掉撤销窗口**再弹码：协商回合里一个字节都还没传，
@@ -5148,13 +5931,8 @@ async function startSendTransfer() {
       );
       if (retried) {
         // 重试成功：这时才真的发出去了，重开一次撤销窗口。
-        // 不重开的话"每次匹配码"这条路就成了唯一没有反悔机会的路径 ——
-        // 而它恰恰是最需要反悔的（用户要当场核对码，敲错一位就发给别人了）。
+        // 暂存文件由 `promptGrantCodeAndRetry` 按本次发出去的路径清掉。
         openUndoWindow(dev, files.length);
-        if (tempPaths.length > 0) {
-          FeisuoBridge.cleanupTempPayloads(tempPaths).catch(() => undefined);
-          FeisuoBridge.cleanupClipboardStaging(tempPaths).catch(() => undefined);
-        }
       }
       return;
     }
@@ -5177,6 +5955,11 @@ async function startSendTransfer() {
     // 「已发起发送 · N 个文件」，而一个字节都没发出去。
     const undone = undoneTransferIds.delete(dev.device_id);
     closeUndoWindow();
+    settleTransfersForDevice(dev.device_id, isLocalAbort(e) ? "cancelled" : "failed");
+    if (activeProgress.value && !activeProgress.value.settled) {
+      activeProgress.value.settled = isLocalAbort(e) ? "cancelled" : "failed";
+      afterTransferSettled();
+    }
     // 失败时保留队列与暂存文件, 便于用户直接重试
     if (!undone && !isLocalAbort(e)) showToast(FeisuoBridge.describeError(e, "发送失败"), true);
   } finally {
@@ -5188,10 +5971,6 @@ async function startSendTransfer() {
 // 双栏穿梭
 // =======================================================================
 function toggleLocalSelection(item: DiskFileInfo) {
-  if (isTransferring.value) {
-    showToast("正在传输中，请稍候", true);
-    return;
-  }
   // 文件夹现在**可以**整夹发送（§7.6）—— 后端 `expand_all` 会递归展开，
   // 目标路径带上文件夹名，所以对端收到的结构与本机一致。
   // 右栏（对端）仍不支持：那是"取回"，而取回一个目录需要在对端
@@ -5204,12 +5983,6 @@ function toggleLocalSelection(item: DiskFileInfo) {
 function toggleRemoteSelection(item: RemoteFileEntry) {
   if (item.is_dir) {
     showToast("取回暂不支持整个文件夹；请进入文件夹后逐个选择", true);
-    return;
-  }
-  // 传输过程中锁定选择: 否则用户会在同一份待发列表上反复追加/移除,
-  // 造成"点了取回却发错文件"这类极难复现的错发
-  if (isTransferring.value) {
-    showToast("正在传输中，请稍候", true);
     return;
   }
   const key = remoteEntryKey(item);
@@ -5270,9 +6043,27 @@ async function shuttleSend() {
   await sendPathsIntoRemote(paths);
 }
 
+/**
+ * 取回成功时优先用对端原文。
+ *
+ * 原文里有实际要推的文件数。写死「已受理」会让用户分不出取回了几个文件。
+ * 原文为空（旧对端）才退回「已受理」，并带上本机落点。
+ */
+function pullAcceptedText(deviceName: string, destSub: string, peerMessage: string): string {
+  const peer = peerMessage.trim();
+  const where = destSub
+    ? `将取回到 ${localInfo.receive_dir}\\${destSub}`
+    : `将取回到 ${localInfo.receive_dir}`;
+  if (!peer) return `${deviceName} 已受理，${where}`;
+  return `${deviceName}：${peer}。${where}`;
+}
+
 async function shuttleFetch() {
   const dev = store.selectedDevice;
   if (!dev || selectedRemoteNames.value.size === 0) return;
+  // 探测和等对方确认都要时间。回来时可能已经换成另一台，
+  // 不能把这一台新选中的文件清掉，也不能把左栏刷成无关的一次刷新。
+  const deviceId = dev.device_id;
   // 准入与发送方向**共用** `canDirectSendTo`。
   //
   // 方向不同但准入条件相同：能不能向这台设备**发起一次操作**，取决于
@@ -5321,9 +6112,10 @@ async function shuttleFetch() {
       "",
       curVolume
     );
-    if (outcome.grant_code_required) {
+    if (outcome.grantCodeRequired) {
       // 协商回合: 不是失败, 待取清单必须保留
       const entered = await promptGrantCodeFromPeer(dev.device_name, "取回文件", "");
+      if (store.selectedDeviceId !== deviceId) return;
       if (!entered) {
         showToast("已保留选中项, 随时可以再试");
         return;
@@ -5336,29 +6128,28 @@ async function shuttleFetch() {
         entered,
         curVolume
       );
-      if (retry.grant_code_required) {
+      if (store.selectedDeviceId !== deviceId) return;
+      if (retry.grantCodeRequired) {
         showToast("对方还需要核对匹配码, 请重试一次", true);
         return;
       }
-      showToast(
-        destSub
-          ? `对方已受理，将取回到 ${localInfo.receive_dir}\\${destSub}`
-          : "对方已受理，正在接收…"
-      );
+      showToast(pullAcceptedText(dev.device_name, destSub, retry.message));
       selectedRemoteNames.value.clear();
       // 刷新左栏：与发送方向对称 —— "落到地址栏当前目录"这件事
       // 必须**看得见**，否则用户会在别处找文件，或以为没生效。
       if (destSub) void loadLocalFiles(destSub);
       return;
     }
-    showToast(
-      destSub
-        ? `对方已受理，将取回到 ${localInfo.receive_dir}\\${destSub}`
-        : "对方已受理，正在接收…"
-    );
+    if (store.selectedDeviceId !== deviceId) return;
+    showToast(pullAcceptedText(dev.device_name, destSub, outcome.message));
     selectedRemoteNames.value.clear();
     if (destSub) void loadLocalFiles(destSub);
   } catch (e) {
+    if (activeProgress.value && !activeProgress.value.settled) {
+      activeProgress.value.settled = "failed";
+      afterTransferSettled();
+    }
+    if (store.selectedDeviceId !== deviceId) return;
     showToast(FeisuoBridge.describeError(e, "取回请求失败"), true);
   }
 }
@@ -5376,16 +6167,20 @@ async function commitDeviceName() {
   }
   if (next === localInfo.device_name) return;
 
-  localInfo.device_name = next;
+  // 先记下已经生效的名字。保存失败时输入框必须回到它，
+  // 不能先把 localInfo 改成新名字再拿它回滚 —— 那样回滚的就是被拒绝的名字。
+  const previous = localInfo.device_name;
   try {
     await FeisuoBridge.updateAppConfig({ device_name: next });
+    // 后端会去掉控制字符并截到 32 字。以回读到的为准，
+    // 否则输入框显示的是完整原文，局域网里看到的是截断后的名字。
+    await loadLocalInfo();
     nameSaved.value = true;
     if (nameSavedTimer) clearTimeout(nameSavedTimer);
     nameSavedTimer = setTimeout(() => (nameSaved.value = false), 2200);
   } catch (e) {
-    // 失败必须把输入框回滚, 否则界面显示的名字和实际生效的不一致
-    deviceNameInput.value = localInfo.device_name;
-    await loadLocalInfo();
+    localInfo.device_name = previous;
+    deviceNameInput.value = previous;
     showToast(FeisuoBridge.describeError(e, "保存设备名称失败"), true);
   }
 }
@@ -5403,13 +6198,24 @@ async function saveSettings() {
     showToast("设置已保存");
     await loadLocalInfo();
   } catch (e) {
+    // 开关在点下去时已经改了界面上的值。保存失败时这份值既没进内存也没进磁盘，
+    // 不读回来的话，界面显示已关闭，实际仍是旧设置。关窗、自动接收都会按旧的来。
+    try {
+      await loadLocalInfo();
+    } catch {
+      /* 读不回来就留着这次的选择，至少错误提示还在 */
+    }
     showToast(FeisuoBridge.describeError(e, "保存设置失败"), true);
   }
 }
 
 async function onThemeSelect() {
-  store.applyTheme(themeSelect.value);
+  // 下拉框的 setter 已经把新主题画上了。这里只负责写进配置。
+  // 保存失败时 loadLocalInfo 会把 localInfo.theme 读回正在生效的值，
+  // 但画面和下拉框还停在没写上的那一档，下次打开才会跳回去。
   await saveSettings();
+  const saved = localInfo.theme === "light" ? "light" : "dark";
+  if (store.theme !== saved) store.applyTheme(saved);
 }
 
 async function chooseReceiveDir() {
@@ -5513,10 +6319,20 @@ async function toggleAutoUpdate() {
 // =======================================================================
 // 窗口控制
 // =======================================================================
-function toggleTheme() {
+async function toggleTheme() {
+  const previous = store.theme;
   store.applyTheme();
-  // 主题偏好也写回后端配置, 保证两端一致
-  FeisuoBridge.updateAppConfig({ theme: store.theme }).catch(() => undefined);
+  // 主题偏好也写回后端配置, 保证两端一致。
+  // 写失败不能只吞掉：画面已经换成新主题，配置里仍是旧的，
+  // 下次打开会跳回去，用户以为已经换上了。
+  try {
+    await FeisuoBridge.updateAppConfig({ theme: store.theme });
+    localInfo.theme = store.theme;
+  } catch (e) {
+    store.applyTheme(previous);
+    localInfo.theme = previous;
+    showToast(FeisuoBridge.describeError(e, "切换外观失败"), true);
+  }
 }
 
 async function minimizeWindow() {
@@ -5831,15 +6647,24 @@ async function submitPairing() {
     pairErrorMessage.value = "这不像一个 IPv4 地址，应该形如 192.168.1.120";
     return;
   }
-  isPairingSubmit.value = true;
   pairErrorMessage.value = "";
   pairingAbortFlag = false;
 
-  try {
-    // 优先使用发现到的真实端口, 不再硬编码 42100
-    const dev = store.roster.find((d) => (d.ip || d.last_ip) === ip);
-    const port = dev?.transfer_port ?? localInfo.transfer_port;
+  // 优先使用发现到的真实端口。名册里离线设备的端口是空的，
+  // 不能拿本机端口去顶 —— 两边端口可以不同，顶上去就会连错。
+  // 从设备卡片点进来时，端口记在配对目标上，即使名册刚好刷新掉也还在。
+  const dev = store.roster.find((d) => (d.ip || d.last_ip) === ip);
+  const remembered =
+    targetDeviceForPairing.value?.ip === ip ? targetDeviceForPairing.value.transfer_port : 0;
+  const port = dev?.transfer_port || remembered || 0;
+  if (!port) {
+    pairErrorMessage.value =
+      "还不知道对方的传输端口。请等它出现在设备列表里再配对，或先用「直连对端 IP」探测一次";
+    return;
+  }
 
+  isPairingSubmit.value = true;
+  try {
     const paired = await FeisuoBridge.pairWithDevice(ip, port, pin);
     if (pairingAbortFlag) return;
 
@@ -5994,14 +6819,31 @@ async function copyText(text: string) {
 }
 
 function selectDevice(id: string) {
+  const previousId = store.selectedDeviceId;
   store.selectedDeviceId = id;
   remoteDiskFiles.value = [];
   selectedRemoteNames.value.clear();
-  // 换设备必须把浏览路径退回根目录: 上一台设备的子目录在新设备上
-  // 几乎肯定不存在, 保留旧路径只会让右栏一直报错。
+  // 待发清单的落点是相对上一台收件目录的子路径。
+  // 只在真的换了一台时清：重复点当前设备不该把用户刚设好的落点抹掉。
+  if (previousId && previousId !== id && pendingDestSubPath.value) {
+    pendingDestSubPath.value = "";
+    if (stagedFiles.value.length > 0) {
+      showToast("已换成另一台设备，待发清单改落到它的收件目录");
+    }
+  }
+  // 换设备必须把浏览路径退回根目录
   resetRemotePath();
   // 新设备的能力位可能不同（新版/旧版），重算初始浏览模式
   bootstrapRemoteBrowseMode();
+
+  // 联动优化 1：若用户在系统设置页点击了某台设备，自动切回主工作视图（发送文件）以呈现该设备
+  if (currentTab.value === "settings") {
+    currentTab.value = "send";
+  }
+  // 联动优化 2：若当前处于双栏穿梭页面，切换设备后立即重新拉取新选中设备的文件列表
+  if (currentTab.value === "shuttle") {
+    void loadRemoteFiles();
+  }
 }
 
 /** 穿梭右栏：按对端能力位决定初始浏览模式（§7.2）
@@ -6740,32 +7582,116 @@ function getFileIcon(name: string) {
   color: var(--text-secondary);
   min-width: 0;
 }
-.volume-select-wrap {
+/* 自定义深色下拉位置组件（替代系统原生 <select>） */
+.custom-dropdown-wrap {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
   flex: 0 0 auto;
+}
+.custom-dropdown-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   background: var(--bg-card);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  padding: 1px 4px;
+  padding: 2px 7px;
   color: var(--text-primary);
-}
-.volume-select {
-  background: transparent;
-  border: none;
-  color: inherit;
   font-size: 11.5px;
   font-family: inherit;
-  outline: none;
-  /* 下限不能省：<select> 的固有宽度取决于最长的 <option>，盘符少时
-   * （只有 C:/D:）会缩到只剩一个下拉箭头，用户既看不清当前在哪个盘，
-   * 也几乎点不中。上限则防止带剩余空间的选项文字把整条地址栏吃光。 */
-  min-width: 96px;
-  max-width: 170px;
   cursor: pointer;
+  outline: none;
+  transition: all 0.15s ease;
+  min-width: 96px;
+  max-width: 175px;
 }
-.volume-select option { background: var(--bg-card); color: var(--text-primary); }
+.custom-dropdown-trigger:hover,
+.custom-dropdown-trigger.is-active {
+  background: var(--bg-hover-soft);
+  border-color: var(--border-strong);
+}
+.custom-dropdown-trigger:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.dropdown-trigger-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.dropdown-trigger-caret {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  transition: transform 0.2s ease;
+}
+.dropdown-trigger-caret.is-open {
+  transform: rotate(180deg);
+}
+
+.custom-dropdown-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: var(--z-overlay);
+  min-width: 210px;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--bg-card);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-modal);
+  padding: 4px;
+}
+.dropdown-menu-item {
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  font-family: inherit;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.dropdown-menu-item:hover {
+  background: var(--bg-hover-soft);
+}
+.dropdown-menu-item.is-selected {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent-text, var(--accent));
+  font-weight: 600;
+}
+.item-main-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.item-tag-text,
+.item-sub-text {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono, monospace);
+}
+.dropdown-group-header {
+  padding: 6px 8px 2px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
 .address-text {
   flex: 1;
   min-width: 0;
@@ -6922,39 +7848,169 @@ function getFileIcon(name: string) {
   margin-top: 2px;
 }
 
-.scope-modes { display: flex; flex-direction: column; gap: 6px; }
-/* 单选卡片。
- *
- * 用 grid 而不是 `flex-direction: column`：早先写的是 column,
- * 于是 <input> 成了一个 stretch 的 flex item —— 单选框的**圆点被拉伸
- * 后水平居中**，看起来像"没对齐 / 排版坏了"。grid 的第一列固定宽度，
- * 圆点永远贴左，标题与说明占第二列。
- */
-.scope-mode {
+.scope-modes {
   display: grid;
-  grid-template-columns: auto 1fr;
-  align-items: start;
-  column-gap: 8px;
-  row-gap: 1px;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+.scope-mode {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   padding: 8px 10px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   cursor: pointer;
+  background: var(--bg-hover-soft);
+  transition: all 0.15s ease;
 }
-.scope-mode:hover { background: var(--bg-hover-soft); }
+.scope-mode:hover {
+  background: var(--bg-card-hover, var(--bg-elevated));
+  border-color: var(--border-strong);
+}
 .scope-mode.is-on {
   border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent-text, var(--accent));
+  font-weight: 600;
 }
 .scope-mode input {
-  grid-row: 1 / span 2;
-  margin: 2px 0 0;
-  /* 别让浏览器给 radio 加自己的 focus 内边距，网格里它会撑出额外空隙 */
-  padding: 0;
+  margin: 0;
   accent-color: var(--accent);
+  cursor: pointer;
 }
-.scope-mode-title { grid-column: 2; font-weight: 600; }
-.scope-mode-hint { grid-column: 2; font-size: 11px; line-height: 1.5; color: var(--text-tertiary); }
+.scope-mode-title {
+  font-size: 12.5px;
+}
+
+.scope-status-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-radius: var(--radius-md);
+  font-size: 12.5px;
+  color: var(--text-primary);
+}
+.scope-status-chip i {
+  font-size: 18px;
+  color: var(--accent-text, var(--accent));
+}
+
+.scope-sub-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.path-input-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.path-input-group .standard-text-input {
+  flex: 1;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+.path-tags-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 140px;
+  overflow-y: auto;
+  padding-right: 4px;
+  margin-top: 6px;
+}
+.path-tag-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--bg-hover-soft);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 11.5px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-primary);
+}
+.path-tag-item.is-deny {
+  border-color: var(--warn-border);
+}
+.path-tag-item.is-deny i {
+  color: var(--warn-text);
+}
+.path-tag-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.path-tag-remove {
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+}
+.path-tag-remove:hover {
+  color: var(--danger-text);
+  background: var(--bg-hover-soft);
+}
+
+.quick-preset-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.quick-preset-label {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.quick-preset-btn {
+  background: var(--bg-hover-soft);
+  border: 1px dashed var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.quick-preset-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.scope-toggles-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.scope-toggle-clean {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  cursor: pointer;
+  color: var(--text-primary);
+}
+.scope-toggle-clean input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
 
 .scope-volumes { display: flex; flex-wrap: wrap; gap: 6px; }
 .scope-vol {
@@ -6975,37 +8031,14 @@ function getFileIcon(name: string) {
 }
 .scope-vol-free { font-size: 10.5px; color: var(--text-tertiary); }
 
-.scope-toggle {
+.drop-sub-tip {
   display: flex;
-  align-items: flex-start;
-  gap: 7px;
-  padding: 7px 0;
-  cursor: pointer;
-}
-.scope-toggle input { margin-top: 2px; }
-.scope-toggle b { display: block; font-weight: 600; }
-.scope-toggle em {
-  display: block;
-  font-style: normal;
-  font-size: 11px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-size: 12px;
   color: var(--text-tertiary);
-  margin-top: 1px;
-}
-
-.scope-note,
-.scope-warn {
-  font-size: 11.5px;
-  line-height: 1.6;
-  color: var(--text-tertiary);
-  margin: 0;
-  padding: 8px 10px;
-  background: var(--bg-hover-soft);
-  border-radius: var(--radius-md);
-}
-.scope-warn { color: var(--warn-text); }
-.scope-note code {
-  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
-  font-size: 11px;
+  margin-top: 4px;
 }
 
 /* 「输入对方窗口上的匹配码」弹窗
@@ -8179,10 +9212,13 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   transition: color 0.15s, border-color 0.15s;
 }
 .btn-unblock:hover { color: var(--text-primary); border-color: var(--accent); }
-/* 注意: 必须比 .fluent-select-wrapper 更具体, 否则会被它的 width:100% 覆盖 */
+.select-compact,
 .fluent-select-wrapper.select-compact {
   width: 220px;
   flex: 0 0 220px;
+}
+.pair-select-wrapper {
+  width: 100%;
 }
 .danger-action { color: var(--danger-text); }
 .danger-action:hover { background: var(--danger-soft); color: var(--danger-on-soft); border-color: var(--danger-border); }
@@ -8247,6 +9283,11 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
 .desktop-speed-dock.failed .speed-bandwidth-rate { color: var(--danger-text); }
 .speed-dock-meta { display: flex; justify-content: space-between; font-size: 12px; gap: 16px; }
 .speed-file-title {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  text-align: left;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -8266,6 +9307,27 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   font-size: 13px;
   font-weight: 700;
   flex-shrink: 0;
+}
+.speed-dock-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.speed-dock-cancel-btn {
+  background: transparent;
+  color: var(--danger-text);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm);
+  padding: 1px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  line-height: 18px;
+  transition: all 0.15s ease;
+}
+.speed-dock-cancel-btn:hover {
+  background: var(--danger-solid);
+  color: var(--text-on-solid);
 }
 .speed-dock-track { height: 4px; background: var(--track-bg); border-radius: var(--radius-pill); overflow: hidden; }
 /* 用 `transform: scaleX()` 而不是 `width`。
@@ -8740,4 +9802,363 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
 .fluent-toast i { color: var(--accent-text); font-size: 16px; }
 .toast-fade-enter-active, .toast-fade-leave-active { transition: opacity 0.2s, transform 0.2s; }
 .toast-fade-enter-from, .toast-fade-leave-to { opacity: 0; transform: translate(-50%, 10px); }
+
+/* 12. 传输历史路径清单 & 正在传输任务面板 */
+.entry-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.btn-view-paths-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent-text);
+  background: var(--bg-hover-soft);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  line-height: 1.6;
+}
+.btn-view-paths-badge:hover {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border-color: var(--accent);
+}
+
+.speed-dock-list-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-primary);
+  background: var(--bg-hover-soft);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.speed-dock-list-btn:hover {
+  background: var(--bg-hover-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.paths-list-dialog {
+  width: 640px;
+  max-width: 95vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+.paths-dialog-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.paths-dialog-title-group h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+.paths-dialog-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.paths-dialog-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.paths-search-box {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+}
+.paths-search-box input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-size: 12.5px;
+}
+.btn-clear-search {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0;
+  font-size: 14px;
+}
+.btn-clear-search:hover { color: var(--text-primary); }
+.copy-all-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.paths-list-container {
+  flex: 1;
+  max-height: 380px;
+  overflow-y: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--bg-inset);
+}
+.empty-paths-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 36px 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  gap: 8px;
+}
+.empty-paths-box i { font-size: 28px; }
+.path-item-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  transition: background 0.15s;
+}
+.path-item-row:hover {
+  background: var(--bg-hover-soft);
+}
+.path-item-icon {
+  color: var(--accent);
+  font-size: 18px;
+  flex-shrink: 0;
+}
+.path-item-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.path-item-basename {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.path-item-fullpath {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: all;
+}
+.path-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.btn-path-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-primary);
+  background: var(--bg-hover-soft);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-path-action:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.paths-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 14px;
+  gap: 12px;
+}
+.paths-footer-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.active-transfers-dialog {
+  width: 560px;
+  max-width: 95vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+.active-dialog-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.active-dialog-title-group h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+.active-dialog-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.active-transfers-list-container {
+  flex: 1;
+  max-height: 420px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0;
+}
+.empty-active-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  gap: 8px;
+}
+.empty-active-box i { font-size: 32px; color: var(--accent); }
+.active-transfer-card {
+  padding: 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-inset);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: opacity 0.2s;
+}
+.active-transfer-card.card-settled {
+  opacity: 0.75;
+}
+.card-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.card-direction-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.card-direction-tag.send { color: var(--info-text); }
+.card-direction-tag.recv { color: var(--success-text); }
+.card-speed-badge {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent-text);
+  background: var(--bg-hover-soft);
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  font-variant-numeric: tabular-nums;
+}
+.card-file-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+}
+.card-file-row i { font-size: 16px; color: var(--text-secondary); flex-shrink: 0; }
+.card-filename {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-progress-track {
+  width: 100%;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-hover-soft);
+  overflow: hidden;
+}
+.card-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+.card-footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.card-bytes-text {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.btn-card-cancel {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--danger-on-soft);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-card-cancel:hover {
+  background: var(--danger-solid);
+  color: var(--text-on-solid);
+}
+.card-settled-text {
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.card-settled-text.ok { color: var(--success-text); }
+.card-settled-text.cancelled { color: var(--text-secondary); }
+.card-settled-text.failed { color: var(--danger-text); }
+.active-dialog-footer {
+  display: flex;
+  align-items: center;
+  margin-top: 14px;
+  gap: 10px;
+}
+.footer-spacer { flex: 1; }
+.text-success { color: var(--success-text) !important; }
 </style>

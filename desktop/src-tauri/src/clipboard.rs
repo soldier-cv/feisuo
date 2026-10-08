@@ -43,6 +43,8 @@
 // 这样所有既有调用点（`crate::clipboard::stage_content` 等）不用改。
 pub use feisuo_core::clipboard::*;
 
+use std::sync::Mutex;
+
 #[cfg(windows)]
 mod imp {
     use super::*;
@@ -407,19 +409,18 @@ pub fn read_clipboard() -> ClipboardContent {
     ClipboardContent::Empty
 }
 
+/// 最近一次预览读到的图片 / 文本。
+///
+/// 预览返回给界面时，图片字节和全文被 `serde(skip)` 丢掉了。
+/// 确认落盘如果再读一次剪贴板，用户在看预览的这几秒里复制了别的东西，
+/// 发出去的就不是刚看过的那份。
+/// 这里留下预览那一次的内容，确认时只用它。
+static PREVIEWED: Mutex<Option<ClipboardContent>> = Mutex::new(None);
+
 /// 非 Windows 平台：Android / 其它宿主统一走空实现。
 #[cfg(not(windows))]
 pub fn read_clipboard() -> ClipboardContent {
     ClipboardContent::Empty
-}
-
-/// 把剪贴板内容落成真实文件，返回绝对路径。
-///
-/// **只对 `Image` / `Text` 落盘**；`Files` 直接用原路径，
-/// `Rejected` / `Empty` 不产生文件。
-pub fn stage_clipboard_into(app_dir: &std::path::Path) -> Result<Vec<String>, String> {
-    let content = read_clipboard();
-    stage_content(&content, &staging_dir(app_dir))
 }
 
 // ===========================================================================
@@ -435,16 +436,35 @@ pub fn read_clipboard_preview(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<ClipboardContent, String> {
     let _ = &state;
-    Ok(crate::clipboard::read_clipboard())
+    let content = crate::clipboard::read_clipboard();
+    if content.needs_staging() {
+        if let Ok(mut slot) = PREVIEWED.lock() {
+            *slot = Some(content.clone());
+        }
+    }
+    Ok(content)
 }
 
-/// 把当前剪贴板内容落盘，返回可直接发送的路径列表。
+/// 把**刚才预览过**的剪贴板内容落盘，返回可直接发送的路径列表。
+///
+/// 不用此刻剪贴板上的内容：预览和确认之间用户可能又复制了别的。
+/// 没有待确认的预览就返回错误，界面会提示失败，而不是悄悄发出另一份。
 #[tauri::command]
 pub fn stage_clipboard_payload(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<Vec<String>, String> {
+    let content = {
+        let mut slot = PREVIEWED.lock().map_err(|_| "剪贴板预览状态不可用".to_string())?;
+        slot.take()
+    };
+    let Some(content) = content else {
+        return Err("没有待确认的剪贴板预览，请重新抓取".into());
+    };
     let app_dir = state.engine.app_dir.clone();
-    crate::clipboard::stage_clipboard_into(&app_dir)
+    feisuo_core::clipboard::stage_content(
+        &content,
+        &feisuo_core::clipboard::staging_dir(&app_dir),
+    )
 }
 
 /// 清理超期暂存文件（剪贴板暂存 TTL，默认 24h）。

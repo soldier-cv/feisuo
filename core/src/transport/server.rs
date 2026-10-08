@@ -483,6 +483,8 @@ struct ResumePlan {
     dest_paths: Vec<String>,
     /// 本次真正要传的字节数
     send_bytes: u64,
+    /// 分块级断点续传：针对 needed 中的文件，已在暂存区收到的有效起始分块进度
+    file_resumes: Vec<crate::protocol::FileResumeProgress>,
 }
 
 impl TransferServer {
@@ -1054,6 +1056,19 @@ impl TransferServer {
         // 类型完全一致。这类"控制流走错分支"的缺陷只能靠端到端
         // 实跑发现 —— 断言"永久信任时鉴权决议 = Allow"还不够，
         // 必须真的发一个文件、看它是不是零弹窗落地。
+        // 需要人工确认的路径，时钟只在**进审批之前**查这一次。
+        //
+        // 查晚了会把等人的时间和发送方算哈希的时间算进 120 秒。
+        // 审批框默认 60 秒，一个稍大的文件再算几十秒哈希，
+        // 一次正常发送就会被判成「时间戳偏差过大」。
+        // 重放窗口仍是请求刚到时的 120 秒，不是确认之后再量一次。
+        if needs_approval {
+            if let Err(e) = Self::check_freshness(handshake.timestamp) {
+                Self::refuse_transfer(&mut stream, &identity, &config, e.to_string()).await;
+                return Err(e);
+            }
+        }
+
         let approval_wait_ms: Option<u64> = if !needs_approval {
             // 永久信任 + 自动接收: 静默放行。签名与时效已在上面的
             // `Decision::Allow` 分支里验过, 这里不重复验。
@@ -1208,10 +1223,9 @@ impl TransferServer {
                         Self::refuse_transfer(&mut stream, &identity, &config, e.to_string()).await;
                         return Err(e);
                     }
-                    if let Err(e) = Self::check_freshness(handshake.timestamp) {
-                        Self::refuse_transfer(&mut stream, &identity, &config, e.to_string()).await;
-                        return Err(e);
-                    }
+                    // 时钟只在请求刚到时查过（本分支开头）。
+                    // 这里再查会把「等人点确认 + 对端算哈希」算进 120 秒，
+                    // 一次正常发送会被判成重放。
 
                     if act.is_allow() {
                         // 比的是**本进程生成、显示在本机窗口上的那个码**。
@@ -1420,9 +1434,16 @@ impl TransferServer {
                 .unwrap_or_else(|| handshake.sender_public_key_hex.clone());
             if !DeviceIdentity::verify(&verify_pubkey, challenge.as_bytes(), &handshake.signature)?
             {
-                return Err(FeisuoError::Security("握手签名校验失败".into()));
+                // 审批已经通过，但签名不过。只 `return Err` 的话发送方
+                // 在读握手应答时撞上连接关闭，界面上像是网络断了，
+                // 而真实原因是身份对不上 —— 重试也不会好。
+                let e = FeisuoError::Security("握手签名校验失败".into());
+                Self::refuse_transfer(&mut stream, &identity, &config, e.to_string()).await;
+                return Err(e);
             }
-            Self::check_freshness(handshake.timestamp)?;
+            // 时钟在进审批之前查（见下方）。这里不再查：
+            // 审批框默认 60 秒，发送方还要在握手之后算整文件哈希，
+            // 120 秒的窗口装不下这两段合法等待。
             approval_wait_ms
         };
 
@@ -1552,7 +1573,23 @@ impl TransferServer {
         // 6. 读清单并做完整校验
         let manifest_started = Instant::now();
         let manifest: TransferManifest = read_json_frame(&mut stream, "传输清单").await?;
-        Self::validate_manifest(&manifest, &handshake, &trust_store)?;
+        if let Err(e) = Self::validate_manifest(&manifest, &handshake, &trust_store) {
+            // 发送方此刻正在等清单应答。只关连接，它看到的是
+            // 「对方已关闭连接」，分不清是清单被拒还是网络断了。
+            // 签名不过、时钟偏差、分块对不上，都该把原因写进这条应答。
+            let ack = ManifestAck {
+                success: false,
+                receiver_id: identity.device_id.clone(),
+                receiver_name: config.read().await.device_name.clone(),
+                message: e.to_string(),
+                completed: Vec::new(),
+                needed: Vec::new(),
+                dest_paths: Vec::new(),
+                file_resumes: Vec::new(),
+            };
+            let _ = write_json_frame(&mut stream, &ack).await;
+            return Err(e);
+        }
         diag.mark_manifest(manifest_started.elapsed().as_millis() as u64);
         // 清单到手后补齐诊断的传输要素（transfer_id 与发送侧记录对齐）
         diag.transfer_id = manifest.transfer_id.clone();
@@ -1609,6 +1646,7 @@ impl TransferServer {
             completed: resume.completed.clone(),
             needed: resume.needed.clone(),
             dest_paths: resume.dest_paths.clone(),
+            file_resumes: resume.file_resumes.clone(),
         };
         write_json_frame(&mut stream, &ack).await?;
         if !resume.completed.is_empty() {
@@ -1664,6 +1702,12 @@ impl TransferServer {
 
         let started_at = Instant::now();
         let mut total_transferred = 0u64;
+        // 失败也要进传输记录，而且必须用用户设的保留条数。
+        // 写死 500 的话，用户把上限调高之后，一次失败就会把更早的记录删掉。
+        let history_limits = {
+            let cfg = config.read().await;
+            (cfg.max_history_records, cfg.record_retention_days)
+        };
         // 整文件校验累计耗时（不计入速度, §9.6.4）
         let mut verify_total_ms: u64 = 0;
 
@@ -1692,6 +1736,9 @@ impl TransferServer {
             };
             return Err(Self::receive_failure(
                 &progress_tx,
+                &trust_store,
+                history_limits,
+                &peer_ip,
                 &manifest,
                 &handshake.sender_name,
                 "-",
@@ -1715,6 +1762,7 @@ impl TransferServer {
         let mut staging_guard = StagingGuard {
             root: staging_root.clone(),
             armed: true,
+            keep_for_resume: false,
         };
 
         // 只收接收方点名要的文件（断点续传）。`needed` 存的是**清单原始下标**,
@@ -1729,32 +1777,54 @@ impl TransferServer {
             // 对端目录结构。逐段穿越校验在 validate_relative_subpath 内完成。
             PathManager::validate_relative_subpath(&file.relative_path)?;
             let file_name = file.relative_path.replace('\\', "/");
-            // 先在暂存区占位; 最终路径在提交阶段才计算（那时才需要"避免同名覆盖"）
-            let staged_path = PathManager::resolve_unique_subpath(&staging_root, &file_name)?;
-            info!("Writing to staging: {:?}", staged_path);
+
+            let chunk_resume = resume.file_resumes.iter().find(|r| r.file_index == file.file_index);
+            let start_chunk_idx = chunk_resume.map(|r| r.next_chunk_index).unwrap_or(0);
+            let resumed_bytes = chunk_resume.map(|r| r.bytes_resumed).unwrap_or(0);
+
+            // 如果该文件已有暂存断点且文件还在，则直接复用已有暂存文件路径；否则新分配占位
+            let staged_path = if start_chunk_idx > 0 {
+                if let Ok(Some(rec)) = trust_store.get_chunk_progress(&manifest.transfer_id, file.file_index) {
+                    let existing_p = std::path::PathBuf::from(rec.staged_path);
+                    if existing_p.is_file() {
+                        existing_p
+                    } else {
+                        PathManager::resolve_unique_subpath(&staging_root, &file_name)?
+                    }
+                } else {
+                    PathManager::resolve_unique_subpath(&staging_root, &file_name)?
+                }
+            } else {
+                PathManager::resolve_unique_subpath(&staging_root, &file_name)?
+            };
+
+            info!("Writing to staging: {:?} (从分块 {} / 字节 {} 开始续收)", staged_path, start_chunk_idx, resumed_bytes);
             staged_paths.push((staged_path.clone(), std::path::PathBuf::new(), file.file_index));
 
-            // 独占创建 + 固定最终长度, 杜绝并发同名互相覆盖 / 旧尾部残留。
-            // prepare_file 会真正按 file_size 分配磁盘空间, 大文件时耗时可观,
-            // 必须离开 runtime worker, 否则会连带卡住发现广播与其它传输。
-            let prepare_res = {
-                let p = staged_path.clone();
-                let size = file.file_size;
-                tokio::task::spawn_blocking(move || ChunkStore::prepare_file(&p, size))
-                    .await
-                    .map_err(|e| FeisuoError::Internal(format!("建文件任务异常: {}", e)))?
-            };
-            if let Err(e) = prepare_res {
-                return Err(Self::receive_failure(
-                    &progress_tx,
-                    &manifest,
-                    &handshake.sender_name,
-                    &file.relative_path,
-                    total_transferred,
-                    &staged_path,
-                    &e.to_string(),
-                    e,
-                ));
+            // 仅在从头开始 (start_chunk_idx == 0) 或文件尚未存在时预分配文件长度
+            if start_chunk_idx == 0 || !staged_path.exists() {
+                let prepare_res = {
+                    let p = staged_path.clone();
+                    let size = file.file_size;
+                    tokio::task::spawn_blocking(move || ChunkStore::prepare_file(&p, size))
+                        .await
+                        .map_err(|e| FeisuoError::Internal(format!("建文件任务异常: {}", e)))?
+                };
+                if let Err(e) = prepare_res {
+                    return Err(Self::receive_failure(
+                        &progress_tx,
+                        &trust_store,
+                        history_limits,
+                        &peer_ip,
+                        &manifest,
+                        &handshake.sender_name,
+                        &file.relative_path,
+                        total_transferred,
+                        &staged_path,
+                        &e.to_string(),
+                        e,
+                    ));
+                }
             }
 
             // 整个文件只开一次写句柄（§9.3 第 2 行）。旧实现每块
@@ -1769,6 +1839,9 @@ impl TransferServer {
                 Err(e) => {
                     return Err(Self::receive_failure(
                         &progress_tx,
+                        &trust_store,
+                        history_limits,
+                        &peer_ip,
                         &manifest,
                         &handshake.sender_name,
                         &file.relative_path,
@@ -1780,8 +1853,8 @@ impl TransferServer {
                 }
             };
 
-            let mut file_transferred = 0u64;
-            for chunk_idx in 0..file.chunk_count {
+            let mut file_transferred = resumed_bytes;
+            for chunk_idx in (start_chunk_idx as u64)..file.chunk_count {
                 // 读分块头**之前**先看撤销。发送方点撤销后不再写下一块，
                 // 若这里先 `read_json_frame`，会干等 30 秒直到超时，
                 // 界面上像是网络断了，而不是「已撤销」。
@@ -1798,6 +1871,17 @@ impl TransferServer {
                 )
                 .await?
                 {
+                    let _ = trust_store.remove_all_chunk_progress(&manifest.transfer_id);
+                    Self::record_receive_outcome(
+                        &trust_store,
+                        history_limits,
+                        &peer_ip,
+                        &manifest,
+                        &handshake.sender_name,
+                        &file.relative_path,
+                        total_transferred,
+                        "cancelled",
+                    );
                     return Err(FeisuoError::Cancelled);
                 }
                 let chunk_header: ChunkHeader = match read_json_frame(&mut stream, "分块头").await {
@@ -1805,6 +1889,9 @@ impl TransferServer {
                     Err(e) => {
                         return Err(Self::receive_failure(
                             &progress_tx,
+                            &trust_store,
+                            history_limits,
+                            &peer_ip,
                             &manifest,
                             &handshake.sender_name,
                             &file.relative_path,
@@ -1831,6 +1918,9 @@ impl TransferServer {
                     ));
                     return Err(Self::receive_failure(
                         &progress_tx,
+                        &trust_store,
+                        history_limits,
+                        &peer_ip,
                         &manifest,
                         &handshake.sender_name,
                         &file.relative_path,
@@ -1848,6 +1938,9 @@ impl TransferServer {
                     ));
                     return Err(Self::receive_failure(
                         &progress_tx,
+                        &trust_store,
+                        history_limits,
+                        &peer_ip,
                         &manifest,
                         &handshake.sender_name,
                         &file.relative_path,
@@ -1880,6 +1973,9 @@ impl TransferServer {
                     if let Some(e) = read_err {
                         return Err(Self::receive_failure(
                             &progress_tx,
+                            &trust_store,
+                            history_limits,
+                            &peer_ip,
                             &manifest,
                             &handshake.sender_name,
                             &file.relative_path,
@@ -1903,6 +1999,9 @@ impl TransferServer {
                     };
                     return Err(Self::receive_failure(
                         &progress_tx,
+                        &trust_store,
+                        history_limits,
+                        &peer_ip,
                         &manifest,
                         &handshake.sender_name,
                         &file.relative_path,
@@ -1927,6 +2026,9 @@ impl TransferServer {
                     ));
                     return Err(Self::receive_failure(
                         &progress_tx,
+                        &trust_store,
+                        history_limits,
+                        &peer_ip,
                         &manifest,
                         &handshake.sender_name,
                         &file.relative_path,
@@ -1950,6 +2052,9 @@ impl TransferServer {
                 if let Err(e) = write_res {
                     return Err(Self::receive_failure(
                         &progress_tx,
+                        &trust_store,
+                        history_limits,
+                        &peer_ip,
                         &manifest,
                         &handshake.sender_name,
                         &file.relative_path,
@@ -1959,6 +2064,19 @@ impl TransferServer {
                         e,
                     ));
                 }
+
+                // 实时持久化分块进度，确保任何时刻断线都能从当前分块接续
+                let next_chunk = (chunk_idx + 1) as u32;
+                let _ = trust_store.record_chunk_progress(
+                    &manifest.transfer_id,
+                    file.file_index,
+                    &file.relative_path,
+                    &file.blake3_hash,
+                    file.file_size,
+                    &staged_path.to_string_lossy(),
+                    next_chunk,
+                    file_transferred,
+                );
 
                 let elapsed = started_at.elapsed().as_secs_f64().max(0.001);
                 let speed = (total_transferred as f64 / elapsed) as u64;
@@ -2058,6 +2176,9 @@ impl TransferServer {
                 };
                 return Err(Self::receive_failure(
                     &progress_tx,
+                    &trust_store,
+                    history_limits,
+                    &peer_ip,
                     &manifest,
                     &handshake.sender_name,
                     &file.relative_path,
@@ -2067,6 +2188,9 @@ impl TransferServer {
                     e,
                 ));
             }
+
+            // 该文件所有分块已完整且整文件 BLAKE3 校验通过，清理其暂存分块进度
+            let _ = trust_store.remove_chunk_progress(&manifest.transfer_id, file.file_index);
         }
 
         // 提交前再看一次撤销。校验整文件哈希可能要几秒，
@@ -2085,6 +2209,16 @@ impl TransferServer {
         )
         .await?
         {
+            Self::record_receive_outcome(
+                &trust_store,
+                history_limits,
+                &peer_ip,
+                &manifest,
+                &handshake.sender_name,
+                "-",
+                total_transferred,
+                "cancelled",
+            );
             return Err(FeisuoError::Cancelled);
         }
 
@@ -2107,6 +2241,9 @@ impl TransferServer {
                 Err(e) => {
                     return Err(Self::receive_failure(
                         &progress_tx,
+                        &trust_store,
+                        history_limits,
+                        &peer_ip,
                         &manifest,
                         &handshake.sender_name,
                         rel,
@@ -2117,40 +2254,30 @@ impl TransferServer {
                     ));
                 }
             };
+            // Windows 的 rename 不能覆盖刚占好的空文件。
+            // `commit_staged_file` 会替换它；真失败时把空占位删掉，
+            // 不在收件目录里留一个 0 字节文件。
             let commit_res = tokio::task::spawn_blocking({
                 let from = staged.clone();
                 let to = final_path.clone();
-                move || std::fs::rename(&from, &to)
+                move || crate::storage::commit_staged_file(&from, &to)
             })
             .await
             .map_err(|e| FeisuoError::Internal(format!("提交任务异常: {}", e)))?;
-            if let Err(rename_err) = commit_res {
-                warn!(
-                    "同卷 rename 失败 ({} -> {}), 退化为复制: {}",
-                    staged.display(),
-                    final_path.display(),
-                    rename_err
-                );
-                let copy_res = tokio::task::spawn_blocking({
-                    let from = staged.clone();
-                    let to = final_path.clone();
-                    move || std::fs::copy(&from, &to).map(|_| ()).map_err(std::io::Error::from)
-                })
-                .await
-                .map_err(|e| FeisuoError::Internal(format!("复制任务异常: {}", e)))?;
-                if let Err(copy_err) = copy_res {
-                    return Err(Self::receive_failure(
-                        &progress_tx,
-                        &manifest,
-                        &handshake.sender_name,
-                        rel,
-                        total_transferred,
-                        &staged,
-                        &format!("提交到最终位置失败: {}", copy_err),
-                        FeisuoError::Io(copy_err),
-                    ));
-                }
-                let _ = std::fs::remove_file(staged);
+            if let Err(commit_err) = commit_res {
+                return Err(Self::receive_failure(
+                    &progress_tx,
+                    &trust_store,
+                    history_limits,
+                    &peer_ip,
+                    &manifest,
+                    &handshake.sender_name,
+                    rel,
+                    total_transferred,
+                    &staged,
+                    &format!("提交到最终位置失败: {}", commit_err),
+                    FeisuoError::Io(commit_err),
+                ));
             }
             if let Some(slot) = staged_paths.get_mut(idx) {
                 slot.1 = final_path;
@@ -2199,6 +2326,9 @@ impl TransferServer {
             ));
             return Err(Self::receive_failure(
                 &progress_tx,
+                &trust_store,
+                history_limits,
+                &peer_ip,
                 &manifest,
                 &handshake.sender_name,
                 "-",
@@ -2284,6 +2414,18 @@ impl TransferServer {
         } else {
             first_name
         };
+        let file_paths: Vec<String> = if !staged_paths.is_empty() {
+            staged_paths
+                .iter()
+                .map(|(_, final_p, _)| final_p.to_string_lossy().to_string())
+                .collect()
+        } else {
+            manifest
+                .files
+                .iter()
+                .map(|f| receive_base_dir.join(&f.relative_path).to_string_lossy().to_string())
+                .collect()
+        };
         let _ = trust_store.add_transfer_record(
             &history_label,
             total_transferred,
@@ -2294,6 +2436,7 @@ impl TransferServer {
             max_records,
             retention_days,
             crate::security::TransferMetrics::from_diagnostics(&diag),
+            &file_paths,
         );
 
         info!(
@@ -2358,10 +2501,16 @@ impl TransferServer {
         Ok(true)
     }
 
-    /// 接收侧失败收尾: 删除半成品文件 + 广播 Failed 终态
+    /// 接收侧失败收尾: 删除半成品文件 + 广播 Failed 终态 + 写入传输历史。
+    ///
+    /// 成功路径会写一条「已完成」。失败只发进度事件的话，窗口一关这条就没了，
+    /// 用户事后只能看到成功记录，以为没收成的那次根本没发生。
     #[allow(clippy::too_many_arguments)]
     fn receive_failure(
         progress_tx: &broadcast::Sender<TransferProgress>,
+        trust_store: &TrustStore,
+        history_limits: (u32, u32),
+        peer_ip: &str,
         manifest: &TransferManifest,
         peer_name: &str,
         current_file: &str,
@@ -2370,9 +2519,9 @@ impl TransferServer {
         reason: &str,
         err: FeisuoError,
     ) -> FeisuoError {
-        if !partial_path.as_os_str().is_empty() {
-            // 半成品必须删除: 留下截断文件会让下一次重试生成 "name (1).ext",
-            // 而那个残缺的 "name.ext" 会永久留在用户目录里
+        // 网络瞬断/超时错误保留暂存文件以供断点续传；仅在明确失败/篡改时清理损坏文件
+        let is_retriable_network_err = matches!(err, FeisuoError::Network(_) | FeisuoError::Io(_));
+        if !partial_path.as_os_str().is_empty() && !is_retriable_network_err {
             if let Err(rm_err) = std::fs::remove_file(partial_path) {
                 if rm_err.kind() != std::io::ErrorKind::NotFound {
                     warn!("清理半成品文件 {:?} 失败: {}", partial_path, rm_err);
@@ -2395,8 +2544,69 @@ impl TransferServer {
             status: TransferStatus::Failed(reason.to_string()),
         });
 
+        // 和成功路径同一张表。窗口关掉之后，失败仍能在传输记录里看到。
+        Self::record_receive_outcome(
+            trust_store,
+            history_limits,
+            peer_ip,
+            manifest,
+            peer_name,
+            current_file,
+            bytes,
+            "failed",
+        );
+
         error!("Incoming transfer {} failed: {}", manifest.transfer_id, reason);
         err
+    }
+
+    /// 接收未完成时写一条历史。`status` 只用 `failed` 或 `cancelled`。
+    ///
+    /// 成功路径在提交之后另写「已完成」。这里不写成功，避免一次接收留下两条。
+    #[allow(clippy::too_many_arguments)]
+    fn record_receive_outcome(
+        trust_store: &TrustStore,
+        history_limits: (u32, u32),
+        peer_ip: &str,
+        manifest: &TransferManifest,
+        peer_name: &str,
+        current_file: &str,
+        bytes: u64,
+        status: &str,
+    ) {
+        let label = if current_file.is_empty() || current_file == "-" {
+            manifest
+                .files
+                .first()
+                .map(|f| f.relative_path.clone())
+                .unwrap_or_else(|| "未知文件".into())
+        } else if manifest.files.len() > 1 {
+            format!("{} 等 {} 个文件", current_file, manifest.files.len())
+        } else {
+            current_file.to_string()
+        };
+        let file_paths: Vec<String> = manifest
+            .files
+            .iter()
+            .map(|f| f.relative_path.clone())
+            .collect();
+        if let Err(e) = trust_store.add_transfer_record(
+            &label,
+            bytes,
+            "recv",
+            peer_name,
+            peer_ip,
+            status,
+            history_limits.0,
+            history_limits.1,
+            crate::security::TransferMetrics {
+                declared_size: manifest.total_size,
+                ..Default::default()
+            },
+            &file_paths,
+        ) {
+            warn!("写入接收记录失败 ({}): {}", status, e);
+        }
     }
 
     fn check_freshness(timestamp: i64) -> Result<()> {
@@ -2446,6 +2656,7 @@ impl TransferServer {
         let mut completed: Vec<CompletedPart> = Vec::new();
         let mut needed: Vec<u32> = Vec::with_capacity(manifest.files.len());
         let mut dest_paths: Vec<String> = Vec::with_capacity(manifest.files.len());
+        let mut file_resumes: Vec<crate::protocol::FileResumeProgress> = Vec::new();
         let mut send_bytes: u64 = 0;
 
         for (idx, f) in manifest.files.iter().enumerate() {
@@ -2478,13 +2689,38 @@ impl TransferServer {
             }
             needed.push(idx as u32);
             dest_paths.push(f.relative_path.clone());
-            send_bytes += f.file_size;
+
+            // 检查是否有分块断点续传（未完成文件的分块记录）
+            let mut file_needed_bytes = f.file_size;
+            if let Ok(Some(chunk_rec)) = trust_store.get_chunk_progress(&manifest.transfer_id, f.file_index) {
+                if chunk_rec.blake3_hash == f.blake3_hash
+                    && chunk_rec.file_size == f.file_size
+                    && chunk_rec.next_chunk_index > 0
+                    && std::path::Path::new(&chunk_rec.staged_path).is_file()
+                {
+                    tracing::info!(
+                        "断点续传检测到分块进度: transfer={} file={} 已有 {} 块 ({} 字节)",
+                        manifest.transfer_id,
+                        f.relative_path,
+                        chunk_rec.next_chunk_index,
+                        chunk_rec.bytes_resumed
+                    );
+                    file_needed_bytes = file_needed_bytes.saturating_sub(chunk_rec.bytes_resumed);
+                    file_resumes.push(crate::protocol::FileResumeProgress {
+                        file_index: f.file_index,
+                        next_chunk_index: chunk_rec.next_chunk_index,
+                        bytes_resumed: chunk_rec.bytes_resumed,
+                    });
+                }
+            }
+            send_bytes += file_needed_bytes;
         }
         ResumePlan {
             completed,
             needed,
             dest_paths,
             send_bytes,
+            file_resumes,
         }
     }
 
@@ -3152,7 +3388,12 @@ impl TransferServer {
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| format!("{}:{}", browse_volume, raw_rel))
         } else {
-            join_volume_path(&browse_volume, &raw_rel)
+            // 1.x 语义的根就是收件目录本身，不是盘根。
+            // 拼成 `C:/子路径` 会让「仅收件目录」把合法的收件根判成盘外路径。
+            receive_dir
+                .join(raw_rel.replace('/', std::path::MAIN_SEPARATOR_STR))
+                .to_string_lossy()
+                .to_string()
         };
         let decision = {
             let c = config.read().await.clone();
@@ -3174,7 +3415,14 @@ impl TransferServer {
                 // 「每次匹配码」等级：走与传输完全相同的审批 + 码核对。
                 // 早先这里只回一句"请先出示授权码"，而协议里根本没有
                 // 申请授权码的通路 —— 用户实际体验是"配了就什么都用不了"。
-                Self::check_freshness(req.timestamp)?;
+                //
+                // 时钟在等人**之前**查。查完再等：确认框默认 60 秒，
+                // 等人的时间不能算进 120 秒，否则一次正常确认会被判成重放。
+                if let Err(e) = Self::check_freshness(req.timestamp) {
+                    resp.message = e.to_string();
+                    let _ = write_json_frame(stream, &resp).await;
+                    return Err(e);
+                }
                 if let Err(e) = Self::await_approval(
                     &approval_manager,
                     &approval_tx,
@@ -3229,10 +3477,24 @@ impl TransferServer {
                 write_json_frame(stream, &resp).await?;
                 return Ok(());
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                // 库损坏这类内部错误也要写进应答。只 `return Err` 的话，
+                // 浏览方在读应答时撞上连接关闭，界面上像是网络断了。
+                resp.message = e.to_string();
+                let _ = write_json_frame(stream, &resp).await;
+                return Err(e);
+            }
         }
 
-        Self::check_freshness(req.timestamp)?;
+        // 「每次匹配码」已经在进审批前查过时钟。这里只补永久信任那条：
+        // 它没有等人，所以到达时查一次就够了。两条路都不能在确认之后再查。
+        if !matches!(decision, crate::security::Decision::RequireGrant) {
+            if let Err(e) = Self::check_freshness(req.timestamp) {
+                resp.message = e.to_string();
+                let _ = write_json_frame(stream, &resp).await;
+                return Err(e);
+            }
+        }
         trust_store.update_last_ip(&req.requester_id, peer_ip)?;
         // 记录"最后一次在线"（§3.6）。必须落库, 否则重启后离线时间无从判断。
         let _ = trust_store.mark_seen(&req.requester_id, peer_ip);
@@ -3461,17 +3723,31 @@ impl TransferServer {
             // 该拒的也可能在预检阶段被误拒。
             //
             // 判据与解析必须**同一个函数**，否则两处结论必然对不上。
-            let abs = if req.volume.is_empty() {
-                join_volume_path(&scope_volume, name)
+            // 卷号必须和真正要读的那条路径是同一个盘。
+            //
+            // 早先无论请求哪个卷，这里都把 `volume` 填成收件目录所在盘。
+            // 白名单只开了 D: 时，取回 D: 上的文件会被当成 C: 拒绝；
+            // 只开了 C: 时，取回 D: 又会被当成 C: 放行。
+            // 用户看到的是"能浏览这个盘，点取回却说无权"，或者反过来。
+            let (auth_volume, abs) = if req.volume.is_empty() {
+                // 1.x 取回读的是收件目录下的相对路径，不是盘根下的同名路径。
+                (
+                    scope_volume.clone(),
+                    base_dir_for_scope
+                        .join(name.replace('/', std::path::MAIN_SEPARATOR_STR))
+                        .to_string_lossy()
+                        .to_string(),
+                )
             } else {
                 // 卷模式下用浏览器同款解析；解析不出来就让它落到
                 // 展开阶段去报错（那里有更完整的文案）。
-                crate::storage::volumes::resolve_browse_path(
+                let resolved = crate::storage::volumes::resolve_browse_path(
                     &req.volume,
                     &name.replace('\\', "/"),
                 )
                 .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| join_volume_path(&req.volume, name))
+                .unwrap_or_else(|| join_volume_path(&req.volume, name));
+                (req.volume.clone(), resolved)
             };
             let decision = {
                 let c = config.read().await.clone();
@@ -3482,7 +3758,7 @@ impl TransferServer {
                     &crate::security::AuthContext {
                         peer_id: &req.requester_id,
                         peer_ip,
-                        volume: &scope_volume,
+                        volume: &auth_volume,
                         path: &abs,
                     },
                 )
@@ -3503,7 +3779,13 @@ impl TransferServer {
             }
         }
         if any_require_grant {
-            Self::check_freshness(req.timestamp)?;
+            // 时钟在等人之前查，理由与浏览相同：
+            // 确认框的等待时间不能算进 120 秒的重放窗口。
+            if let Err(e) = Self::check_freshness(req.timestamp) {
+                fail(&mut resp, &e.to_string());
+                let _ = write_json_frame(stream, &resp).await;
+                return Err(e);
+            }
             if let Err(e) = Self::await_approval(
                 approval_manager,
                 approval_tx,
@@ -3556,9 +3838,20 @@ impl TransferServer {
                 write_json_frame(stream, &resp).await?;
                 return Ok(());
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                fail(&mut resp, &e.to_string());
+                let _ = write_json_frame(stream, &resp).await;
+                return Err(e);
+            }
         }
-        Self::check_freshness(req.timestamp)?;
+        // 需要匹配码的已经在进审批前查过。这里只补不弹窗的那条。
+        if !any_require_grant {
+            if let Err(e) = Self::check_freshness(req.timestamp) {
+                fail(&mut resp, &e.to_string());
+                let _ = write_json_frame(stream, &resp).await;
+                return Err(e);
+            }
+        }
         trust_store.update_last_ip(&req.requester_id, peer_ip)?;
 
         // 只允许取回本机落盘目录下的文件, 逐段做路径穿越校验。
@@ -3589,6 +3882,9 @@ impl TransferServer {
         // 只在展开前查 `sub_paths.len()` 的话，一个只含 1 个目录的请求
         // 就能拉走 2000 个文件 —— 上限形同虚设。
         let mut expanded_total = 0usize;
+        // 这个目录一个文件都没贡献时记下来。只写日志的话，请求方
+        // 看到的仍是「已受理」，不知道哪一个目录是空的或超出了访问范围。
+        let mut skipped_empty_dirs: Vec<String> = Vec::new();
         for name in &req.sub_paths {
             // 逐段校验：`..` / 绝对路径 / 盘符 / 控制字符 一律拒绝。
             // 卷模式下 `name` 必须是**卷内**相对路径 —— 带盘符说明调用方
@@ -3659,7 +3955,17 @@ impl TransferServer {
             if candidate.is_dir() {
                 // ---- 目录：递归展开，保留层级（§7.6 同款语义）----
                 let dir_name = normalized.trim_end_matches('/').to_string();
-                let (files, scan) = crate::storage::folder_scan::expand_all(&[candidate.clone()])?;
+                // 展开失败必须先写进应答。`?` 会直接拆掉这条连接，
+                // 对方看到的是「对方已关闭连接」，不知道是这个目录
+                // 没有权限、不存在，或者正在被占用。
+                let (files, scan) = match crate::storage::folder_scan::expand_all(&[candidate.clone()]) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        fail(&mut resp, &format!("无法展开目录 {}: {}", name, e));
+                        write_json_frame(stream, &resp).await?;
+                        return Ok(());
+                    }
+                };
                 expanded_total += files.len();
                 if expanded_total > MAX_FILES_PER_BATCH {
                     fail(
@@ -3675,6 +3981,10 @@ impl TransferServer {
                     write_json_frame(stream, &resp).await?;
                     return Ok(());
                 }
+                // 只看**这个目录**有没有贡献文件。用整个 `targets` 是否为空来判，
+                // 会受选择顺序影响：空目录排在前面就把后面还能取的文件整批拒绝；
+                // 排在后面又会被前面的文件掩盖，什么都不说。
+                let added_before = targets.len();
                 for (abs, rel_in_dir) in files {
                     // 目标相对名 = 目录名 + 目录内层级，取回后结构不变
                     let rel = format!("{}/{}", dir_name, rel_in_dir.replace('\\', "/"));
@@ -3682,6 +3992,14 @@ impl TransferServer {
                     // 只判目录本身是不够的：目录里可能有落在强制排除清单下的
                     // 子树（用户没察觉），而"目录允许"不蕴含"目录里每个文件允许"。
                     let abs_str = abs.to_string_lossy().to_string();
+                    // 与上面逐目标预检同一条规则：1.x（空卷）读的是收件目录
+                    // 所在盘，卷模式读的是请求指定的盘。填空串会让白名单
+                    // 把收件目录里展开出来的文件全部判成"不在允许的卷上"。
+                    let auth_volume = if req.volume.is_empty() {
+                        scope_volume.as_str()
+                    } else {
+                        req.volume.as_str()
+                    };
                     let decision = {
                         let c = config.read().await.clone();
                         crate::security::authorize(
@@ -3691,7 +4009,7 @@ impl TransferServer {
                             &crate::security::AuthContext {
                                 peer_id: &req.requester_id,
                                 peer_ip,
-                                volume: &req.volume,
+                                volume: auth_volume,
                                 path: &abs_str,
                             },
                         )
@@ -3711,13 +4029,12 @@ impl TransferServer {
                     }
                     targets.push((abs, rel));
                 }
-                if targets.is_empty() {
-                    fail(
-                        &mut resp,
-                        &format!("目录 {} 里没有可取回的文件（可能全部超出访问范围）", name),
+                if targets.len() == added_before {
+                    tracing::info!(
+                        "取回跳过目录 {}：里面没有可取的文件（可能全部超出访问范围）",
+                        name
                     );
-                    write_json_frame(stream, &resp).await?;
-                    return Ok(());
+                    skipped_empty_dirs.push(name.clone());
                 }
             } else if candidate.is_file() {
                 targets.push((candidate, normalized));
@@ -3775,16 +4092,42 @@ impl TransferServer {
             }
         }
 
+        // 每个目录单独跳过之后，仍可能一个文件都没有。
+        // 这时不能回「已受理，正在推送 0 个文件」——对方会以为取回已经开始。
+        if targets.is_empty() {
+            fail(
+                &mut resp,
+                "没有可取回的文件（目录为空，或里面的文件全部超出访问范围）",
+            );
+            write_json_frame(stream, &resp).await?;
+            return Ok(());
+        }
+
         resp.success = true;
+        let mut extra = if dest_prefix.is_empty() {
+            String::new()
+        } else {
+            format!("（落点: {}）", dest_prefix)
+        };
+        if !skipped_empty_dirs.is_empty() {
+            // 只点名头几个。一次取回可以选很多目录，整份名单塞进一句
+            // 提示会把真正要看的文件数挤掉。其余的仍在日志里。
+            let listed = if skipped_empty_dirs.len() <= 3 {
+                skipped_empty_dirs.join("、")
+            } else {
+                format!(
+                    "{} 等 {} 个",
+                    skipped_empty_dirs[..3].join("、"),
+                    skipped_empty_dirs.len()
+                )
+            };
+            extra.push_str(&format!("；未取回目录: {}", listed));
+        }
         resp.message = format!(
             "已受理, 正在向 {} 推送 {} 个文件{}",
             req.requester_name,
             targets.len(),
-            if dest_prefix.is_empty() {
-                String::new()
-            } else {
-                format!("（落点: {}）", dest_prefix)
-            }
+            extra
         );
         let message = resp.message.clone();
         write_json_frame(stream, &resp).await?;
@@ -4012,39 +4355,10 @@ impl TransferServer {
                     if name.starts_with('.') {
                         continue;
                     }
-                    // 强制排除清单：命中的条目对端**看不到**。
-                    // 收件目录豁免 —— 它是唯一按设计就该被对端看见的目录。
                     let child_abs = abs_base.join(&name);
                     let child_str = child_abs.to_string_lossy().to_string();
                     let in_receive = crate::storage::is_within(&child_abs, receive_dir);
-                    if !in_receive
-                        && crate::security::AccessScope::is_mandatory_denied(&child_str)
-                    {
-                        hidden += 1;
-                        tracing::debug!("列举时隐藏敏感路径: {}", child_str);
-                        continue;
-                    }
-                    // **用户自己配的 `deny_paths` 也要在列举时过滤。**
-                    //
-                    // ## 为什么原来漏了
-                    //
-                    // `deny_paths` 只在 `AccessScope::can_read`（鉴权）里被查，
-                    // 而列举这条路径**完全没看**它。于是用户在设置里配了
-                    // 「不让对方看 D:\客户」，那个目录**照样出现在列表里** ——
-                    // 只是点进去会被拒。
-                    //
-                    // ## 为什么必须在这里挡
-                    //
-                    // 1. "配置说不让访问"却**看得见**，等于配置没生效：
-                    //    用户会以为是自己记错了，或者以为程序有 bug；
-                    // 2. 更要紧的是**泄露目录结构** —— 看不见的目录名本身就
-                    //    是信息（"这里有个叫 客户资料 的文件夹"）。
-                    //    灰掉或只靠点击后报错都等于泄露，§8.2 要求
-                    //    「列表里必须直接不出现」；
-                    // 3. 用户会反复点一个必然失败的条目。
-                    //
-                    // 隐藏条数与强制清单合并计数，一并如实报给对端 ——
-                    // 静默隐藏会让用户以为目录是空的。
+                    // 访问范围过滤（收件目录豁免，由 scope.can_read 统筹裁决全部/黑名单/白名单）
                     if !in_receive {
                         if let Some(sc) = scope {
                             let vol = Self::volume_of(&child_abs);
@@ -4516,7 +4830,13 @@ async fn handle_cancel(
         let _ = write_json_frame(stream, &resp).await;
         return Ok(());
     }
-    Self::check_freshness(req.timestamp)?;
+    if let Err(e) = Self::check_freshness(req.timestamp) {
+        // 两台机器时钟不同步时，撤销会毫无征兆地变成「对方已关闭连接」。
+        // 用户分不清是撤销没送到，还是该去校时钟。
+        resp.message = e.to_string();
+        let _ = write_json_frame(stream, &resp).await;
+        return Err(e);
+    }
 
     // 签名必须验：否则局域网内任何人只要知道 transfer_id 就能
     // 撤销别人的传输（DoS）。未配对设备没有绑定公钥 —— 它的传输
@@ -4586,11 +4906,13 @@ struct StagingGuard {
     root: std::path::PathBuf,
     /// 提交成功后置 false，让 Drop 不再删除（此时目录已被搬空）
     armed: bool,
+    /// 是否因网络异常断开而保留半成品用于断点续传
+    keep_for_resume: bool,
 }
 
 impl Drop for StagingGuard {
     fn drop(&mut self) {
-        if !self.armed {
+        if !self.armed || self.keep_for_resume {
             return;
         }
         if let Err(e) = std::fs::remove_dir_all(&self.root) {

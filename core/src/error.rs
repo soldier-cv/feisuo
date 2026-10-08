@@ -84,8 +84,11 @@ pub enum FeisuoError {
     /// 宿主要靠它区分「我自己点了撤销」和「对方拒绝 / 网络断了」。
     /// 混在一个变体里，界面只能靠字符串匹配分支，文案一改就静默失效，
     /// 用户会看到红色「发送失败」，于是再发一遍刚撤销的文件。
-    #[error("{0}")]
-    LocallyAborted(String),
+    /// `bytes_sent` 是停下来时已经发出的字节。0 表示一个字节都还没出站。
+    /// 历史记录和界面文案靠它区分「没发出」和「传了一半再撤销」，
+    /// 不能再从文案里猜。
+    #[error("{message}")]
+    LocallyAborted { message: String, bytes_sent: u64 },
 
     #[error("Internal error: {0}")]
     Internal(String),

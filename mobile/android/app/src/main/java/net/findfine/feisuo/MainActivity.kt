@@ -5,37 +5,36 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
+import android.text.InputType
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import org.json.JSONObject
 
 /**
  * 飞梭 Android 端主界面。
  *
- * 存在的必要性：
- * 1. 清单里若没有 MAIN/LAUNCHER 过滤器，getLaunchIntentForPackage() 必然返回 null，
- *    常驻通知的点击会因 null Intent 抛 NPE；
- * 2. Android 13+ 的 POST_NOTIFICATIONS 必须由前台界面申请，
- *    否则"常驻通知"这一核心防杀后台手段在 13+ 上根本不可见。
- *
- * **绝对不能在申请权限后立刻 finish()**：
- * 权限弹窗依附于 Activity 的窗口, Activity 在 onCreate 里就 finish 的话,
- * 弹窗还没贴上窗口就被销毁, 系统会把这次申请当作未处理 ——
- * 用户永远看不到弹窗, 通知权限停留在拒绝态, 前台通知不可见,
- * 后台服务随后被系统回收, "开机自连、无人值守"的核心承诺在 13+ 上直接失效。
- * 所以这里保持 Activity 存活到 onRequestPermissionsResult 回调, 之后再退出。
+ * 核心功能：
+ * 1. 呈现飞梭核心引擎运行状态（设备指纹、传输端口等）；
+ * 2. 提供极简配对表单（输入电脑 IP 与 6 位配对码，单向握手即享免密互传）；
+ * 3. 展示当前局域网受信设备列表；
+ * 4. 启动会话级前台守护服务（FeisuoDaemonService），并引导授予通知权限，
+ *    确保用户开启应用后即使锁屏也能持续在局域网待命接收文件；
+ * 5. 用户退出应用时（返回键退出或划掉任务卡片），优雅关闭服务，零后台驻留。
  *
  * @author xudong.hua,gemini
- * @since 2026-09-29 13:40 星期二
+ * @since 2026-10-08 19:40 星期四
  */
 class MainActivity : Activity() {
 
@@ -49,8 +48,8 @@ class MainActivity : Activity() {
     private var deviceIdView: TextView? = null
     private var configView: TextView? = null
     private var trustedView: TextView? = null
-    private var ipInput: android.widget.EditText? = null
-    private var pinInput: android.widget.EditText? = null
+    private var ipInput: EditText? = null
+    private var pinInput: EditText? = null
     private var pairButtonRef: Button? = null
     /** 引擎启动/配置读取都要跑在 core 的 tokio runtime 上, 不能在主线程做 */
     private var worker: Thread? = null
@@ -75,6 +74,9 @@ class MainActivity : Activity() {
         worker = null
         pairThread?.interrupt()
         pairThread = null
+        if (isFinishing) {
+            stopService(Intent(this, FeisuoDaemonService::class.java))
+        }
         super.onDestroy()
     }
 
@@ -100,11 +102,11 @@ class MainActivity : Activity() {
         deviceIdView = addRow("设备指纹", "读取中…")
         configView = addRow("配置", "读取中…")
 
-        root.addView(section("为什么需要通知权限"))
+        root.addView(section("通知权限与锁屏可用"))
         addParagraph(
-            "飞梭靠一条常驻前台通知保住后台进程, 从而在锁屏、息屏、切 Wi-Fi 之后" +
-                "仍能被局域网里的受信设备发现并投递文件。Android 13 起通知需要你手动授权, " +
-                "拒绝的话系统会回收后台服务, 无人值守接收随之失效。"
+            "飞梭在打开期间通过前台通知维持局域网待命与 Wi-Fi 组播监听，" +
+                "确保手机在锁屏、切 Wi-Fi 之后仍能被电脑秒搜并投递文件。" +
+                "Android 13+ 需要你授权通知，否则锁屏后系统可能冻结网络连接。"
         )
 
         root.addView(section("如何配对"))
@@ -121,7 +123,7 @@ class MainActivity : Activity() {
         // 且配不上意味着整条分享推送链路永远不可达。
         ipInput = addInput("电脑 IP", "例如 192.168.1.10")
         pinInput = addInput("6 位配对码", "123456").apply {
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            inputType = InputType.TYPE_CLASS_NUMBER
         }
         val pairButton = Button(this).apply {
             text = "配对"
@@ -140,62 +142,11 @@ class MainActivity : Activity() {
         }
         root.addView(refresh, lp(top = dp(8)))
 
-        // 电池优化白名单。清单里声明了 REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
-        // 却从不使用, 等于白申请: Doze 会冻结并回收前台服务,
-        // "开机自连、7x24 无人值守"在息屏几小时后必然失效。
-        if (!isIgnoringBatteryOptimizations()) {
-            root.addView(section("后台保活"))
-            addParagraph(
-                "系统当前的省电策略会在息屏一段时间后冻结飞梭的后台服务, " +
-                    "导致局域网里找不到本机。把飞梭加入电池优化白名单即可解决。"
-            )
-            root.addView(Button(this).apply {
-                text = "加入电池优化白名单"
-                setOnClickListener { requestIgnoreBatteryOptimizations() }
-            }, lp(top = dp(12)))
-        }
-    }
-
-    /**
-     * 是否已在电池优化白名单里。
-     *
-     * 用 `PowerManager.isIgnoringBatteryOptimizations` 而不是自己维护一份
-     * SharedPreferences 标记: 用户随时可能去系统设置里把它改回去,
-     * 自己记的标记会立刻变成过期的假信息。
-     */
-    private fun isIgnoringBatteryOptimizations(): Boolean {
-        val pm = getSystemService(android.os.PowerManager::class.java) ?: return true
-        return pm.isIgnoringBatteryOptimizations(packageName)
-    }
-
-    private fun requestIgnoreBatteryOptimizations() {
-        if (isIgnoringBatteryOptimizations()) {
-            android.widget.Toast.makeText(this, "已在白名单中", android.widget.Toast.LENGTH_SHORT).show()
-            return
-        }
-        try {
-            // 直接跳系统设置页。ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 带包名
-            // 会弹一个"是否允许"的确认框, 但部分 ROM 上不实现该 action,
-            // 因此先试它, 捕获 ActivityNotFoundException 后退回手动引导。
-            val direct = Intent(
-                android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                android.net.Uri.parse("package:$packageName")
-            )
-            if (direct.resolveActivity(packageManager) != null) {
-                startActivity(direct)
-            } else {
-                startActivity(
-                    Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                )
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "跳转电池优化设置失败: ${e.message}")
-            android.widget.Toast.makeText(
-                this,
-                "请到「设置 - 应用 - 飞梭 - 电池」中关闭省电限制",
-                android.widget.Toast.LENGTH_LONG
-            ).show()
-        }
+        root.addView(section("随用随走 · 零后台"))
+        addParagraph(
+            "• 锁屏可用：只要本应用仍在任务列表中，锁屏状态下依然可秒速接收局域网文件。\n" +
+                "• 退出即关：使用完毕后，按返回键退出或在多任务列表中划掉卡片即可彻底停止，不占用后台与电量。"
+        )
     }
 
     /**
@@ -350,22 +301,17 @@ class MainActivity : Activity() {
 
     private fun requestNotificationPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            // 13 以下没有这个权限, 可以安全退出了
-            finish()
             return
         }
         val granted = checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED
         if (granted) {
-            finish()
             return
         }
         try {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_POST_NOTIFICATIONS)
-            // 注意: 这里**不能** finish()。等 onRequestPermissionsResult 回调再退。
         } catch (e: Exception) {
             Log.w(TAG, "申请通知权限失败: ${e.message}")
-            finish()
         }
     }
 
@@ -379,19 +325,11 @@ class MainActivity : Activity() {
         val granted = grantResults.isNotEmpty() &&
             grantResults[0] == PackageManager.PERMISSION_GRANTED
         if (granted) {
-            Log.i(TAG, "通知权限已授予, 前台通知可见, 无人值守接收可用")
+            Log.i(TAG, "通知权限已授予, 前台通知可见, 锁屏待命可用")
         } else {
-            // 必须把后果说清楚, 否则用户只会觉得"飞梭好像不工作了"
-            Log.w(TAG, "通知权限被拒绝: 前台通知不可见, 息屏后系统极可能回收服务")
-            android.widget.Toast
-                .makeText(
-                    this,
-                    "未授予通知权限，息屏后飞梭可能被系统回收，无法无人值守接收文件",
-                    android.widget.Toast.LENGTH_LONG
-                )
-                .show()
+            Log.w(TAG, "通知权限被拒绝: 前台通知不可见, 锁屏后系统可能冻结网络")
+            toast("未授予通知权限，锁屏后可能无法接收局域网文件")
         }
-        finish()
     }
 
     // ---------------------------------------------------------------- 小工具
@@ -401,7 +339,7 @@ class MainActivity : Activity() {
             this.text = text
             setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
             setTextColor(Color.WHITE)
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTypeface(typeface, Typeface.BOLD)
         }.also { root.addView(it) }
 
     private fun addSubtitle(text: String): TextView =
@@ -417,7 +355,7 @@ class MainActivity : Activity() {
             this.text = text
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setTextColor(0xFF2FBF8A.toInt())
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTypeface(typeface, Typeface.BOLD)
             setPadding(0, dp(20), 0, dp(6))
         }.also { root.addView(it) }
 
@@ -455,8 +393,8 @@ class MainActivity : Activity() {
         }.also { root.addView(it, lp(top = dp(4))) }
 
     /** 单行输入框, 配对表单用 */
-    private fun addInput(label: String, hint: String): android.widget.EditText =
-        android.widget.EditText(this).apply {
+    private fun addInput(label: String, hint: String): EditText =
+        EditText(this).apply {
             this.hint = "$label · $hint"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             setTextColor(Color.WHITE)
@@ -467,7 +405,7 @@ class MainActivity : Activity() {
     private fun toast(msg: String) {
         runOnUiThread {
             if (!isFinishing && !isDestroyed) {
-                android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_LONG).show()
+                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
             }
         }
     }
