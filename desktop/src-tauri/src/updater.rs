@@ -42,6 +42,28 @@ const GITEE_RELEASES_PAGE: &str = "https://gitee.com/huaxudong/feisuo/releases";
 
 /// 绿色版 exe 的产物名。release.yml 正是按这个名字上传的。
 const ASSET_NAME: &str = "Feisuo-win-x64.exe";
+/// 安装版 Setup 的产物名。release.yml 正是按这个名字上传的。
+pub const SETUP_ASSET_NAME: &str = "Feisuo-Setup-x64.exe";
+
+/// 安装版标记文件名（由 Inno Setup 安装包释放到程序所在目录）。
+pub const INSTALLED_MARKER: &str = "Feisuo.installed";
+
+/// 判断当前是否为 Inno Setup 规范安装版。
+pub fn is_installed_copy() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(current_exe) = std::env::current_exe() {
+            if let Some(parent) = current_exe.parent() {
+                return parent.join(INSTALLED_MARKER).exists();
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
 
 /// 换版时旧 exe 的临时文件名。Windows 上正在运行的 exe 无法删除,
 /// 只能先改名 —— 改完名旧映像仍被占用, 于是新文件用**另一个名字**落地,
@@ -121,6 +143,8 @@ pub struct UpdateStatus {
     pub release_page: String,
     /// 是否处于「检查或下载中」—— 前端据此禁用按钮
     pub busy: bool,
+    /// 是否为标准安装版（true: 安装版; false: 绿色便携版）
+    pub is_installed: bool,
 }
 
 impl UpdateStatus {
@@ -136,6 +160,7 @@ impl UpdateStatus {
             bytes_total: 0,
             release_page: GITEE_RELEASES_PAGE.to_string(),
             busy: false,
+            is_installed: is_installed_copy(),
         }
     }
 }
@@ -457,8 +482,9 @@ impl UpdateService {
 
         // 附件缺失**不能**当成"没有新版本": 否则用户永远停在旧版本却毫无提示。
         let Some(asset) = pick_asset(&dto.assets) else {
+            let target_name = if is_installed_copy() { SETUP_ASSET_NAME } else { ASSET_NAME };
             return Err(format!(
-                "发现新版本 {tag}，但没有 {ASSET_NAME} 附件。可手动访问 {GITEE_RELEASES_PAGE}"
+                "发现新版本 {tag}，但没有 {target_name} ({ASSET_NAME}) 附件。可手动访问 {GITEE_RELEASES_PAGE}"
             ));
         };
 
@@ -709,6 +735,30 @@ impl UpdateService {
             return Err(format!("当前 v{} 已是最新，无需更新", current_version()));
         }
 
+        let is_setup_pkg = pending
+            .local_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.to_ascii_lowercase().contains("setup"))
+            .unwrap_or(false);
+
+        // 安装包静默安装分支：如果更新包是 Setup 安装程序或当前处于安装目录
+        if is_setup_pkg || is_installed_copy() {
+            tracing::info!("以静默方式启动安装程序进行升级: {}", pending.local_path.display());
+            let silent_args = [
+                std::ffi::OsString::from("/SILENT"),
+                std::ffi::OsString::from("/NORESTART"),
+                std::ffi::OsString::from("/CLOSEAPPLICATIONS"),
+                std::ffi::OsString::from("/FORCECLOSEAPPLICATIONS"),
+                std::ffi::OsString::from("/SUPPRESSMSGBOXES"),
+            ];
+            spawn_detached(&pending.local_path, &silent_args)
+                .map_err(|e| format!("启动安装程序升级失败: {e}"))?;
+            app.exit(0);
+            std::future::pending::<()>().await;
+            return Ok(());
+        }
+
         let dir = current_exe
             .parent()
             .ok_or_else(|| "无法确定程序所在目录".to_string())?;
@@ -933,19 +983,28 @@ fn apply_rollover(current_exe: &Path, staged: &Path, backup: &Path) -> Result<()
     Ok(())
 }
 
-/// 挑选 Windows x64 绿色版附件。
+/// 挑选适合当前客户端形态的安装/更新附件。
+/// 安装版优先匹配 Setup 安装程序，绿色版优先匹配单文件 exe。
 ///
 /// 刻意**不接受任何其他附件**(源码包、校验和): 客户端只更新 exe,
 /// 认错文件类型会导致下载到 tar.gz 然后当 exe 启动。
 fn pick_asset(assets: &[AssetDto]) -> Option<&AssetDto> {
+    let installed = is_installed_copy();
+    let preferred = if installed { SETUP_ASSET_NAME } else { ASSET_NAME };
+    let fallback = if installed { ASSET_NAME } else { SETUP_ASSET_NAME };
+
+    // 1. 优先匹配当前形态对应的附件
+    if let Some(a) = assets.iter().find(|a| a.name.eq_ignore_ascii_case(preferred)) {
+        return Some(a);
+    }
+    // 2. 降级匹配备选附件
+    if let Some(a) = assets.iter().find(|a| a.name.eq_ignore_ascii_case(fallback)) {
+        return Some(a);
+    }
+    // 3. 通用兜底（必须以 .exe 结尾）
     assets
         .iter()
-        .find(|a| a.name.eq_ignore_ascii_case(ASSET_NAME))
-        .or_else(|| {
-            assets
-                .iter()
-                .find(|a| a.name.to_ascii_lowercase().ends_with(".exe") && !a.name.contains("Setup"))
-        })
+        .find(|a| a.name.to_ascii_lowercase().ends_with(".exe"))
 }
 
 /// 只放行官方域名。
@@ -1141,8 +1200,10 @@ mod tests {
     fn asset_pick_prefers_exact_name() {
         let assets = vec![
             AssetDto { name: "source-code.zip".into(), browser_download_url: "https://gitee.com/a.zip".into(), size: 1 },
+            AssetDto { name: "Feisuo-Setup-x64.exe".into(), browser_download_url: "https://gitee.com/s.exe".into(), size: 3 },
             AssetDto { name: "Feisuo-win-x64.exe".into(), browser_download_url: "https://gitee.com/b.exe".into(), size: 2 },
         ];
+        // 本地测试环境无 Feisuo.installed 标记，默认作为绿色版优先匹配 Feisuo-win-x64.exe
         assert_eq!(pick_asset(&assets).unwrap().name, "Feisuo-win-x64.exe");
         // 一个 exe 都没有时必须返回 None, 而不是随便挑一个 zip
         let only_zip = vec![AssetDto { name: "source-code.zip".into(), browser_download_url: "https://gitee.com/a.zip".into(), size: 1 }];

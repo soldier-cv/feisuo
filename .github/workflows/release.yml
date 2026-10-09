@@ -186,6 +186,28 @@ jobs:
           cargo tauri build --no-bundle
           if ($LASTEXITCODE -ne 0) { throw "cargo tauri build 失败" }
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $ver = '${{ steps.ver.outputs.version }}'
+          $env:FEISUO_VERSION = $ver
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found: $iscc" }
+          if (-not (Test-Path 'desktop/setup/languages/ChineseSimplified.isl')) {
+            throw 'desktop/setup/languages/ChineseSimplified.isl missing'
+          }
+          & $iscc desktop/setup/Feisuo.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed: $LASTEXITCODE" }
+          $setup = 'publish/Feisuo-Setup-x64.exe'
+          if (-not (Test-Path $setup)) { throw "Installer missing: $setup" }
+          $setupSize = (Get-Item $setup).Length
+          Write-Host "Feisuo-Setup-x64.exe: $([math]::Round($setupSize / 1MB, 2)) MB"
+          if ($setupSize -lt 1MB) { throw "安装包体积异常 ($setupSize 字节)，疑似打包失败" }
+
       # 与 README「三个守卫」第 1 条同源的复核：Stamp version 改了两处配置，
       # 这里**再读回来确认**它们真的相等。
       #
@@ -276,9 +298,10 @@ jobs:
           Write-Host "Release APK: $destApk ($([math]::Round($size/1MB,2)) MB)"
           if ($size -lt 2MB) { throw "APK 只有 $([math]::Round($size/1KB,1)) KB，原生库很可能没打进去" }
 
-      # 绿色版单文件：直接产出可双击运行的 exe。
-      # 应用内更新会把新 exe 覆盖到当前 exe 所在目录，所以文件名对用户可见，
-      # 统一为 Feisuo-win-x64.exe。
+      # 收集双形态产物与 Android APK：
+      #  1. Feisuo-Setup-x64.exe (Windows 安装版，推荐)
+      #  2. Feisuo-win-x64.exe (Windows 绿色单文件便携版)
+      #  3. Feisuo-v${ver}-arm64.apk (Android 移动端)
       - name: Collect artifact
         shell: pwsh
         run: |
@@ -294,6 +317,12 @@ jobs:
           Write-Host "Feisuo-win-x64.exe : $([math]::Round($size / 1MB, 2)) MB"
           if ($size -lt 1MB) { throw "产物体积异常 ($size 字节)，疑似构建失败" }
 
+          $stageSetup = 'publish/Feisuo-Setup-x64.exe'
+          if (-not (Test-Path $stageSetup)) { throw "Windows 安装包产物缺失: $stageSetup" }
+          $setupSize = (Get-Item $stageSetup).Length
+          Write-Host "Feisuo-Setup-x64.exe : $([math]::Round($setupSize / 1MB, 2)) MB"
+          if ($setupSize -lt 1MB) { throw "安装包体积异常 ($setupSize 字节)，疑似构建失败" }
+
           $stageApk = "publish/Feisuo-v${ver}-arm64.apk"
           if (-not (Test-Path $stageApk)) { throw "Android APK 发布产物缺失: $stageApk" }
           $apkSize = (Get-Item $stageApk).Length
@@ -305,6 +334,7 @@ jobs:
         with:
           name: Feisuo-release-v${{ steps.ver.outputs.version }}
           path: |
+            publish/Feisuo-Setup-x64.exe
             publish/Feisuo-win-x64.exe
             publish/Feisuo-v${{ steps.ver.outputs.version }}-arm64.apk
           if-no-files-found: error
@@ -366,7 +396,8 @@ $notes
 
 | 文件 | 说明 |
 | --- | --- |
-| `Feisuo-win-x64.exe` | Windows x64 绿色版，双击即用，无需安装 |
+| `Feisuo-Setup-x64.exe` | Windows x64 安装版（推荐，自动放行防火墙，含桌面/开始菜单快捷方式） |
+| `Feisuo-win-x64.exe` | Windows x64 绿色便携版（双击即用，无需安装） |
 | `Feisuo-v$ver-arm64.apk` | Android 移动端安装包（适用于 arm64-v8a 架构手机，Android 8.0+） |
 
 国内用户可在 [Gitee 镜像 Releases](https://gitee.com/huaxudong/feisuo/releases) 页面高速下载。
@@ -393,6 +424,7 @@ $notes
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
+            publish/Feisuo-Setup-x64.exe
             publish/Feisuo-win-x64.exe
             publish/Feisuo-v${{ steps.ver.outputs.version }}-arm64.apk
           body_path: ${{ steps.notes.outputs.body_file }}
@@ -429,16 +461,17 @@ $notes
           $owner = "huaxudong"
           $repo = "feisuo"
           $token = $env:GITEE_TOKEN
+          $setup = (Resolve-Path "publish/Feisuo-Setup-x64.exe").Path
           $exe = (Resolve-Path "publish/Feisuo-win-x64.exe").Path
           $apk = (Resolve-Path "publish/Feisuo-v${ver}-arm64.apk" -ErrorAction SilentlyContinue)
           $giteeBodyPath = "${{ steps.notes.outputs.gitee_body_file }}"
           $giteeBody = if (Test-Path $giteeBodyPath) {
             Get-Content $giteeBodyPath -Raw -Encoding utf8
           } else {
-            "局域网极速传输工具（Windows 绿色版 / Android 端）。国内高速下载。"
+            "局域网极速传输工具（Windows 安装版与绿色版 / Android 端）。国内高速下载。"
           }
 
-          $filesToUpload = @($exe)
+          $filesToUpload = @($setup, $exe)
           if ($apk) { $filesToUpload += $apk.Path }
 
           Write-Host "正在准备同步 Release 到 Gitee ($owner/$repo, Tag: $tag)..."

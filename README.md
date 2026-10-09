@@ -99,7 +99,7 @@ planet / root 节点就是中继，只不过是用别人的，飞梭自己不建
 > 项目里原先的 `build.ps1` / `mobile/android/build-native.ps1` 已按用户要求删除，
 > 改为手动执行下面的命令。
 
-### Windows 桌面端（绿色版）
+### Windows 桌面端（安装版与绿色版）
 
 ```powershell
 # 0) 依赖（首次）
@@ -112,23 +112,31 @@ pnpm --dir ui build
 
 # 2) 桌面端绿色版单文件 exe（产物 target\release\feisuo-desktop.exe）
 cargo tauri build --no-bundle
+
+# 3) 编译 Inno Setup 现代化安装包（产物 publish\Feisuo-Setup-x64.exe）
+# 注：需本地安装 Inno Setup 6（CI 环境自动通过 choco 安装）
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" desktop\setup\Feisuo.iss
 ```
 
-### 发布产物改名
+### 发布产物命名与双形态分发
 
-`release.yml` 把产物上传为 `Feisuo-win-x64.exe`，客户端 `updater.rs` **按名精确匹配**
-（AGENTS.md 规则 7）。本地手动改名即可：
+`release.yml` 发布三项正式产物，客户端 `updater.rs` **按名精确匹配**（AGENTS.md 规则 7）：
+1. `Feisuo-Setup-x64.exe`：Windows 官方推荐安装版（自动放行局域网防火墙、含桌面/开始菜单快捷方式、支持静默升级）；
+2. `Feisuo-win-x64.exe`：Windows 绿色便携版（双击即用，免安装）；
+3. `Feisuo-v${ver}-arm64.apk`：Android 移动端安装包。
+
+本地构建后手动收集绿色版即可：
 
 ```powershell
-Copy-Item target\release\feisuo-desktop.exe target\release\Feisuo-win-x64.exe
+Copy-Item target\release\feisuo-desktop.exe publish\Feisuo-win-x64.exe
 ```
 
 ### 三个守卫（原来由 build.ps1 自动做，请手动过一遍）
 
 1. **版本号一致性** —— `Cargo.toml` 与 `tauri.conf.json` 必须一致
    （不一致会让"检查更新"永久失灵）
-2. **绿色版体积下限 1 MB** —— 低于此说明构建残缺
-3. **产物文件名** —— 必须是 `Feisuo-win-x64.exe`
+2. **产物体积下限 1 MB** —— 低于此说明构建残缺
+3. **产物文件名匹配** —— 必须是 `Feisuo-Setup-x64.exe` 与 `Feisuo-win-x64.exe`
 
 一条命令过完三个：
 

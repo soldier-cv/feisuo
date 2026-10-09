@@ -29,6 +29,7 @@ chrono = { version = "0.4", features = ["serde"] }
 local-ip-address = "0.6"
 
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "native-tls", "http2", "charset", "system-proxy"] }
+tauri-plugin-single-instance = "2.0"
 
 # Windows 原生剪贴板（§6）。
 # 浏览器层的 `navigator.clipboard.read()` 在 WebView2 下经常因为需要用户手势 +

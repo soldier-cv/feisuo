@@ -107,4 +107,19 @@ impl AutostartManager {
         let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
         *guard = None;
     }
+
+    /// 若当前是标准安装版且已开启开机自启，自动将 Run 键迁移更新至当前安装目录（避免指向旧绿色版临时路径）。
+    pub fn migrate_autostart_if_installed() {
+        #[cfg(target_os = "windows")]
+        {
+            if !crate::updater::is_installed_copy() {
+                return;
+            }
+            if !Self::is_autostart_enabled() {
+                return;
+            }
+            let _ = Self::set_autostart(true);
+        }
+    }
 }
+

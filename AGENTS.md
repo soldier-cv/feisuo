@@ -137,12 +137,14 @@ feisuo/
 
 ### 🔴 规则 7：发版产物
 
-- **Windows 桌面端**：绿色版单文件 `Feisuo-win-x64.exe`，**不做 ZIP、不做安装器**。
-  - 该文件名被客户端 `updater.rs` 精确匹配，改名会让所有在线用户永远解析不到附件（守卫 `update_guard::current_version_must_come_from_cargo_pkg` 会拦截）。
+- **Windows 桌面端**：双形态分发，**安装版（推荐主推）+ 绿色便携版**。
+  - **安装版**：`Feisuo-Setup-x64.exe`，由 Inno Setup 编译打包。自动配置局域网防火墙规则（避免弹安全警报大黄盾）、创建桌面/开始菜单快捷方式、Windows 设置卸载入口；支持客户端自动更新静默覆盖升级；
+  - **绿色便携版**：单文件 `Feisuo-win-x64.exe`，双击即用，免安装；通过换名接力（rollover）自更新；
+  - 两个文件名被客户端 `updater.rs` 精确匹配，改名会让在线用户解析不到附件（守卫 `update_guard::current_version_must_come_from_cargo_pkg` 与 `update_guard::repo_identifiers_must_be_consistent_across_the_three_places` 会拦截）。
   - 产物体积下限由 `release.yml` 断言（`< 1MB` 视为构建失败），防止残缺产物发版。
 - **Android 移动端**：Release 单文件 `Feisuo-v${ver}-arm64.apk`。
   - 产物体积下限由 `release.yml` 断言（`< 2MB` 视为构建失败）。
-  - Release 工作流同时向 GitHub Release 和 Gitee Release 镜像上传 Windows exe 与 Android APK，并严格验证双端产物上传完整性。
+  - Release 工作流同时向 GitHub Release 和 Gitee Release 镜像上传 Windows 安装包、绿色版 exe 与 Android APK，并严格验证三项产物上传完整性。
 
 ### 常见命令
 

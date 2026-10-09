@@ -147,7 +147,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 /// 抽成函数是因为这个三行序列在托盘菜单里出现了四次 —— 而漏掉
 /// `unminimize()` 的后果是"点了菜单窗口弹出来但还是最小化状态"，
 /// 这类 bug 极难从日志里看出来。
-fn show_main(app: &AppHandle) {
+pub(crate) fn show_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();

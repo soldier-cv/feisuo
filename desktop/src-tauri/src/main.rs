@@ -39,6 +39,7 @@ async fn main() {
 
     let cfg = AppConfig::load_or_default();
     logger::init_logger(&cfg);
+    autostart::AutostartManager::migrate_autostart_if_installed();
 
     let is_daemon = std::env::args().any(|arg| arg == "--daemon");
     info!("Starting Feisuo desktop host (daemon mode: {})", is_daemon);
@@ -63,6 +64,16 @@ async fn main() {
     };
 
     let builder = tauri::Builder::default()
+        // 单实例保护：拦截二次启动，防止多开造成端口占用与多窗口混乱。
+        // 二次启动时该插件会向首个实例发送通知并在 setup 前直接 exit(0) 退出，
+        // 绝不会走到后面的 setup() 和引擎端口监听。首个实例接收到信号后，自动唤出并聚焦已有主窗口。
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            info!("检测到二次启动请求, 参数: {:?}, 工作目录: {}", argv, cwd);
+            let is_daemon = argv.iter().any(|arg| arg == "--daemon");
+            if !is_daemon {
+                tray::show_main(app);
+            }
+        }))
         .manage(app_state)
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())

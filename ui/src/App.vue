@@ -1377,6 +1377,9 @@
             <div class="setting-item-block">
               <div class="setting-desc-text">
                 <strong title="登录系统时自动在后台启动并驻留托盘">开机自启动</strong>
+                <span v-if="!updateStatus.isInstalled && localInfo.autostart" class="setting-sub-hint warn-hint">
+                  <i class="ph ph-warning"></i> 便携版自启依赖当前文件路径，请勿移动或删除程序
+                </span>
               </div>
               <label class="fluent-switch">
                 <input aria-label="开机自启动" type="checkbox" v-model="localInfo.autostart" @change="toggleAutostart" />
@@ -1634,7 +1637,15 @@
             <div class="setting-item-block">
               <div class="setting-desc-text">
                 <strong>版本</strong>
-                <span class="path-mono">v{{ localInfo.app_version || '—' }}</span>
+                <span class="path-mono">
+                  v{{ localInfo.app_version || '—' }}
+                  <span class="channel-badge" :class="updateStatus.isInstalled ? 'badge-installed' : 'badge-portable'">
+                    {{ updateStatus.isInstalled ? '安装版' : '绿色便携版' }}
+                  </span>
+                </span>
+                <span v-if="!updateStatus.isInstalled" class="setting-sub-hint">
+                  提示：当前为便携版。若需要桌面快捷方式和更稳固的自启，推荐下载官方安装包。
+                </span>
               </div>
               <div class="setting-action-group">
                 <button class="btn-fluent-secondary" @click="openUpdatePage" :disabled="!updateStatus.releasePage">
@@ -2722,6 +2733,7 @@ const updateStatus = ref<UpdateStatus>({
   bytesTotal: 0,
   releasePage: "",
   busy: false,
+  isInstalled: false,
 });
 
 /**
@@ -6234,7 +6246,15 @@ async function chooseReceiveDir() {
 async function toggleAutostart() {
   try {
     await FeisuoBridge.setAutostart(localInfo.autostart);
-    showToast(localInfo.autostart ? "已开启开机自启" : "已关闭开机自启");
+    if (localInfo.autostart) {
+      if (updateStatus.value?.isInstalled) {
+        showToast("已开启开机自启");
+      } else {
+        showToast("已开启开机自启（提示：便携版请勿移动或删除程序）");
+      }
+    } else {
+      showToast("已关闭开机自启");
+    }
   } catch (e) {
     localInfo.autostart = !localInfo.autostart;
     showToast(FeisuoBridge.describeError(e, "设置开机自启失败"), true);
@@ -9113,6 +9133,32 @@ function getFileIcon(name: string) {
   font-size: 11px;
   color: var(--accent-text);
   white-space: nowrap;
+}
+.channel-badge {
+  display: inline-block !important;
+  font-size: 11px !important;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  margin-left: 6px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+.badge-installed {
+  background: var(--success-soft);
+  color: var(--success-text) !important;
+}
+.badge-portable {
+  background: var(--warn-soft);
+  color: var(--warn-text) !important;
+}
+.setting-sub-hint {
+  font-size: 11.5px !important;
+  color: var(--text-tertiary) !important;
+  margin-top: 3px;
+  display: block;
+}
+.warn-hint {
+  color: var(--warn-text) !important;
 }
 
 .panel-section-divider {

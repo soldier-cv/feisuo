@@ -47,6 +47,8 @@ export interface UpdateStatus {
   releasePage: string;
   /** 检查或下载进行中 —— 前端据此禁用按钮 */
   busy: boolean;
+  /** 是否为安装版（true: 安装版; false: 绿色便携版） */
+  isInstalled?: boolean;
 }
 
 export interface TransferRecord {
@@ -1347,6 +1349,7 @@ export class FeisuoBridge {
         bytesTotal: 0,
         releasePage: "https://gitee.com/huaxudong/feisuo/releases",
         busy: false,
+        isInstalled: false,
       };
     }
     return invokeSafe<UpdateStatus>("get_update_status");

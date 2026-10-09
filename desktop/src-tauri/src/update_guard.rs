@@ -185,9 +185,8 @@ fn current_version_must_come_from_cargo_pkg() {
          漏一处就会让检查更新永久失灵"
     );
     assert!(
-        yml.contains("Feisuo-win-x64.exe"),
-        "release.yml 必须上传 Feisuo-win-x64.exe —— \
-         updater 只认这个名字, 对不上就永远解析不到附件"
+        yml.contains("Feisuo-win-x64.exe") && yml.contains("Feisuo-Setup-x64.exe"),
+        "release.yml 必须同时上传 Feisuo-Setup-x64.exe (安装版) 与 Feisuo-win-x64.exe (绿色版)"
     );
 }
 
@@ -610,6 +609,21 @@ fn repo_identifiers_must_be_consistent_across_the_three_places() {
     assert!(
         release.contains(&format!("publish/{}", asset)),
         "release.yml 的暂存路径应形如 publish/{asset}"
+    );
+
+    let setup_asset = updater
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("pub const SETUP_ASSET_NAME: &str = "))
+        .map(|v| v.trim_end_matches(';').trim().trim_matches('"'))
+        .unwrap_or_else(|| panic!("updater.rs 里找不到 SETUP_ASSET_NAME"));
+    assert!(
+        release.contains(setup_asset),
+        "release.yml 里找不到安装包附件名 {setup_asset:?} —— \
+         发版产出缺少安装包产物"
+    );
+    assert!(
+        release.contains(&format!("publish/{}", setup_asset)),
+        "release.yml 的暂存路径应形如 publish/{setup_asset}"
     );
 
     // ---- 2) 仓库标识：owner/repo 两两配对 ----
