@@ -9145,11 +9145,11 @@ function getFileIcon(name: string) {
 }
 .badge-installed {
   background: var(--success-soft);
-  color: var(--success-text) !important;
+  color: var(--success-on-soft) !important;
 }
 .badge-portable {
   background: var(--warn-soft);
-  color: var(--warn-text) !important;
+  color: var(--warn-on-soft) !important;
 }
 .setting-sub-hint {
   font-size: 11.5px !important;
