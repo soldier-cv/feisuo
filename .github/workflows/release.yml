@@ -387,32 +387,32 @@ jobs:
 
           Set-Content -Path $giteeBodyFile -Value $notes -Encoding utf8
 
-          $ghFullBody = @"
-## 📝 更新内容
-
-$notes
-
-## 📦 下载
-
-| 文件 | 说明 |
-| --- | --- |
-| `Feisuo-Setup-x64.exe` | Windows x64 安装版（推荐，自动放行防火墙，含桌面/开始菜单快捷方式） |
-| `Feisuo-win-x64.exe` | Windows x64 绿色便携版（双击即用，无需安装） |
-| `Feisuo-v$ver-arm64.apk` | Android 移动端安装包（适用于 arm64-v8a 架构手机，Android 8.0+） |
-
-国内用户可在 [Gitee 镜像 Releases](https://gitee.com/huaxudong/feisuo/releases) 页面高速下载。
-
-## 🔄 自动更新
-
-飞梭桌面端内置版本检查，**Gitee 优先、GitHub 降级**：
-托盘右键「检查更新…」或「系统设置 → 关于与更新」均可触发，
-静默调度为启动后 8 秒首次检查、之后每 12 小时一次。
-
-## ⚠️ 系统要求
-
-- **Windows**: Windows 10 1809 (17763) 及以上 / Windows 11，内置 WebView2 Runtime
-- **Android**: Android 8.0 (API 26) 及以上，arm64-v8a 架构
-"@
+          $ghFullBody = @(
+            '## 📝 更新内容',
+            '',
+            $notes,
+            '',
+            '## 📦 下载',
+            '',
+            '| 文件 | 说明 |',
+            '| --- | --- |',
+            '| `Feisuo-Setup-x64.exe` | Windows x64 安装版（推荐，自动放行防火墙，含桌面/开始菜单快捷方式） |',
+            '| `Feisuo-win-x64.exe` | Windows x64 绿色便携版（双击即用，无需安装） |',
+            "| `Feisuo-v$ver-arm64.apk` | Android 移动端安装包（适用于 arm64-v8a 架构手机，Android 8.0+） |",
+            '',
+            '国内用户可在 [Gitee 镜像 Releases](https://gitee.com/huaxudong/feisuo/releases) 页面高速下载。',
+            '',
+            '## 🔄 自动更新',
+            '',
+            '飞梭桌面端内置版本检查，**Gitee 优先、GitHub 降级**：',
+            '托盘右键「检查更新…」或「系统设置 → 关于与更新」均可触发，',
+            '静默调度为启动后 8 秒首次检查、之后每 12 小时一次。',
+            '',
+            '## ⚠️ 系统要求',
+            '',
+            '- **Windows**: Windows 10 1809 (17763) 及以上 / Windows 11，内置 WebView2 Runtime',
+            '- **Android**: Android 8.0 (API 26) 及以上，arm64-v8a 架构'
+          ) -join [Environment]::NewLine
 
           Set-Content -Path $bodyFile -Value $ghFullBody -Encoding utf8
 
