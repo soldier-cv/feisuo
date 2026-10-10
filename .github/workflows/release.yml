@@ -491,7 +491,6 @@ jobs:
           }
 
           $releasesUrl = "https://gitee.com/api/v5/repos/$owner/$repo/releases"
-          $headers = @{ "Authorization" = "token $token" }
           $releaseId = $null
 
           # 1. 使用 curl 发送表单创建 Gitee Release（规避 Gitee WAF 对 JSON POST 的 400 拦截）
@@ -521,7 +520,7 @@ jobs:
             try {
               $queryUrl = "$releasesUrl/tags/$tag`?access_token=$token"
               Write-Host "正在查询已有 Release: $queryUrl"
-              $existing = Invoke-RestMethod -Uri $queryUrl -Method Get -Headers $headers
+              $existing = Invoke-RestMethod -Uri $queryUrl -Method Get
               if ($existing -and $existing.id) {
                 $releaseId = $existing.id
                 Write-Host "找到已有 Gitee Release ID: $releaseId，正在更新版本说明..."
@@ -552,11 +551,11 @@ jobs:
               # 检查并清理同名旧附件（防止 400 冲突）
               try {
                 Write-Host "检查 Release (ID: $releaseId) 是否已存在同名附件 $fileName ..."
-                $existingAttaches = Invoke-RestMethod -Uri "$attachUrl`?access_token=$token" -Method Get -Headers $headers
+                $existingAttaches = Invoke-RestMethod -Uri "$attachUrl`?access_token=$token" -Method Get
                 foreach ($att in @($existingAttaches)) {
                   if ($att.name -eq $fileName) {
                     Write-Host "发现已有同名附件 (ID: $($att.id))，正在清理以便重新上传..."
-                    Invoke-RestMethod -Uri "$attachUrl/$($att.id)`?access_token=$token" -Method Delete -Headers $headers
+                    Invoke-RestMethod -Uri "$attachUrl/$($att.id)`?access_token=$token" -Method Delete
                     Write-Host "旧附件删除成功: $fileName"
                   }
                 }
@@ -565,42 +564,33 @@ jobs:
                 Write-Host "检查/清理已有附件提示: $errDetail"
               }
 
-              Write-Host "正在上传文件到 Gitee Release (ID: $releaseId): $uploadFile ..."
-              $uploadUrl = "$attachUrl`?access_token=$token"
-              $curlArgs = @(
-                "-s", "-S",
-                "-X", "POST",
-                $uploadUrl,
-                "-F", "access_token=$token",
-                "-F", "file=@$uploadFile"
-              )
-              & curl.exe @curlArgs
-              $curlExit = $LASTEXITCODE
+              $normPath = $uploadFile.Replace('\', '/')
+              $uploaded = $false
+              $lastUploadResp = ""
+              for ($attempt = 1; $attempt -le 3; $attempt++) {
+                Write-Host "正在上传文件到 Gitee Release (ID: $releaseId, 尝试 $attempt/3): $uploadFile ..."
+                $uploadResp = & curl.exe -s -S `
+                  -X POST "$attachUrl`?access_token=$token" `
+                  -F "access_token=$token" `
+                  -F "file=@$normPath;filename=$fileName;type=application/octet-stream"
+                $curlExit = $LASTEXITCODE
+                $lastUploadResp = $uploadResp
+                Write-Host "Gitee 响应 ($fileName): $uploadResp"
 
-              # ⚠️ 必须检查退出码。curl 失败（网络、超时、413）时
-              # 附件**根本没上传**，而 Release 已经建好了 —— 客户端
-              # `finish()` 会看到"有新版本但没有 Feisuo-win-x64.exe 附件"，
-              # 报一个用户看不懂的错误。而这条路径整体 `continue-on-error`，
-              # 于是镜像就成了一个"有 Release、无附件"的空壳，
-              # 每次检查更新都命中它却拿不到任何东西。
-              if ($curlExit -ne 0) {
-                throw "Gitee 附件上传失败（curl 退出码 $curlExit）。已建好的 Release 没有附件，客户端会报『发现新版本但没有附件』—— 请手动到 Gitee 后台补传，或删除该 Release。"
-              }
-
-              # 上传成功也不能只看退出码：Gitee 返回非 2xx 时 curl 仍可能退出 0
-              # （取决于是否带 -f）。所以回读一次附件列表确认。
-              $verify = $null
-              try {
-                $verify = Invoke-RestMethod -Uri "$attachUrl`?access_token=$token" -Method Get -Headers $headers
-              } catch {
-                Write-Warning "回读附件列表失败（上传本身已返回 0）：$_"
-              }
-              if ($null -ne $verify) {
-                $names = @($verify) | ForEach-Object { $_.name }
-                if ($names -notcontains $fileName) {
-                  throw "上传后回读附件列表里没有 $fileName（实际有: $($names -join ', ')）。Gitee 镜像当前不可用，客户端会走 GitHub 通道。"
+                if ($curlExit -eq 0 -and $uploadResp) {
+                  $respObj = $uploadResp | ConvertFrom-Json -ErrorAction SilentlyContinue
+                  if ($respObj -and ($respObj.id -or $respObj.browser_download_url)) {
+                    Write-Host "✅ Gitee 附件 $fileName 上传成功 (ID: $($respObj.id))"
+                    $uploaded = $true
+                    break
+                  }
                 }
-                Write-Host "已确认附件存在: $fileName"
+                Write-Warning "第 $attempt 次上传未成功 (curlExit=$curlExit)，等待 3 秒后重试..."
+                Start-Sleep -Seconds 3
+              }
+
+              if (-not $uploaded) {
+                throw "Gitee 附件上传失败（curl 退出码 $curlExit）。Gitee 响应: $lastUploadResp。已建好的 Release 没有附件，客户端会报『发现新版本但没有附件』—— 请手动到 Gitee 后台补传，或删除该 Release。"
               }
             }
             Write-Host "`nGitee Release 全部附件上传完毕！"

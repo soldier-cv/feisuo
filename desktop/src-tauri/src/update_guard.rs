@@ -278,7 +278,7 @@ fn gitee_mirror_must_verify_its_own_upload() {
     );
     // curl 之后必须读退出码（定位于上传附件的最后一个 curl 调用）
     let curl_at = step.rfind("curl.exe").expect("找不到 curl 调用");
-    let after: String = step[curl_at..].chars().take(600).collect();
+    let after: String = step[curl_at..].chars().take(1200).collect();
     assert!(
         after.contains("LASTEXITCODE"),
         "curl 上传之后必须检查退出码 —— \

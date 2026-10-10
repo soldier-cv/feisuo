@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-10-10
+
+### 优化
+
+- **Gitee Release 附件上传协议全链路加固与容错重试**：
+  - 彻底剥离可能触发 Gitee 401 Unauthorized 的非法 Authorization Header，统一对齐官方 URL query access_token 鉴权规范；
+  - 显式规范附件上传正斜杠路径、filename 参数与 `application/octet-stream` 二进制 MIME 格式，避免路径转义影响；
+  - 增加 Gitee 响应实体日志打印与 JSON 成功凭证精确校验，并引入 3 次超时自动重试机制。
+
 ## [0.1.1] — 2026-10-10
 
 ### 优化
