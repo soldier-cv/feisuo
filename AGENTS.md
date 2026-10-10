@@ -26,10 +26,21 @@
 
 ## 2. 核心纪律与操作红线 (CRITICAL RULES)
 
-### 🔴 规则 1：Git 提交纪律 (最高约束)
+### 🔴 规则 1：Git 提交纪律与提交信息规范 (最高约束)
 - **严禁擅自提交**：在后续开发过程中，**没有用户明确指令，绝对禁止擅自执行 `git commit` 或 `git push`**！
 - **目的**：避免产生过多、过杂、无意义的琐碎 git 提交记录，保持远程仓库历史的整洁清晰。
-- **提交规范**：仅在用户显式要求提交（如输入“提交代码”、“commit and push”）时，方可将阶段性完整成果以规范的 Conventional Commits 格式进行提交。
+- **提交规范**：仅在用户显式要求提交（如输入“提交代码”、“commit and push”）时，方可将阶段性完整成果进行提交。
+- **提交信息语言（强制中文）**：
+  - **所有 Git commit message 必须使用清晰、规范的中文描述**（例如：`feat: 桌面端新增 Inno Setup 安装包与单实例互斥`、`fix: 修复深浅色主题切换未持久化问题`、`docs: 规范 CHANGELOG 格式与中文提交准则`）；
+  - **严禁使用空洞、无意义或纯英文的提交信息**（如 `feat: update`、`fix bug`、`feat: land the transfer engine...`）。
+- **提交格式推荐**：采用语义化前缀配合清晰的中文动宾短语描述：
+  - `feat: 新增...`
+  - `fix: 修复...`
+  - `docs: 更新...`
+  - `refactor: 重构...`
+  - `perf: 优化...性能`
+  - `chore: ...`
+  - `ci: ...`
 
 ### 🔴 规则 2：安全与测试红线
 - **禁止运行测试**：绝对禁止直接执行 `mvn test`、全量测试套件或任何可能污染生产/外部环境的命令。
@@ -127,13 +138,19 @@ feisuo/
 - 国内网络环境下 GitHub API 常常超时，因此客户端检查更新
   **Gitee 优先、GitHub 降级**，详见 `FRAMEWORK_DESIGN.md` §7.7。
 
-### 🔴 规则 6：版本号只有一个来源
+### 🔴 规则 6：版本号与发布准则 (CHANGELOG 规范)
 
 - 当前版本一律取自 `CARGO_PKG_VERSION`，**任何位置不得写死版本字符串**。
   `release.yml` 的 “Stamp version” 会同时改写 `Cargo.toml` 与
   `tauri.conf.json` —— 漏改任一处，检查更新就会永久失灵
   （两处不一致时，要么永远提示"发现新版本"，要么永远"已是最新"）。
-- 语义化版本；发版前在 `CHANGELOG.md` 记录实质变更。
+- **严格遵循语义化版本**（[Semantic Versioning](https://semver.org/lang/zh-CN/)）规范；
+- **CHANGELOG 遵循 Keep a Changelog 风格**（参考 `quick-clip` 项目）：
+  - 严格以 [Keep a Changelog](https://keepachangelog.com/) 规范组织 `CHANGELOG.md`；
+  - 顶部预留 `## [Unreleased]` 记录未发布变更，版本节点格式为 `## [x.y.z] — yyyy-mm-dd`；
+  - 每个版本下统一按三级分类组织变更（`### 新增`、`### 优化`、`### 修复`、`### 变更` 等）；
+  - 具体条目统一使用 Markdown 列表格式 `- **简要标题**：详细说明`，支持两空格缩进二级子项；
+  - **严禁向 CHANGELOG.md 堆砌杂质**：严禁将大篇幅调试日志、过程内部分析或随意起草的小标题塞入 `CHANGELOG.md`，保证其纯净度与易读性，同时确保 CI `release.yml` 能够精准提取整洁的更新说明并自动注入 GitHub 与 Gitee Releases。
 
 ### 🔴 规则 7：发版产物
 
