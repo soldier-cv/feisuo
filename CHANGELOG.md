@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-10-10
+
+### 优化
+
+- **CI/CD Gitee 镜像发版链路加固与表单上传对接**：
+  - 参考 QuickClip 实践，改用 `curl.exe` 表单模式创建与更新 Gitee Release，规避 Gitee OpenAPI 网关对 JSON POST 的 400 拦截；
+  - 增强已有 Release 幂等查询与描述增量 PATCH 刷新机制，确保发版构建文件（安装版、绿色版、Android APK）稳定同步至 Gitee。
+- **测试环境收敛至本地回环并统一测试目标命名**：
+  - 核心传输服务增加 `transfer_bind` 配置项，测试节点统一绑定至 `127.0.0.1` 本地回环接口，彻底消除 Windows 防火墙网络访问权限申请弹窗；
+  - 显式声明 `feisuo_engine_test` 与 `feisuo_protocol_test` 命名，统一 Cargo 测试可执行文件标识。
+
 ## [0.1.0] — 2026-10-09
 
 ### 新增

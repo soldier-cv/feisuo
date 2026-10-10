@@ -276,8 +276,8 @@ fn gitee_mirror_must_verify_its_own_upload() {
         step.contains("curl.exe"),
         "Gitee 同步步骤里没有 curl 上传 —— 镜像结构变了? 客户端会一直报『没有附件』"
     );
-    // curl 之后必须读退出码
-    let curl_at = step.find("curl.exe").expect("找不到 curl 调用");
+    // curl 之后必须读退出码（定位于上传附件的最后一个 curl 调用）
+    let curl_at = step.rfind("curl.exe").expect("找不到 curl 调用");
     let after: String = step[curl_at..].chars().take(600).collect();
     assert!(
         after.contains("LASTEXITCODE"),

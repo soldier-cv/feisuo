@@ -1228,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "feisuo-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "chrono",
@@ -1253,7 +1253,7 @@ dependencies = [
 
 [[package]]
 name = "feisuo-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "dirs 6.0.0",

@@ -57,8 +57,9 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
     let cfg = AppConfig {
         transfer_port: free_port(),
         discovery_port: free_port(),
-        // 只绑回环, 免得测试往真实局域网广播
+        // 只绑回环, 免得测试往真实局域网广播与触发防火墙弹窗
         discovery_bind: "127.0.0.1".to_string(),
+        transfer_bind: "127.0.0.1".to_string(),
         ..Default::default()
     };
     cfg.save_in(&d).expect("写入隔离配置失败");
@@ -457,11 +458,8 @@ fn engine_health_is_queryable_after_failed_start() {
     let dir = temp_dir("health");
 
     // 占住传输端口, 让 start() 必然失败。
-    // 必须绑 **0.0.0.0** 而不是 127.0.0.1: 引擎绑的是 `0.0.0.0:port`,
-    // 而 Windows 允许"更具体的地址"与通配地址共存 —— 只绑回环时
-    // 引擎照样能绑上通配地址, 测试就会随机红。
-    // (这个坑踩过一次: 首版绑 127.0.0.1, 单跑绿、全量跑红。)
-    let hog = std::net::TcpListener::bind("0.0.0.0:0").expect("占位监听");
+    // 双方均绑 127.0.0.1 回环接口, 既保证端口冲突必然触发, 又避免触发 Windows 防火墙弹窗。
+    let hog = std::net::TcpListener::bind("127.0.0.1:0").expect("占位监听");
     let hog_port = hog.local_addr().unwrap().port();
 
     let cfg = AppConfig {
@@ -470,7 +468,8 @@ fn engine_health_is_queryable_after_failed_start() {
         // `cargo test --workspace` 会并行跑多个测试二进制, 而 42101 正是
         // 生产默认端口, 撞上就会随机红。
         discovery_port: free_port(),
-        discovery_bind: "0.0.0.0".to_string(),
+        discovery_bind: "127.0.0.1".to_string(),
+        transfer_bind: "127.0.0.1".to_string(),
         ..Default::default()
     };
     cfg.save_in(&dir).expect("写配置失败");

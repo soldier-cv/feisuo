@@ -97,7 +97,7 @@ fn shared_discovery_port() -> u16 {
 impl Node {
     /// 构造节点; `listen` 为 true 时同时拉起 TCP 传输服务
     async fn spawn(tag: &str, listen: bool) -> Node {
-        Self::spawn_with_bind(tag, listen, "0.0.0.0").await
+        Self::spawn_with_bind(tag, listen, "127.0.0.1").await
     }
 
     /// 指定发现服务绑定地址的构造方式。
@@ -131,6 +131,7 @@ impl Node {
             max_history_records: 200,
             record_retention_days: 30,
             max_concurrent_transfers: 3,
+            transfer_bind: "127.0.0.1".into(),
             discovery_bind: discovery_bind.into(),
             close_action: "ask".into(),
             theme: "dark".into(),
@@ -2452,6 +2453,7 @@ fn test_config_roundtrip_and_defaults() {
         record_retention_days: 30,
         max_concurrent_transfers: 3,
         discovery_bind: "0.0.0.0".into(),
+        transfer_bind: "0.0.0.0".into(),
         close_action: "tray".into(),
         theme: "light".into(),
         auto_check_update: true,
@@ -2478,6 +2480,7 @@ fn test_config_roundtrip_and_defaults() {
     assert_eq!(parsed.max_log_size_mb, 5);
     assert_eq!(parsed.record_retention_days, 30);
     assert_eq!(parsed.discovery_bind, "0.0.0.0", "缺省必须监听所有网卡");
+    assert_eq!(parsed.transfer_bind, "0.0.0.0", "缺省必须监听所有网卡");
     // 老版本配置里根本没有这个字段, 必须缺省为 true (开启自动检查),
     // 否则升级上来的用户会莫名其妙丢掉静默检查更新的能力
     assert!(parsed.auto_check_update, "老配置缺省必须仍然自动检查更新");

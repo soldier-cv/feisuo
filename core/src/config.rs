@@ -18,6 +18,7 @@ fn default_retention_days() -> u32 { 30 }
 fn default_close_action() -> String { CLOSE_ACTION_ASK.to_string() }
 fn default_theme() -> String { "dark".to_string() }
 fn default_discovery_bind() -> String { "0.0.0.0".to_string() }
+fn default_transfer_bind() -> String { "0.0.0.0".to_string() }
 fn default_approval_timeout() -> u64 { 60 }
 fn default_auto_check_update() -> bool { true }
 fn default_max_concurrent_transfers() -> u32 { 3 }
@@ -86,6 +87,10 @@ pub struct AppConfig {
     /// 单机多实例 / 集成测试时可以改绑到指定回环地址, 避免互相抢占端口。
     #[serde(default = "default_discovery_bind")]
     pub discovery_bind: String,
+    /// 传输服务绑定的地址。默认 0.0.0.0 (监听所有网卡)。
+    /// 单机测试时可以改绑到 127.0.0.1 回环地址, 避免触发系统防火墙弹窗。
+    #[serde(default = "default_transfer_bind")]
+    pub transfer_bind: String,
     /// ask = 每次询问(最小化到托盘 / 退出), tray = 直接最小化, exit = 直接退出
     #[serde(default = "default_close_action")]
     pub close_action: String,
@@ -148,6 +153,7 @@ impl Default for AppConfig {
             max_history_records: default_max_records(),
             record_retention_days: default_retention_days(),
             discovery_bind: default_discovery_bind(),
+            transfer_bind: default_transfer_bind(),
             close_action: default_close_action(),
             theme: "dark".to_string(),
             auto_check_update: default_auto_check_update(),
@@ -248,6 +254,15 @@ impl AppConfig {
                                 cfg.discovery_bind
                             );
                             cfg.discovery_bind = default_discovery_bind();
+                        }
+                        if cfg.transfer_bind.trim().is_empty()
+                            || cfg.transfer_bind.parse::<std::net::IpAddr>().is_err()
+                        {
+                            tracing::warn!(
+                                "传输服务绑定地址 {:?} 非法, 已重置为 0.0.0.0",
+                                cfg.transfer_bind
+                            );
+                            cfg.transfer_bind = default_transfer_bind();
                         }
                         return cfg;
                     }

@@ -72,3 +72,12 @@ tracing = "0.1"
 # 集成测试默认安静, 设 FEISUO_TEST_LOG=1 时才输出 —— 否则 30 个用例的
 # 日志会互相刷屏, 真正有用的错误反而被埋掉
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[test]]
+name = "feisuo_engine_test"
+path = "tests/engine_host.rs"
+
+[[test]]
+name = "feisuo_protocol_test"
+path = "tests/protocol_integration.rs"
+

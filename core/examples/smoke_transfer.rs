@@ -74,6 +74,7 @@ async fn spawn(tag: &str, listen: bool) -> Node {
         // 审批等待要够长: 冒烟里审批是异步任务, 太短会误报超时
         approval_timeout_secs: 30,
         discovery_bind: "127.0.0.1".into(),
+        transfer_bind: "127.0.0.1".into(),
         ..Default::default()
     };
 

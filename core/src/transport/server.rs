@@ -583,13 +583,16 @@ impl TransferServer {
     }
 
     pub async fn start(&self) -> Result<()> {
-        let port = self.config.read().await.transfer_port;
+        let (port, bind_ip) = {
+            let cfg = self.config.read().await;
+            (cfg.transfer_port, cfg.transfer_bind.clone())
+        };
         // 先重置关闭标志, 否则 stop() 之后无法重新启动。
         // 绑定失败时把标志恢复回去, 保持"已停止"语义不被破坏。
         let was_stopped = self
             .stopped
             .swap(false, std::sync::atomic::Ordering::SeqCst);
-        let listener = match TcpListener::bind(format!("0.0.0.0:{}", port)).await {
+        let listener = match TcpListener::bind(format!("{}:{}", bind_ip, port)).await {
             Ok(l) => l,
             Err(e) => {
                 if was_stopped {
@@ -598,7 +601,7 @@ impl TransferServer {
                 return Err(e.into());
             }
         };
-        info!("Transfer server listening on TCP port {}", port);
+        info!("Transfer server listening on TCP {}:{}", bind_ip, port);
 
         let identity = self.identity.clone();
         let config = self.config.clone();
