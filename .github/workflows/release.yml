@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -159,8 +161,9 @@ jobs:
           $conf = 'desktop/src-tauri/tauri.conf.json'
           $utf8 = New-Object System.Text.UTF8Encoding($false)
           $text = [System.IO.File]::ReadAllText((Resolve-Path $conf), [System.Text.Encoding]::UTF8)
-          $updated = [regex]::Replace($text, '("version"\s*:\s*")[^"]+(")', "`${1}$ver`${2}", 1)
-          if ($updated -eq $text) { throw "tauri.conf.json 里没有找到 version 字段" }
+          $rx = [regex]'("version"\s*:\s*")[^"]+(")'
+          if (-not $rx.IsMatch($text)) { throw "tauri.conf.json 里没有找到 version 字段" }
+          $updated = $rx.Replace($text, "`${1}$ver`${2}", 1)
           [System.IO.File]::WriteAllText((Resolve-Path $conf), $updated, $utf8)
           Write-Host "stamped version $ver"
 
