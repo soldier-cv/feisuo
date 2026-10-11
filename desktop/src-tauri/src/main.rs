@@ -77,9 +77,9 @@ async fn main() {
         .manage(app_state)
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        // 全局热键 Ctrl+Alt+V（§6.4）。必须在这里 init,
-        // 否则 `app.global_shortcut()` 拿不到扩展, 注册会静默失败。
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // ❌ 原本这里注册了 tauri-plugin-global-shortcut（全局热键 Ctrl+Alt+V 直发剪贴板）。
+        //    热键已移除（托盘菜单里显示的是原始串 "CommandOrControl+Alt+V" 而非
+        //    "Ctrl+Alt+V"，且入口本身冗余），插件随之整体拆除。
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--daemon"]),
@@ -226,8 +226,10 @@ async fn main() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                // 一律拦截原生关闭: 由前端弹出"最小化到托盘 / 退出程序"选择。
-                // 旧实现无条件 hide(), 用户永远无法从窗口关掉程序, 只能去托盘找菜单。
+                // 一律拦截原生关闭: 交给前端执行"最小化到托盘"。
+                // 关闭窗口 = 最小化到托盘（设置项已移除，不再有"直接退出"），
+                // 彻底退出只走托盘菜单。拦在这里而不是直接 hide()，
+                // 是为了让前端能给出"已最小化到托盘"的 toast 反馈。
                 api.prevent_close();
                 if let Err(e) = window.emit(WINDOW_CLOSE_REQUESTED, ()) {
                     warn!("无法向前端发送关闭请求: {}", e);
@@ -263,7 +265,10 @@ async fn main() {
             commands::minimize_window,
             commands::toggle_maximize_window,
             commands::hide_window,
-            commands::quit_app,
+            // ❌ 原本这里还有 commands::quit_app ——
+            // 它唯一的前端调用方是「关闭窗口时」三选项里的"直接退出"确认框，
+            // 该选项已随设置项一并移除（关闭窗口一律最小化到托盘）。
+            // 彻底退出只剩托盘菜单的「退出飞梭」，由 tray.rs 直接 app.exit(0)。
             commands::ensure_window_visible,
             commands::get_engine_status,
             commands::probe_device,

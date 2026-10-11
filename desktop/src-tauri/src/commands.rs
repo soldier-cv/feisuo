@@ -5,7 +5,6 @@ use tauri::{AppHandle, Emitter, State};
 use feisuo_core::storage::PathManager;
 use feisuo_core::{
     DiscoveredDevice, FeisuoEngine, FeisuoError, RemoteFileEntry, TrustedDevice,
-    CLOSE_ACTION_ASK, CLOSE_ACTION_EXIT, CLOSE_ACTION_TRAY,
 };
 
 use crate::autostart::AutostartManager;
@@ -30,7 +29,6 @@ pub struct LocalDeviceInfo {
     pub max_log_size_mb: u32,
     pub max_history_records: u32,
     pub record_retention_days: u32,
-    pub close_action: String,
     pub theme: String,
     pub device_count: usize,
     pub trusted_count: usize,
@@ -171,7 +169,6 @@ pub async fn get_local_info(state: State<'_, AppState>) -> Result<LocalDeviceInf
         max_log_size_mb: cfg.max_log_size_mb,
         max_history_records: cfg.max_history_records,
         record_retention_days: cfg.record_retention_days,
-        close_action: cfg.close_action.clone(),
         theme: cfg.theme.clone(),
         device_count,
         trusted_count,
@@ -716,13 +713,6 @@ pub fn toggle_maximize_window(window: tauri::WebviewWindow) {
 #[tauri::command]
 pub fn hide_window(window: tauri::WebviewWindow) {
     let _ = window.hide();
-}
-
-/// 彻底退出应用 (来自前端"退出程序"确认框与托盘菜单)
-#[tauri::command]
-pub fn quit_app(app: AppHandle) {
-    tracing::info!("Feisuo exiting by user request");
-    app.exit(0);
 }
 
 /// 引擎的**真实**健康状态。
@@ -1497,12 +1487,6 @@ pub async fn update_app_config(
             return Err("日志级别取值非法".into());
         }
         next.log_level = normalized;
-    }
-    if let Some(ca) = patch.get("close_action").and_then(|v| v.as_str()) {
-        if !matches!(ca, CLOSE_ACTION_ASK | CLOSE_ACTION_TRAY | CLOSE_ACTION_EXIT) {
-            return Err("关闭方式取值非法".into());
-        }
-        next.close_action = ca.to_string();
     }
     if let Some(theme) = patch.get("theme").and_then(|v| v.as_str()) {
         if matches!(theme, "dark" | "light") {

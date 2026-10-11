@@ -33,7 +33,7 @@
         <button class="caption-btn" @click.stop="toggleMaximize" title="最大化 / 还原">
           <i class="ph ph-square"></i>
         </button>
-        <button class="caption-btn close-caption" @click.stop="requestClose" title="关闭">
+        <button class="caption-btn close-caption" @click.stop="requestClose" title="关闭（最小化到托盘）">
           <i class="ph ph-x"></i>
         </button>
       </div>
@@ -186,7 +186,7 @@
           </div>
 
           <div v-if="store.myDevices.length === 0" class="roster-empty-hint">
-            还没有已配对的设备。在下面的「其他」里找到目标设备后点「配对」。
+            还没有配对设备，在「其他设备」里点「配对」。
           </div>
 
           <div
@@ -200,7 +200,7 @@
           >
             <span class="roster-group-title">
               <i class="ph ph-caret-right" :class="{ rotated: !store.othersCollapsed }"></i>
-              其他（附近的陌生设备）
+              其他设备
             </span>
             <span class="roster-group-count">{{ store.nearbyDevices.length }}</span>
           </div>
@@ -240,7 +240,7 @@
             <p role="status" class="discovery-status-text">正在搜索附近设备…</p>
             <div class="empty-actions-row">
               <button class="btn-clean-primary" @click="openDirectConnectModal">
-                <i class="ph ph-plus"></i> 直连对端 IP
+                <i class="ph ph-plus"></i> 直连 IP
               </button>
               <button class="btn-clean-subtle" @click="openPairModal('input')">
                 <i class="ph ph-key"></i> 配对码
@@ -296,7 +296,7 @@
 
           <div v-if="showHiddenDrawer && store.hiddenDevices.length > 0" class="hidden-drawer">
             <p class="hidden-drawer-hint">
-              隐藏只是不再显示，<strong>已建立的信任与推送接收都保留</strong>。
+              隐藏只是不再显示，<strong>信任与接收都保留</strong>。
             </p>
             <div
               v-for="dev in store.hiddenDevices"
@@ -315,11 +315,11 @@
 
           <button class="btn-open-pairing" @click="openPairModal('show')">
             <i class="ph-bold ph-qr-code"></i>
-            <span>查看本机配对码</span>
+            <span>配对码</span>
           </button>
           <div class="save-dir-card">
             <div class="dir-header">
-              <span>文件保存目录</span>
+              <span>保存目录</span>
               <button type="button" class="dir-open-btn" @click="openReceiveFolder">打开</button>
             </div>
             <div
@@ -346,7 +346,7 @@
               :class="{ active: currentTab === 'send' }"
               @click="currentTab = 'send'"
             >
-              <i class="ph-bold ph-paper-plane-right"></i> 发送文件
+              <i class="ph-bold ph-paper-plane-right"></i> 发送
             </button>
             <button
               role="tab"
@@ -354,7 +354,7 @@
               :class="{ active: currentTab === 'shuttle' }"
               @click="currentTab = 'shuttle'"
             >
-              <i class="ph-bold ph-arrows-left-right"></i> 双栏穿梭
+              <i class="ph-bold ph-arrows-left-right"></i> 穿梭
             </button>
             <button
               role="tab"
@@ -362,7 +362,7 @@
               :class="{ active: currentTab === 'log' }"
               @click="currentTab = 'log'"
             >
-              <i class="ph-bold ph-clock-counter-clockwise"></i> 传输记录
+              <i class="ph-bold ph-clock-counter-clockwise"></i> 记录
             </button>
             <button
               role="tab"
@@ -370,7 +370,7 @@
               :class="{ active: currentTab === 'settings' }"
               @click="currentTab = 'settings'"
             >
-              <i class="ph-bold ph-sliders-horizontal"></i> 系统设置
+              <i class="ph-bold ph-sliders-horizontal"></i> 设置
             </button>
           </div>
 
@@ -737,12 +737,12 @@
             </div>
             <h3>{{ isConcurrencyFull ? '并发传输已满，请稍候' : (runningCount > 0 ? '正在传输中 · 可继续添加或拖放' : '拖放文件或文件夹到此处') }}</h3>
             <p class="drop-sub-tip" title="文件松手即发，5秒内可撤销；文件夹递归展开；剪贴板支持预览确认">
-              <i class="ph ph-info"></i> 支持拖放单个或多个文件，也可点击下方按钮选取
+              <i class="ph ph-info"></i> 可拖放文件，或点击下方按钮选择
             </p>
 
             <div class="drop-cta-buttons">
               <button class="btn-fluent-primary" @click="pickFilesToSend">
-                <i class="ph-bold ph-folder-open"></i> 选取本地文件
+                <i class="ph-bold ph-folder-open"></i> 选择文件
               </button>
               <button class="btn-fluent-secondary" @click="handleSendClipboard">
                 <i class="ph-bold ph-clipboard-text"></i> 发送剪贴板
@@ -1010,16 +1010,16 @@
               :title="'把选中的 ' + selectedLocalNames.size + ' 项送到对方 ' + sendDestLabel"
             >
               <i class="ph-bold ph-arrow-right"></i>
-              <span>发送到对方</span>
+              <span>发送</span>
             </button>
             <button
               class="shuttle-op-button fetch-op"
               :disabled="selectedRemoteNames.size === 0 || !store.selectedDevice || isConcurrencyFull"
               @click="shuttleFetch"
-              :title="'把选中的 ' + selectedRemoteNames.size + ' 项取回到本机 ' + fetchDestLabel"
+              :title="'把选中的 ' + selectedRemoteNames.size + ' 项取回 ' + fetchDestLabel"
             >
               <i class="ph-bold ph-arrow-left"></i>
-              <span>取回到本机</span>
+              <span>取回</span>
             </button>
           </div>
 
@@ -1194,7 +1194,7 @@
           <div class="fluent-card-panel">
             <div class="panel-header-row">
               <div class="header-titles">
-                <h2>传输记录 <i class="ph ph-question" title="传输速度基于纯数据传输耗时计算，已排除审批与落盘等待"></i></h2>
+                <h2>传输记录 <i class="ph ph-question" title="速度按纯数据传输耗时计算，已排除审批与落盘等待"></i></h2>
               </div>
               <div class="header-actions">
                 <!-- 诊断报告导出：复现问题后把这份文件交给开发者即可定位瓶颈（§9.7） -->
@@ -1284,7 +1284,7 @@
               >
                 <i class="ph" :class="showDiagnostics ? 'ph-caret-down' : 'ph-caret-right'"></i>
                 <span>
-                  最近诊断（{{ diagnostics.length }} 条，含瓶颈归因）<template v-if="diagnosticsFailed">
+                  最近诊断（{{ diagnostics.length }} 条）<template v-if="diagnosticsFailed">
                     · 读取失败</template
                   >
                 </span>
@@ -1360,7 +1360,7 @@
 
             <div class="setting-item-block">
               <div class="setting-desc-text">
-                <strong title="局域网内其他设备看到的名字">本机设备名称</strong>
+                <strong>设备名称</strong>
               </div>
               <div class="setting-action-group">
                 <input
@@ -1399,7 +1399,7 @@
 
             <div class="setting-item-block">
               <div class="setting-desc-text">
-                <strong title="同时进行的文件传输任务上限，超出时需等待当前任务完成">最大并发传输数</strong>
+                <strong title="同时进行的传输任务上限">最大并发传输数</strong>
               </div>
               <div class="select-compact">
                 <CustomSelect
@@ -1407,20 +1407,6 @@
                   :options="concurrentOptions"
                   @change="saveSettings"
                   aria-label="最大并发传输数"
-                />
-              </div>
-            </div>
-
-            <div class="setting-item-block">
-              <div class="setting-desc-text">
-                <strong title="点击右上角关闭按钮或按下快捷键时的行为">关闭窗口时</strong>
-              </div>
-              <div class="select-compact">
-                <CustomSelect
-                  v-model="localInfo.close_action"
-                  :options="closeActionOptions"
-                  @change="saveSettings"
-                  aria-label="关闭窗口时"
                 />
               </div>
             </div>
@@ -1441,7 +1427,7 @@
 
             <div class="setting-item-block">
               <div class="setting-desc-text">
-                <strong>文件保存目录</strong>
+                <strong>保存目录</strong>
                 <span class="path-mono">{{ localInfo.receive_dir }}</span>
               </div>
               <div class="setting-action-group">
@@ -1482,7 +1468,7 @@
             </div>
 
             <div class="panel-section-divider">
-              <h3>日志与排障</h3>
+              <h3>日志</h3>
             </div>
 
             <div class="setting-item-block">
@@ -1501,15 +1487,15 @@
 
             <div class="setting-item-block">
               <div class="setting-desc-text">
-                <strong title="单文件达到上限后自动轮转归档，最多保留 3 个归档">本地日志文件</strong>
+                <strong title="单文件超限后自动轮转，保留 3 个归档">日志文件</strong>
               </div>
               <button class="btn-fluent-secondary" @click="openLogFolder">
-                <i class="ph ph-folder-open"></i> 打开日志目录
+                <i class="ph ph-folder-open"></i> 打开目录
               </button>
             </div>
 
             <div class="panel-section-divider">
-              <h3>传输记录保留策略</h3>
+              <h3>记录保留</h3>
             </div>
 
             <div class="setting-item-block">
@@ -1542,10 +1528,10 @@
 
             <div class="setting-item-block">
               <div class="setting-desc-text">
-                <strong title="清空数据库中的所有历史传输记录">一键清理历史</strong>
+                <strong title="清空所有历史传输记录">清空记录</strong>
               </div>
               <button class="btn-fluent-secondary danger-action" @click="clearHistory">
-                <i class="ph ph-trash"></i> 清空传输记录
+                <i class="ph ph-trash"></i> 清空
               </button>
             </div>
 
@@ -1577,11 +1563,9 @@
             -->
             <div class="setting-item-block setting-item-block-col">
               <div class="setting-desc-text">
-                <strong>允许的来源网段</strong>
+                <strong>允许的网段</strong>
                 <span>
-                  留空 = 接受任何来源。填了之后，配对与传输都必须来自这些网段。
-                  格式 <code class="path-mono">192.168.31.0/24</code>，
-                  省略 <code class="path-mono">/24</code> 时按 <code class="path-mono">/24</code> 处理。
+                  留空 = 接受任何来源。格式 <code class="path-mono">192.168.31.0/24</code>，省略 <code class="path-mono">/24</code> 时按 <code class="path-mono">/24</code> 处理。
                 </span>
               </div>
               <div class="subnet-editor">
@@ -1613,9 +1597,7 @@
               <p v-if="allowedPeerSubnets.length === 0" class="subnet-warn-hint">
                 <i class="ph ph-shield-warning"></i>
                 <span>
-                  <strong>当前未设置</strong> —— 同一网络内的任何设备都可以发起配对。
-                  配上 <code class="path-mono">192.168.31.0/24</code> 之类，
-                  公网即使能连到本机端口也进不来。
+                  <strong>当前未设置</strong> —— 同一网络内任何设备都可发起配对，建议填 <code class="path-mono">192.168.31.0/24</code> 之类。
                 </span>
               </p>
               <p v-for="(cidr, i) in badSubnets" :key="'bad' + i" class="subnet-warn-hint is-error">
@@ -1631,7 +1613,7 @@
             </div>
 
             <div class="panel-section-divider">
-              <h3>关于与更新</h3>
+              <h3>更新</h3>
             </div>
 
             <div class="setting-item-block">
@@ -1644,7 +1626,7 @@
                   </span>
                 </span>
                 <span v-if="!updateStatus.isInstalled" class="setting-sub-hint">
-                  提示：当前为便携版。若需要桌面快捷方式和更稳固的自启，推荐下载官方安装包。
+                  便携版：需要桌面快捷方式和稳定自启，推荐安装版。
                 </span>
               </div>
               <div class="setting-action-group">
@@ -1752,35 +1734,6 @@
       </div>
     </footer>
 
-    <!-- 4. 关闭程序确认框 -->
-    <div v-if="showCloseDialog" class="fluent-modal-overlay" @click.self="showCloseDialog = false">
-      <div
-        v-modal-focus
-        class="fluent-modal-dialog close-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="close-dialog-title"
-        tabindex="-1"
-      >
-        <div class="modal-dialog-titlebar">
-          <h3 id="close-dialog-title">要关闭飞梭吗？</h3>
-          <button class="modal-close-icon" @click="showCloseDialog = false" title="关闭"><i class="ph ph-x"></i></button>
-        </div>
-        <p class="close-dialog-hint">
-          最小化到托盘后飞梭会继续在后台守护局域网连接，随时可从托盘图标重新唤起。
-        </p>
-        <div class="close-dialog-actions">
-          <button class="btn-fluent-secondary" @click="showCloseDialog = false">取消</button>
-          <button class="btn-fluent-secondary" @click="closeToTray">
-            <i class="ph ph-minus-circle"></i> 最小化到托盘
-          </button>
-          <button class="btn-danger-solid" @click="quitApp">
-            <i class="ph ph-power"></i> 退出程序
-          </button>
-        </div>
-      </div>
-    </div>
-
     <!-- 5. 直连设备 IP -->
     <div v-if="showDirectConnectDialog" class="fluent-modal-overlay" @click.self="showDirectConnectDialog = false">
       <div
@@ -1796,7 +1749,7 @@
           <button class="modal-close-icon" @click="showDirectConnectDialog = false" title="关闭"><i class="ph ph-x"></i></button>
         </div>
         <div class="pair-view-content">
-          <p class="pair-guide-hint">输入对方设备的局域网 IP，飞梭会主动发起一次发现探测：</p>
+          <p class="pair-guide-hint">输入对方局域网 IP，飞梭会主动探测：</p>
           <div class="form-input-group">
             <label for="direct-connect-ip">对方 IP 地址</label>
             <input
@@ -2539,7 +2492,6 @@ const localInfo = reactive<LocalDeviceInfo>({
   max_history_records: 500,
   record_retention_days: 30,
   max_concurrent_transfers: 3,
-  close_action: "ask",
   theme: "dark",
   device_count: 0,
   trusted_count: 0,
@@ -2758,9 +2710,9 @@ const updateStatusText = computed(() => {
     case "uptodate":
       return `当前已是最新版本 v${s.currentVersion || localInfo.app_version}`;
     case "failed":
-      return "检查更新失败，可点右侧「前往下载页」手动下载";
+      return "检查更新失败，可点「前往下载页」手动下载";
     default:
-      return "尚未检查，可点击「检查更新」";
+      return "尚未检查";
   }
 });
 
@@ -2884,12 +2836,6 @@ const themeSelect = computed({
   get: () => store.theme,
   set: (v: "dark" | "light") => store.applyTheme(v),
 });
-
-const closeActionOptions: SelectOption[] = [
-  { value: "ask", label: "每次询问（最小化 / 退出）" },
-  { value: "tray", label: "直接最小化到托盘" },
-  { value: "exit", label: "直接退出程序" },
-];
 
 const themeOptions: SelectOption[] = [
   { value: "dark", label: "深色主题" },
@@ -3281,9 +3227,6 @@ const isConnectingIp = ref(false);
 const directConnectMsg = ref("");
 const isDirectConnectSuccess = ref(false);
 
-// ---------------- 关闭确认 ----------------
-const showCloseDialog = ref(false);
-
 // ---------------- 事件解绑 ----------------
 let unlisteners: Array<() => void> = [];
 
@@ -3422,7 +3365,6 @@ function focusablesIn(root: HTMLElement): HTMLElement[] {
 /** 当前应该响应 Escape 的弹窗。审批框不参与 —— 它必须由人决定。 */
 const ESCAPABLE_MODALS: Array<{ ref: () => unknown; close: () => void }> = [
   { ref: () => codePrompt.value, close: () => cancelCodePrompt() },
-  { ref: () => showCloseDialog.value, close: () => (showCloseDialog.value = false) },
   {
     ref: () => showDirectConnectDialog.value,
     close: () => (showDirectConnectDialog.value = false)
@@ -3593,8 +3535,8 @@ onMounted(async () => {
     await FeisuoBridge.onUpdateStatus((s) => {
       updateStatus.value = s;
     }),
-    // 全局热键 Ctrl+Alt+V（§6.4）。窗口隐藏时也能触发 ——
-    // 这是"托盘常驻"这个形态下唯一还能用的快捷键通路。
+    // 托盘菜单「发送剪贴板」请求直发。后端在触发前已唤出窗口 ——
+    // 前端只管切到发送页并读剪贴板。
     await FeisuoBridge.onOpenClipboardRequest(() => {
       currentTab.value = "send";
       void handleSendClipboard();
@@ -6204,7 +6146,6 @@ async function saveSettings() {
       log_level: localInfo.log_level,
       max_history_records: localInfo.max_history_records,
       record_retention_days: localInfo.record_retention_days,
-      close_action: localInfo.close_action,
       theme: store.theme,
     });
     showToast("设置已保存");
@@ -6364,35 +6305,23 @@ async function toggleMaximize() {
 }
 
 /**
- * 关闭主窗口: 依据设置决定是弹选择框还是直接执行。
- * 旧实现无论如何都只是隐藏窗口, 用户永远无法从窗口关掉程序。
+ * 关闭主窗口: 一律最小化到托盘。
+ *
+ * 「关闭窗口时」的三选项 (每次询问 / 最小化 / 退出) 已移除 ——
+ * 用户选「直接退出」后整个引擎停摆, 局域网对端表现为"设备突然失联",
+ * 而这本该是托盘菜单里一次显式操作才对的行为。彻底退出只走托盘菜单。
  */
 function requestClose() {
-  switch (localInfo.close_action) {
-    case "tray":
-      closeToTray();
-      break;
-    case "exit":
-      quitApp();
-      break;
-    default:
-      showCloseDialog.value = true;
-  }
+  closeToTray();
 }
 
 async function closeToTray() {
-  showCloseDialog.value = false;
   try {
     await FeisuoBridge.hideWindow();
-    showToast("已最小化到托盘，后台继续守护");
+    showToast("已最小化到托盘");
   } catch (e) {
     showToast(FeisuoBridge.describeError(e, "最小化到托盘失败"), true);
   }
-}
-
-async function quitApp() {
-  showCloseDialog.value = false;
-  await FeisuoBridge.quitApp();
 }
 
 // =======================================================================
@@ -9430,9 +9359,6 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
 .modal-close-icon { background: none; border: 0; color: var(--text-secondary); cursor: pointer; font-size: 18px; }
 .modal-close-icon:hover { color: var(--text-primary); }
 
-.close-dialog-hint { font-size: 12.5px; color: var(--text-secondary); line-height: 1.6; margin-bottom: 18px; }
-.close-dialog-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
-
 /* 配对流程说明。放在标签页**上方**而不是下方：它是"选哪个之前"
  * 就该知道的前提，排在标签页之后就成了"选完再解释你选错了"。 */
 .pair-flow-hint {
@@ -9820,7 +9746,6 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
 .view-log, .view-settings { display: block; }
 .pair-view-content { display: block; }
 .approval-dialog { max-width: 460px; }
-.close-dialog { max-width: 480px; }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 11. 全局提示 */

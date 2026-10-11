@@ -24,7 +24,7 @@ use tracing::info;
 
 pub use config::AppConfig;
 pub use config::{
-    resolve_app_dir, sanitize_device_name, CLOSE_ACTION_ASK, CLOSE_ACTION_EXIT, CLOSE_ACTION_TRAY,
+    resolve_app_dir, sanitize_device_name,
     DEFAULT_DISCOVERY_PORT, DEFAULT_TRANSFER_PORT, DISCOVERY_MULTICAST_ADDR,
 };
 pub use discovery::{DiscoveredDevice, DiscoveryService};

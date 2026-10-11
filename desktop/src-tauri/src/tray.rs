@@ -1,37 +1,26 @@
 use std::sync::Arc;
 
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager,
 };
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::os_shim::open_in_explorer;
 use crate::updater::UpdateService;
 
-/// 全局热键：唤出主窗口并切到「发送剪贴板」标签。
-///
-/// ## 为什么必须是**全局**热键而不是前端 keydown
-///
-/// 飞梭是托盘常驻应用，窗口大部分时间处于隐藏状态。
-/// 前端 `keydown` 只在窗口有焦点时触发 —— 也就是说用户想用剪贴板直发时
-/// 必须先点一下任务栏图标把窗口叫出来，那这个热键就毫无意义。
-/// `tauri-plugin-global-shortcut` 走 `RegisterHotKey`，窗口隐藏时照样触发。
-pub const HOTKEY_SEND_CLIPBOARD: &str = "CommandOrControl+Alt+V";
-
 pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    let show_item = MenuItem::with_id(app, "show", "打开飞梭主面板", true, None::<&str>)?;
-    let clipboard_item = MenuItem::with_id(
-        app,
-        "send_clipboard",
-        format!("发送剪贴板内容\t{}", HOTKEY_SEND_CLIPBOARD),
-        true,
-        None::<&str>,
-    )?;
-    let recv_folder_item = MenuItem::with_id(app, "open_recv", "打开接收文件夹", true, None::<&str>)?;
-    let log_folder_item = MenuItem::with_id(app, "open_log", "打开日志目录", true, None::<&str>)?;
-    let update_item = MenuItem::with_id(app, "check_update", "检查更新…", true, None::<&str>)?;
+    // 菜单项一律短名: "打开飞梭主面板"这类前缀冗余 —— 托盘图标已经表明这是飞梭。
+    // ❌ 曾经这里还有全局热键 Ctrl+Alt+V 的注册（HOTKEY_SEND_CLIPBOARD + setup_hotkey）,
+    //    且菜单项后面拼了原始字符串 "\tCommandOrControl+Alt+V" —— Windows 托盘菜单
+    //    不会把它翻译成 "Ctrl+Alt+V", 用户看到的就是这一串英文。热键已整体移除,
+    //    剪贴板直发只保留托盘菜单与发送页按钮两个入口。
+    let show_item = MenuItem::with_id(app, "show", "打开面板", true, None::<&str>)?;
+    let clipboard_item = MenuItem::with_id(app, "send_clipboard", "发送剪贴板", true, None::<&str>)?;
+    let recv_folder_item = MenuItem::with_id(app, "open_recv", "接收目录", true, None::<&str>)?;
+    let log_folder_item = MenuItem::with_id(app, "open_log", "日志目录", true, None::<&str>)?;
+    let update_item = MenuItem::with_id(app, "check_update", "检查更新", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出飞梭", true, None::<&str>)?;
 
     let menu = Menu::with_items(
@@ -42,7 +31,10 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             &recv_folder_item,
             &log_folder_item,
             &update_item,
-            &MenuItem::with_id(app, "sep", "", false, None::<&str>)?,
+            // ❌ 曾经是 `MenuItem::with_id(app, "sep", "", false, ...)` ——
+            //    一个空标题的禁用菜单项, 在 Windows 上渲染成一条**灰色空带**而不是分隔线。
+            //    必须用 PredefinedMenuItem::separator 才是真正的分隔线。
+            &PredefinedMenuItem::separator(app)?,
             &quit_item,
         ],
     )?;
@@ -63,7 +55,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             }
             "send_clipboard" => {
                 // 托盘常驻下窗口多半是隐藏的, 必须先唤出来并切到发送页,
-                // 否则热键触发了却什么也没发生 —— 用户只会认为热键失灵。
+                // 否则事件发出去了却什么也没发生 —— 用户只会认为菜单失灵。
                 show_main(app);
                 emit_open_clipboard(app);
             }
@@ -137,8 +129,6 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         })
         .build(app)?;
 
-    setup_hotkey(app)?;
-
     Ok(())
 }
 
@@ -155,49 +145,10 @@ pub(crate) fn show_main(app: &AppHandle) {
     }
 }
 
-/// 通知前端打开剪贴板预览（热键与托盘菜单共用）。
+/// 通知前端打开剪贴板直发（托盘菜单触发）。
 fn emit_open_clipboard(app: &AppHandle) {
     if let Err(e) = app.emit_to("main", "feisuo://open-clipboard", ()) {
-        // 前端还没加载完是常态（冷启动时热键可能先到）
+        // 前端还没加载完是常态（冷启动时点击菜单可能先于窗口就绪）
         warn!("发送剪贴板指令失败（前端可能尚未就绪）: {}", e);
     }
-}
-
-/// 注册全局热键。
-///
-/// 注册失败（热键被别的软件占用）**不阻止应用启动** ——
-/// 那只是一个可选入口，失败就退回到托盘菜单，不该让用户打不开飞梭。
-fn setup_hotkey(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
-
-    let shortcut = match HOTKEY_SEND_CLIPBOARD.parse::<Shortcut>() {
-        Ok(s) => s,
-        Err(e) => {
-            error!(
-                "热键 {} 解析失败, 已跳过注册: {}",
-                HOTKEY_SEND_CLIPBOARD, e
-            );
-            return Ok(());
-        }
-    };
-    if let Err(e) = app.global_shortcut().on_shortcut(
-        shortcut,
-        move |app, _sc, event| {
-            // Windows 上 on_shortcut 会在 Pressed 与 Released 各触发一次。
-            // 不判状态就会**每按一次执行两遍**（读两遍剪贴板、发两次文件）。
-            if event.state() != ShortcutState::Pressed {
-                return;
-            }
-            show_main(app);
-            emit_open_clipboard(app);
-        },
-    ) {
-        error!(
-            "注册全局热键 {} 失败（可能被其他软件占用）: {}；可改用托盘菜单",
-            HOTKEY_SEND_CLIPBOARD, e
-        );
-        return Ok(());
-    }
-    info!("全局热键已注册: {}", HOTKEY_SEND_CLIPBOARD);
-    Ok(())
 }

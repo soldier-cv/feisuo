@@ -11,7 +11,6 @@ export interface LocalDeviceInfo {
   max_log_size_mb: number;
   max_history_records: number;
   record_retention_days: number;
-  close_action: "ask" | "tray" | "exit";
   theme: "dark" | "light";
   device_count: number;
   trusted_count: number;
@@ -600,7 +599,6 @@ export class FeisuoBridge {
         max_history_records: 500,
         record_retention_days: 30,
         max_concurrent_transfers: 3,
-        close_action: "ask",
         theme: "dark",
         device_count: 1,
         trusted_count: 1,
@@ -1215,11 +1213,6 @@ export class FeisuoBridge {
     await invokeSafe<void>("hide_window");
   }
 
-  static async quitApp(): Promise<void> {
-    if (notInTauri()) return;
-    await invokeSafe<void>("quit_app");
-  }
-
   static async startWindowDragging(): Promise<void> {
     if (notInTauri()) return;
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
@@ -1309,7 +1302,6 @@ export class FeisuoBridge {
     max_log_size_mb?: number;
     max_history_records?: number;
     record_retention_days?: number;
-    close_action?: "ask" | "tray" | "exit";
     theme?: "dark" | "light";
     receive_dir?: string;
     auto_check_update?: boolean;
@@ -1391,7 +1383,7 @@ export class FeisuoBridge {
   }
 
   /**
-   * 全局热键 / 托盘菜单请求打开剪贴板直发（§6.4）。
+   * 托盘菜单请求打开剪贴板直发（§6.4）。
    *
    * 后端在触发前已唤出窗口 —— 前端只管切到发送页并读剪贴板。
    * 载荷为空：无参数事件。

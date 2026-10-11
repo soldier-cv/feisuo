@@ -14,10 +14,6 @@ tauri = { version = "2.0", features = ["tray-icon", "image-png", "image-ico", "c
 tauri-plugin-shell = "2.0"
 tauri-plugin-autostart = "2.0"
 tauri-plugin-dialog = "2.0"
-# 全局热键 Ctrl+Alt+V（§6.4 剪贴板直发）。
-# 不装这个插件就只能靠前端 keydown —— 那样**窗口隐藏时热键完全失效**,
-# 而托盘常驻恰恰意味着窗口大部分时间是隐藏的, 等于功能不存在。
-tauri-plugin-global-shortcut = "2.0"
 feisuo-core = { path = "../../core" }
 tokio = { version = "1.43", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }

@@ -133,7 +133,6 @@ impl Node {
             max_concurrent_transfers: 3,
             transfer_bind: "127.0.0.1".into(),
             discovery_bind: discovery_bind.into(),
-            close_action: "ask".into(),
             theme: "dark".into(),
             auto_check_update: false,
             allowed_peer_subnets: Vec::new(),
@@ -2454,7 +2453,6 @@ fn test_config_roundtrip_and_defaults() {
         max_concurrent_transfers: 3,
         discovery_bind: "0.0.0.0".into(),
         transfer_bind: "0.0.0.0".into(),
-        close_action: "tray".into(),
         theme: "light".into(),
         auto_check_update: true,
         allowed_peer_subnets: Vec::new(),
@@ -2463,7 +2461,6 @@ fn test_config_roundtrip_and_defaults() {
     };
     let text = serde_json::to_string(&cfg).unwrap();
     let back: AppConfig = serde_json::from_str(&text).unwrap();
-    assert_eq!(back.close_action, "tray");
     assert_eq!(back.theme, "light");
     assert_eq!(back.log_level, "DEBUG");
     assert!(back.auto_check_update);
@@ -2473,7 +2470,6 @@ fn test_config_roundtrip_and_defaults() {
     let partial = r#"{"device_name":"old","transfer_port":42100,"discovery_port":42101,
         "auto_receive":true,"autostart":true,"receive_dir":"C:/tmp/feisuo"}"#;
     let parsed: AppConfig = serde_json::from_str(partial).unwrap();
-    assert_eq!(parsed.close_action, "ask", "缺省应为每次询问");
     assert_eq!(parsed.theme, "dark", "缺省主题必须是合法值而非空串");
     assert_eq!(parsed.log_level, "INFO");
     assert_eq!(parsed.max_history_records, 500);

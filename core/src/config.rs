@@ -6,16 +6,10 @@ pub const DEFAULT_TRANSFER_PORT: u16 = 42100;
 pub const DEFAULT_DISCOVERY_PORT: u16 = 42101;
 pub const DISCOVERY_MULTICAST_ADDR: &str = "239.255.42.100";
 
-/// 关闭主窗口时的默认策略
-pub const CLOSE_ACTION_ASK: &str = "ask";
-pub const CLOSE_ACTION_TRAY: &str = "tray";
-pub const CLOSE_ACTION_EXIT: &str = "exit";
-
 fn default_log_level() -> String { "INFO".to_string() }
 fn default_max_log_size_mb() -> u32 { 5 }
 fn default_max_records() -> u32 { 500 }
 fn default_retention_days() -> u32 { 30 }
-fn default_close_action() -> String { CLOSE_ACTION_ASK.to_string() }
 fn default_theme() -> String { "dark".to_string() }
 fn default_discovery_bind() -> String { "0.0.0.0".to_string() }
 fn default_transfer_bind() -> String { "0.0.0.0".to_string() }
@@ -91,9 +85,6 @@ pub struct AppConfig {
     /// 单机测试时可以改绑到 127.0.0.1 回环地址, 避免触发系统防火墙弹窗。
     #[serde(default = "default_transfer_bind")]
     pub transfer_bind: String,
-    /// ask = 每次询问(最小化到托盘 / 退出), tray = 直接最小化, exit = 直接退出
-    #[serde(default = "default_close_action")]
-    pub close_action: String,
     /// 界面主题: dark | light
     #[serde(default = "default_theme")]
     pub theme: String,
@@ -154,7 +145,6 @@ impl Default for AppConfig {
             record_retention_days: default_retention_days(),
             discovery_bind: default_discovery_bind(),
             transfer_bind: default_transfer_bind(),
-            close_action: default_close_action(),
             theme: "dark".to_string(),
             auto_check_update: default_auto_check_update(),
             max_concurrent_transfers: default_max_concurrent_transfers(),
@@ -229,12 +219,6 @@ impl AppConfig {
                 match serde_json::from_str::<AppConfig>(&content) {
                     Ok(mut cfg) => {
                         // 枚举字段越界时归位, 避免脏数据把 UI 卡死
-                        if !matches!(
-                            cfg.close_action.as_str(),
-                            CLOSE_ACTION_ASK | CLOSE_ACTION_TRAY | CLOSE_ACTION_EXIT
-                        ) {
-                            cfg.close_action = default_close_action();
-                        }
                         if !matches!(cfg.theme.as_str(), "dark" | "light") {
                             cfg.theme = default_theme();
                         }
