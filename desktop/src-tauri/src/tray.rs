@@ -79,10 +79,10 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "check_update" => {
-                // 托盘常驻下窗口多半是隐藏的, 必须先唤出来:
-                // 否则检查结果(有新版 / 已是最新 / 检查失败)全都只发到
-                // 一个看不见的窗口里, 用户点了菜单却毫无反馈。
+                // 托盘常驻下窗口多半是隐藏的, 必须先唤出来并切到设置页高亮更新区:
+                // 否则检查结果(有新版 / 已是最新 / 检查失败)全都在看不见的页面, 用户体验无反馈。
                 show_main(app);
+                let _ = app.emit("feisuo://open-settings-update", ());
                 let handle = app.clone();
                 let Some(updater) = app.try_state::<Arc<UpdateService>>() else {
                     warn!("更新服务尚未就绪, 忽略检查更新请求");

@@ -140,9 +140,9 @@ fn is_valid_ipv6_cidr(raw: &str) -> bool {
 
 /// 解析 `a.b.c.d` 或 `a.b.c.d/len`，返回 `(网络地址, 前缀长度)`。
 ///
-/// 无 `/` 时按 `/24` —— 与 IPv4 的直觉一致（一段是网段），
-/// 而 `0.0.0.0/0` 可以显式写出来表示"全网"（虽然那等于不设）。
-fn parse_cidr(raw: &str) -> Option<(u32, u8)> {
+/// 无 `/` 时按精确单 IP (`/32`) 处理。若要指定子网，需显式携带前缀（如 `192.168.31.0/24`）。
+/// `0.0.0.0/0` 表示全网段（即不设限制）。
+pub fn parse_cidr(raw: &str) -> Option<(u32, u8)> {
     let t = raw.trim();
     if t.is_empty() {
         return None;
@@ -155,10 +155,41 @@ fn parse_cidr(raw: &str) -> Option<(u32, u8)> {
             }
             (a.trim(), bits)
         }
-        None => (t, 24u8),
+        None => (t, 32u8),
     };
     let ip: std::net::Ipv4Addr = addr_part.parse().ok()?;
     Some((u32::from(ip), bits))
+}
+
+/// 判定两个 IPv4 CIDR 网段是否有交集。
+pub fn cidrs_overlap(net1: u32, bits1: u8, net2: u32, bits2: u8) -> bool {
+    let min_bits = bits1.min(bits2);
+    if min_bits == 0 {
+        return true;
+    }
+    let mask = u32::MAX << (32 - min_bits as u32);
+    (net1 & mask) == (net2 & mask)
+}
+
+/// 网卡子网是否与配置的白名单网段有交集。
+/// 如果白名单为空，则默认全部有交集（无限制）。
+pub fn iface_overlaps_allowed_subnets(
+    iface_ip: std::net::Ipv4Addr,
+    iface_prefix: u8,
+    allowed_subnets: &[String],
+) -> bool {
+    if allowed_subnets.is_empty() {
+        return true;
+    }
+    let iface_net = u32::from(iface_ip);
+    for raw in allowed_subnets {
+        if let Some((rule_net, rule_bits)) = parse_cidr(raw) {
+            if cidrs_overlap(iface_net, iface_prefix, rule_net, rule_bits) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// `ip` 是否落在 `net/bits` 内。
@@ -434,14 +465,44 @@ mod tests {
         }
     }
 
-    /// 无 `/` 时按 `/24` 处理（IPv4 的直觉：一段是网段）。
+    /// 无 `/` 时按精确单 IP (/32) 处理，不再扩大为 /24。
     #[test]
-    fn subnet_verdict_defaults_to_slash_24() {
-        let allowed = list(&["10.1.2.0"]);
+    fn subnet_verdict_defaults_to_exact_ip() {
+        let allowed = list(&["10.1.2.77"]);
         assert_eq!(subnet_verdict(&allowed, "10.1.2.77"), SubnetVerdict::Allowed);
+        assert!(matches!(
+            subnet_verdict(&allowed, "10.1.2.78"),
+            SubnetVerdict::Denied(_)
+        ));
         assert!(matches!(
             subnet_verdict(&allowed, "10.1.3.1"),
             SubnetVerdict::Denied(_)
+        ));
+    }
+
+    #[test]
+    fn iface_overlap_works() {
+        let allowed = list(&["192.168.31.0/24"]);
+        assert!(iface_overlaps_allowed_subnets(
+            "192.168.31.108".parse().unwrap(),
+            24,
+            &allowed
+        ));
+        assert!(!iface_overlaps_allowed_subnets(
+            "100.64.0.110".parse().unwrap(),
+            24,
+            &allowed
+        ));
+        let allowed_single = list(&["192.168.31.50"]);
+        assert!(iface_overlaps_allowed_subnets(
+            "192.168.31.108".parse().unwrap(),
+            24,
+            &allowed_single
+        ));
+        assert!(!iface_overlaps_allowed_subnets(
+            "10.0.0.1".parse().unwrap(),
+            24,
+            &allowed_single
         ));
     }
 

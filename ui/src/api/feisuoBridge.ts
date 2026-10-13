@@ -1394,6 +1394,22 @@ export class FeisuoBridge {
     return await listen("feisuo://open-clipboard", () => cb());
   }
 
+  /**
+   * 托盘菜单请求检查更新：通知前端切换到设置页并呈现更新区域。
+   */
+  static async onOpenSettingsUpdate(cb: () => void): Promise<() => void> {
+    if (notInTauri()) return () => {};
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen("feisuo://open-settings-update", () => cb());
+  }
+
+  /** 监听更新提示/通知横幅 (失败或提醒) */
+  static async onUpdateNotice(cb: (msg: string) => void): Promise<() => void> {
+    if (notInTauri()) return () => {};
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<{ message: string }>("feisuo://update-notice", (e) => cb(e.payload?.message || ""));
+  }
+
   // ------------------------------------------------------------------ 事件订阅
   static async onTransferProgress(cb: (p: TransferProgress) => void): Promise<() => void> {
     if (notInTauri()) return () => {};

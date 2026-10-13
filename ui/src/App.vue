@@ -1597,7 +1597,7 @@
               <p v-if="allowedPeerSubnets.length === 0" class="subnet-warn-hint">
                 <i class="ph ph-shield-warning"></i>
                 <span>
-                  <strong>当前未设置</strong> —— 同一网络内任何设备都可发起配对，建议填 <code class="path-mono">192.168.31.0/24</code> 之类。
+                  <strong>当前未设置</strong> —— 同一网络内任何设备都可发起互联，可填精确 IP（如 <code class="path-mono">192.168.31.50</code>）或 CIDR 网段（如 <code class="path-mono">192.168.31.0/24</code>）。
                 </span>
               </p>
               <p v-for="(cidr, i) in badSubnets" :key="'bad' + i" class="subnet-warn-hint is-error">
@@ -2687,6 +2687,7 @@ const updateStatus = ref<UpdateStatus>({
   busy: false,
   isInstalled: false,
 });
+const manualCheckingUpdate = ref(false);
 
 /**
  * 更新状态文案。
@@ -3533,7 +3534,30 @@ onMounted(async () => {
     // 推到界面上的通路。**不能**在这里唤窗: 用户没要求看更新,
     // 为此把托盘常驻程序的主界面弹出来是打扰。
     await FeisuoBridge.onUpdateStatus((s) => {
+      const prevPhase = updateStatus.value?.phase;
       updateStatus.value = s;
+      if (prevPhase !== s.phase) {
+        if (s.phase === "ready") {
+          showToast(`新版本 ${s.tagName || ""} 已下载就绪，可前往系统设置立即更新！`);
+        } else if (s.phase === "uptodate" && manualCheckingUpdate.value) {
+          showToast(`当前已是最新版本 v${s.currentVersion || localInfo.app_version}`);
+          manualCheckingUpdate.value = false;
+        } else if (s.phase === "downloading" && manualCheckingUpdate.value) {
+          showToast(`发现新版本 ${s.tagName || ""}，正在后台下载…`);
+        } else if (s.phase === "failed" && manualCheckingUpdate.value) {
+          showToast(s.message || "检查更新失败", true);
+          manualCheckingUpdate.value = false;
+        }
+      }
+    }),
+    // 托盘菜单触发「检查更新」：唤窗后切到系统设置页，并给予用户正在检查的明确反馈
+    await FeisuoBridge.onOpenSettingsUpdate(() => {
+      currentTab.value = "settings";
+      manualCheckingUpdate.value = true;
+      showToast("正在检查更新…");
+    }),
+    await FeisuoBridge.onUpdateNotice((msg) => {
+      if (msg) showToast(msg, true);
     }),
     // 托盘菜单「发送剪贴板」请求直发。后端在触发前已唤出窗口 ——
     // 前端只管切到发送页并读剪贴板。
@@ -6235,16 +6259,22 @@ async function loadUpdateStatus() {
 async function checkForUpdate() {
   try {
     // 手动点击: 失败要让用户看见, 不能安静吞掉
+    manualCheckingUpdate.value = true;
+    showToast("正在检查更新…");
     updateStatus.value = await FeisuoBridge.checkForUpdate(true);
     if (updateStatus.value.phase === "uptodate") {
-      showToast("已是最新版本");
+      showToast(`当前已是最新版本 v${updateStatus.value.currentVersion || localInfo.app_version}`);
     } else if (updateStatus.value.phase === "ready") {
       showToast("新版本已下载，可点击「立即更新」");
+    } else if (updateStatus.value.phase === "downloading") {
+      showToast(`发现新版本 ${updateStatus.value.tagName || ""}，正在后台下载…`);
     } else if (updateStatus.value.phase === "failed") {
       showToast(FeisuoBridge.describeError(updateStatus.value, "检查更新失败"), true);
     }
   } catch (e) {
     showToast(FeisuoBridge.describeError(e, "检查更新失败"), true);
+  } finally {
+    manualCheckingUpdate.value = false;
   }
 }
 

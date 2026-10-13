@@ -145,6 +145,7 @@ fn note_plan_if_changed(state: &Mutex<Option<String>>, key: String) -> bool {
 /// 返回 `(保留, 跳过)`。保留项是 `(网卡名, 地址/前缀, 广播地址)`。
 fn plan_interfaces(
     ifaces: &[if_addrs::Interface],
+    allowed_subnets: &[String],
 ) -> (
     Vec<(String, String, Ipv4Addr)>,
     Vec<(String, String)>,
@@ -189,6 +190,17 @@ fn plan_interfaces(
         // 未启用的网卡发不出去，也不该占目标数。
         if !iface.is_oper_up() {
             skip.push((label, "网卡未启用".into()));
+            continue;
+        }
+        // 若配置了来源网段白名单：该网卡的子网必须与白名单有交集，否则跳过向该网卡广播，收窄广播范围
+        if !allowed_subnets.is_empty()
+            && !crate::security::iface_overlaps_allowed_subnets(
+                v4.ip,
+                v4.prefixlen,
+                allowed_subnets,
+            )
+        {
+            skip.push((label, "不在允许的来源网段内".into()));
             continue;
         }
         // 广播地址：优先用操作系统给的。
@@ -669,18 +681,25 @@ impl DiscoveryService {
                     app_version: env!("CARGO_PKG_VERSION").to_string(),
                 };
                 packet.signature = b_identity.sign(packet.signing_payload().as_bytes());
+                let allowed_subnets = cfg.allowed_peer_subnets.clone();
                 drop(cfg);
 
                 if let Ok(bytes) = serde_json::to_vec(&packet) {
                     // 已知端点优先，覆盖网排前面（`all_endpoints` 已排序）。
-                    //
-                    // 旧实现只取 `trusted_devices.last_ip` **一个**地址。
-                    // 一台设备同时有 ZeroTier 与物理网卡时，存下的是哪个
-                    // 取决于最后一次是谁先回包 —— DHCP 一换就彻底失联，
-                    // 而用户既没重启也没改配置，表现为"设备明明开着却搜不到"。
+                    // 若配置了来源网段白名单，只探测白名单范围内的端点。
                     let known_ips: Vec<String> = match b_trust_store.all_endpoints() {
                         Ok(eps) => eps
                             .into_iter()
+                            .filter(|e| {
+                                if allowed_subnets.is_empty() {
+                                    true
+                                } else {
+                                    matches!(
+                                        crate::security::subnet_verdict(&allowed_subnets, &e.ip),
+                                        crate::security::SubnetVerdict::Allowed
+                                    )
+                                }
+                            })
                             // 端口为 0 = 老库只有裸 IP、端口未知。照样探：
                             // 信标是 UDP，端口错了收不到，但**不会**造成副作用；
                             // 而漏探则可能让设备彻底失联。
@@ -698,14 +717,30 @@ impl DiscoveryService {
                                 .list_devices()
                                 .map(|ds| {
                                     ds.into_iter()
-                                        .filter(|d| !d.last_ip.trim().is_empty())
+                                        .filter(|d| {
+                                            if d.last_ip.trim().is_empty() {
+                                                return false;
+                                            }
+                                            if allowed_subnets.is_empty() {
+                                                true
+                                            } else {
+                                                matches!(
+                                                    crate::security::subnet_verdict(&allowed_subnets, &d.last_ip),
+                                                    crate::security::SubnetVerdict::Allowed
+                                                )
+                                            }
+                                        })
                                         .map(|d| d.last_ip)
                                         .collect()
                                 })
                                 .unwrap_or_default()
                         }
                     };
-                    let plan = Self::compute_broadcast_targets(reply_port, known_ips.clone());
+                    let plan = Self::compute_broadcast_targets(
+                        reply_port,
+                        known_ips.clone(),
+                        &allowed_subnets,
+                    );
                     // 目标清单**只在首次或变化时**打日志：DHCP 续租会换 IP，
                     // 而变化正是"为什么突然搜不到设备"最需要的那条线索。
                     // 每 3 秒打一遍会把日志淹掉。
@@ -939,6 +974,24 @@ impl DiscoveryService {
                 }
 
                 let ip = peer_addr.ip().to_string();
+
+                // ---- 来源网段白名单检查（若配置）：非白名单设备直接丢弃，不联通 ----
+                {
+                    let cfg = l_config.read().await;
+                    if !cfg.allowed_peer_subnets.is_empty() {
+                        match crate::security::subnet_verdict(&cfg.allowed_peer_subnets, &ip) {
+                            crate::security::SubnetVerdict::Allowed => {}
+                            _ => {
+                                tracing::trace!(
+                                    "信标来源 {} 不在允许的来源网段内，已丢弃",
+                                    ip
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                }
+
                 let now = chrono::Utc::now().timestamp();
 
                 // ---- 签名校验 ----
@@ -1229,7 +1282,11 @@ impl DiscoveryService {
         }
     }
 
-    fn compute_broadcast_targets(disc_port: u16, known_ips: Vec<String>) -> BroadcastPlan {
+    fn compute_broadcast_targets(
+        disc_port: u16,
+        known_ips: Vec<String>,
+        allowed_subnets: &[String],
+    ) -> BroadcastPlan {
         let mut plan = BroadcastPlan::default();
         let mut targets = std::collections::HashSet::new();
 
@@ -1255,43 +1312,19 @@ impl DiscoveryService {
             targets.insert(addr);
         }
 
-        // 2. 受限全局广播 (仅在组播被路由器拦截时作为兜底)
-        //
-        //    ⚠️ 它在**协议栈层面**就不可收窄：受限广播地址没有"指定网卡"
-        //    的写法，操作系统会**按每张已启用网卡各发一份**。
-        //    所以下面"每网卡一个定向广播"已经把可控的部分压到最小，
-        //    而这一条的实际线上包数 = 已启用网卡数（不是 1）。
-        //    留着它是因为它覆盖了"定向广播算错掩码"这种兜底场景。
-        if let Ok(addr) = format!("255.255.255.255:{}", disc_port).parse() {
-            targets.insert(addr);
+        // 2. 受限全局广播 (仅在未限制来源网段且组播被路由器拦截时作为兜底)
+        //    若已显式配置了来源网段，则不再发送全局受限广播，避免被操作系统
+        //    泛洪到未在白名单内的虚拟网卡 (如 ZeroTier / WSL / VPN) 上。
+        if allowed_subnets.is_empty() {
+            if let Ok(addr) = format!("255.255.255.255:{}", disc_port).parse() {
+                targets.insert(addr);
+            }
         }
 
         // 3. 各网卡的**定向广播**。
-        //
-        //    ## 为什么是"问操作系统要", 而不是自己按 /16 /20 /24 猜三个
-        //
-        //    早先的实现对每张网卡算 3 个掩码的广播地址（[16,20,24]），
-        //    因为 `local_ip_address` 只给 IP、不给掩码，而发 /24 在
-        //    /16~/23 掩码的局域网里确实送不出去。
-        //
-        //    但"猜三个"的代价在真实机器上被严重低估了。实测一台
-        //    装了 ZeroTier + Hyper-V/WSL + 蓝牙 + 未插线网卡的开发机：
-        //      · 非回环网卡 7 张  =>  21 个定向广播 / 3 秒 = 7 个/秒
-        //      · 其中 **12 个打在 169.254.x.x**（链路本地，见下）
-        //      · 真正可能送到对端的只有 3 个
-        //    而 `/16` 定向广播一次覆盖 **65534 个地址** —— 交换机要泛洪它、
-        //    每台主机都要回应 65534 次 ARP、路由器还可能转发它，
-        //    是行业里公认的**广播风暴**诱因。家用交换机不转发所以没出事，
-        //    换到公司网段就难说了。
-        //
-        //    `if-addrs` 直接给出操作系统算好的 `broadcast`，还有 `oper_status`：
-        //    于是从"猜 3 个"变成"每网卡**恰好 1 个正确的**"，
-        //    **覆盖范围完全不变**（该到哪还是到哪），21 个降到 3 个。
-        //
-        //    这不是"收窄"，是"算对" —— 所以它不需要等任何实测验收。
         match if_addrs::get_if_addrs() {
             Ok(ifaces) => {
-                let (keep, skip, derived) = plan_interfaces(&ifaces);
+                let (keep, skip, derived) = plan_interfaces(&ifaces, allowed_subnets);
                 for (_, _, bcast) in &keep {
                     targets.insert(SocketAddr::new(IpAddr::V4(*bcast), disc_port));
                 }
@@ -1547,7 +1580,20 @@ mod tests {
                 return;
             }
         };
-        let (keep, skip, derived) = plan_interfaces(&ifaces);
+        let (keep, skip, derived) = plan_interfaces(&ifaces, &[]);
+
+        // 白名单测试：传入测试网段，所有不在白名单内的网卡均应被跳过
+        let test_subnet = vec!["198.51.100.0/24".to_string()];
+        let (keep_filtered, skip_filtered, _) = plan_interfaces(&ifaces, &test_subnet);
+        assert_eq!(
+            keep_filtered.len(),
+            0,
+            "虚拟测试网段 198.51.100.0/24 不应匹配任何真实网卡"
+        );
+        assert!(
+            !skip_filtered.is_empty(),
+            "至少应有一张启用网卡因不在允许网段内而被跳过"
+        );
 
         eprintln!("—— 本机实际发送计划 ——");
         eprintln!("网卡总数（含回环/IPv6）: {}", ifaces.len());

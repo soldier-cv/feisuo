@@ -1516,7 +1516,7 @@ pub async fn update_app_config(
             }
             if !feisuo_core::security::is_valid_subnet_entry(t) {
                 return Err(format!(
-                    "网段 {:?} 无法识别。格式如 192.168.31.0/24（IPv4 网段；\
+                    "来源 {:?} 无法识别。格式如 192.168.31.50（精确 IP）或 192.168.31.0/24（IPv4 网段；\
                      飞梭只监听 IPv4，IPv6 暂不支持）",
                     t
                 ));
