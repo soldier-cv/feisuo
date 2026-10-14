@@ -1088,8 +1088,16 @@ impl DiscoveryService {
                                 }
                                 continue;
                             }
-                            // 只有验签通过的受信设备才允许更新 last_ip / last_seen_at
-                            let _ = l_trust_store.update_last_ip(&beacon.device_id, &ip);
+                            // 只有验签通过的受信设备才允许更新 last_ip / last_seen_at / device_name
+                            if !beacon.device_name.trim().is_empty() {
+                                let _ = l_trust_store.update_device_meta(
+                                    &beacon.device_id,
+                                    &beacon.device_name,
+                                    &ip,
+                                );
+                            } else {
+                                let _ = l_trust_store.update_last_ip(&beacon.device_id, &ip);
+                            }
                             // 记录"最后一次在线"（§3.6）。
                             // 这是离线灰显能说清"上次在线 X 前"的数据来源,
                             // **必须落库** —— 否则重启本机后全部变成未知。

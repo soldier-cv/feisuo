@@ -116,8 +116,7 @@
             </div>
             <div class="device-text-col">
               <div class="device-line1">
-                <span class="device-title">{{ dev.device_name }}</span>
-                <span v-if="dev.is_self" class="self-tag">本机</span>
+                <span class="device-title">{{ dev.device_name || dev.last_ip || '未知设备' }}</span>
               </div>
               <div class="device-line2">
                 <template v-if="dev.presence === 'online'">{{ dev.ip || dev.last_ip }} · 在线</template>
@@ -127,11 +126,11 @@
             </div>
 
             <div class="device-action-badge">
-              <!-- 信任等级（§2.4）：点击在「永久信任 / 每次匹配码」之间切换 -->
+              <!-- 信任等级（§2.4）：点击在「永久信任 / 每次验证」之间切换 -->
               <button
                 v-if="dev.trust_level === 'permanent'"
                 class="trust-badge clickable"
-                title="永久信任：点击改为「每次匹配码」"
+                title="永久信任：点击改为「每次验证」"
                 @click.stop="toggleTrustLevel(dev.device_id)"
               >
                 <i class="ph-bold ph-shield-check"></i> 永久信任
@@ -141,8 +140,8 @@
                 class="trust-badge session clickable"
                 :title="
                   activeGrants[dev.device_id]?.length
-                    ? `每次匹配码。${activeGrants[dev.device_id].map((g) => g.scope_label).join('、')}已免重复确认至 ${humanizeUntil(activeGrants[dev.device_id][0].expires_at)}。点击改为「永久信任」`
-                    : '每次匹配码：每次操作都需出示授权码。点击改为「永久信任」'
+                    ? `每次验证。${activeGrants[dev.device_id].map((g) => g.scope_label).join('、')}已免重复确认至 ${humanizeUntil(activeGrants[dev.device_id][0].expires_at)}。点击改为「永久信任」`
+                    : '每次验证：对方每次操作本机都需授权码。点击改为「永久信任」'
                 "
                 @click.stop="toggleTrustLevel(dev.device_id)"
               >
@@ -220,7 +219,7 @@
               <i :class="getOsIcon(dev.os_type)"></i>
             </div>
             <div class="device-text-col">
-              <div class="device-line1"><span class="device-title">{{ dev.device_name }}</span></div>
+              <div class="device-line1"><span class="device-title">{{ dev.device_name || dev.ip || '未知设备' }}</span></div>
               <div class="device-line2">{{ dev.ip }} · 在线</div>
             </div>
             <div class="device-action-badge">
@@ -304,7 +303,7 @@
               class="hidden-device-row"
             >
               <div class="device-text-col">
-                <div class="device-line1"><span class="device-title">{{ dev.device_name }}</span></div>
+                <div class="device-line1"><span class="device-title">{{ dev.device_name || dev.last_ip || '未知设备' }}</span></div>
                 <div class="device-line2">
                   {{ dev.presence === 'online' ? '在线' : '离线 · 上次在线 ' + dev.last_seen_human }}
                 </div>
@@ -386,7 +385,7 @@
             <span
               v-else-if="store.selectedDevice?.trust_level === 'session'"
               class="status-chip session"
-              title="每次匹配码：对方每次操作都需出示授权码"
+              title="每次验证：对方每次操作本机都需授权码"
               >每次验证</span
             >
             <button
@@ -431,6 +430,14 @@
               @click="openScopeEditor"
             >
               <i class="ph ph-sliders-horizontal"></i> 访问范围
+            </button>
+            <button
+              v-if="store.selectedDevice && (store.selectedDevice.is_paired || store.selectedDevice.trust_level === 'permanent' || store.selectedDevice.trust_level === 'session')"
+              class="unpair-open-btn"
+              title="取消与该设备的认证关系；取消后对方无法再访问本机，离线设备将从列表中彻底清除"
+              @click="confirmUnpair(store.selectedDevice)"
+            >
+              <i class="ph ph-shield-slash"></i> 取消认证
             </button>
           </div>
 
@@ -606,6 +613,69 @@
                   @click="saveScope"
                 >
                   {{ scopeSaving ? "保存中…" : "保存" }}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 取消认证确认弹层 -->
+          <div
+            v-if="unpairConfirmDev"
+            class="modal-mask"
+            @click.self="unpairConfirmDev = null"
+          >
+            <div
+              v-modal-focus
+              class="unpair-modal-card"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="unpair-modal-title"
+              tabindex="-1"
+            >
+              <div class="unpair-modal-header">
+                <div class="unpair-title-row">
+                  <i class="ph-bold ph-shield-warning"></i>
+                  <h3 id="unpair-modal-title">取消认证</h3>
+                </div>
+                <button class="scope-close" @click="unpairConfirmDev = null" title="关闭">
+                  <i class="ph ph-x"></i>
+                </button>
+              </div>
+
+              <div class="unpair-modal-body">
+                <p class="unpair-headline">
+                  确定要取消与「<strong>{{ unpairConfirmDev.device_name || '该设备' }}</strong>」的认证关系吗？
+                </p>
+                <div class="unpair-impact-box">
+                  <div class="unpair-impact-item">
+                    <i class="ph-bold ph-prohibit"></i>
+                    <span>双方将解除受信关系，对方无法再向本机静默推文件或浏览本机</span>
+                  </div>
+                  <div class="unpair-impact-item">
+                    <i class="ph-bold ph-broadcast"></i>
+                    <span>若对方当前在线，本机将向对方同步发送解除认证通知</span>
+                  </div>
+                  <div class="unpair-impact-item">
+                    <i class="ph-bold ph-trash-simple"></i>
+                    <span>若对方当前已离线，该设备将立即从列表中彻底清除</span>
+                  </div>
+                  <div class="unpair-impact-item">
+                    <i class="ph-bold ph-key"></i>
+                    <span>后续若需再次互传，双方需重新输入 6 位配对码</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="unpair-modal-footer">
+                <button class="btn-fluent-secondary" @click="unpairConfirmDev = null">放弃</button>
+                <button
+                  class="btn-danger-solid"
+                  :disabled="unpairingInProgress"
+                  @click="executeUnpair"
+                >
+                  <i v-if="unpairingInProgress" class="ph-bold ph-spinner animate-spin"></i>
+                  <i v-else class="ph-bold ph-shield-slash"></i>
+                  确认取消认证
                 </button>
               </div>
             </div>
@@ -1463,7 +1533,7 @@
                   <strong class="dev-name">{{ dev.device_name }}</strong>
                   <span class="dev-ip font-mono">{{ dev.last_ip }} · {{ dev.device_id }}</span>
                 </div>
-                <button class="btn-unblock" @click="removeTrusted(dev.device_id)">解除信任</button>
+                <button class="btn-unblock" @click="confirmUnpair(dev)">取消认证</button>
               </div>
             </div>
 
@@ -4261,6 +4331,29 @@ async function loadTrustedDevices() {
  * 按 reason_code 分支而不是 `includes("...")`：文案一改就静默失效，
  * 而这正是本轮在 core 里刚修掉的反模式（`DenyCode` / `requires_grant_code`）。
  */
+const unpairConfirmDev = ref<DeviceRosterEntry | TrustedDevice | null>(null);
+const unpairingInProgress = ref(false);
+
+function confirmUnpair(dev: DeviceRosterEntry | TrustedDevice | null | undefined) {
+  if (!dev) return;
+  unpairConfirmDev.value = dev;
+}
+
+async function executeUnpair() {
+  const dev = unpairConfirmDev.value;
+  if (!dev) return;
+  unpairingInProgress.value = true;
+  try {
+    await removeTrusted(dev.device_id);
+    unpairConfirmDev.value = null;
+    if (store.selectedDeviceId === dev.device_id) {
+      store.selectedDeviceId = store.myDevices[0]?.device_id || "";
+    }
+  } finally {
+    unpairingInProgress.value = false;
+  }
+}
+
 async function removeTrusted(deviceId: string) {
   try {
     const r = await FeisuoBridge.unpairDevice(deviceId);
@@ -4269,15 +4362,15 @@ async function removeTrusted(deviceId: string) {
     switch (r.reason_code) {
       case "applied":
       case "already_unpaired":
-        showToast("已解除配对：双方都不再信任，需重新配对才能再传文件");
+        showToast("已取消认证：双方解除信任关系，如需互传需重新配对");
         return;
       case "epoch_mismatch":
         // 对方已经和我们重新绑定了 —— 这不是失败，别让用户反复重试。
-        showToast("本机已解除配对；对方已重新绑定，这条请求对它无效（属正常）");
+        showToast("本机已取消认证；对方已重新绑定，这条请求对它无效（属正常）");
         return;
       case "no_shared_epoch":
         // 这一条最需要说清楚：光点没用，得让对方升级。
-        showToast("本机已解除配对，但对方版本过旧无法同步解除 —— 请升级对方后再解除一次", true);
+        showToast("本机已取消认证，但对方版本过旧无法同步通知 —— 请升级对方后再操作一次", true);
         return;
       default:
         // 本机一定已经降级了（core 保证），所以**不能**报"失败" ——
@@ -4288,13 +4381,13 @@ async function removeTrusted(deviceId: string) {
         showToast(
           r.local_applied
             ? r.user_message?.trim() ||
-              "本机已解除配对，但未能同步通知对方；对方仍可能给你推送文件"
-            : "本机未做任何改动（该设备可能已解除）",
+              "本机已取消认证，但未能同步通知对方；对方仍可能向本机推送"
+            : "本机未做任何改动（该设备可能已取消认证）",
           true,
         );
     }
   } catch (e) {
-    showToast(FeisuoBridge.describeError(e, "解除配对失败"), true);
+    showToast(FeisuoBridge.describeError(e, "取消认证失败"), true);
   }
 }
 
@@ -6487,9 +6580,8 @@ async function toggleTrustLevel(deviceId: string) {
     await store.refreshDevices();
     showToast(
       next === "permanent"
-        ? `已将 ${dev.device_name} 设为永久信任`
-        : `已设为每次匹配码：${dev.device_name} 每次发文件时，` +
-          `你都要输入它屏幕上显示的 6 位码`
+        ? `已将「${dev.device_name}」设为永久信任：对方发送文件时无需确认，直接接收`
+        : `已将「${dev.device_name}」设为每次验证：对方访问或发送文件时需输入本机授权码`
     );
   } catch (e) {
     showToast(FeisuoBridge.describeError(e, "修改信任等级失败"), true);
@@ -7766,6 +7858,104 @@ function getFileIcon(name: string) {
   border-color: var(--warn-border);
 }
 .scope-open-btn.is-warn:hover { background: var(--warn-soft); }
+
+.unpair-open-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  font-size: 11.5px;
+  font-family: inherit;
+  color: var(--text-tertiary);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.unpair-open-btn:hover {
+  color: var(--danger-text);
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+
+.unpair-modal-card {
+  width: min(460px, calc(100vw - 32px));
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.unpair-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.unpair-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.unpair-title-row h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.unpair-title-row i {
+  font-size: 18px;
+  color: var(--warn-text);
+}
+.unpair-modal-body {
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.unpair-headline {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+.unpair-impact-box {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.unpair-impact-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+.unpair-impact-item i {
+  font-size: 15px;
+  color: var(--text-tertiary);
+  margin-top: 1px;
+  flex-shrink: 0;
+}
+.unpair-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-hover-soft);
+}
 
 .modal-mask {
   position: fixed;

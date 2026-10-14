@@ -105,10 +105,9 @@ fn humanize_since(ts: i64, now: i64) -> String {
 ///
 /// 排序规则（让"我的设备"自然浮到上面）：
 /// 1. 可见性（隐藏的排到最后，由 UI 放进抽屉）
-/// 2. 本机在前
-/// 3. 已配对在前
-/// 4. 在线在前
-/// 5. 名称
+/// 2. 已配对在前
+/// 3. 在线在前
+/// 4. 名称
 pub fn build_roster(
     online: &[DiscoveredDevice],
     trust_devices: &[TrustedDevice],
@@ -119,6 +118,10 @@ pub fn build_roster(
 
     // ---- 先放信任库里的全部设备（**含离线**）----
     for d in trust_devices {
+        // 本机自身绝不应出现在对端设备名册中（避免本地回环自测配对残留导致列表中出现离线的"本机"）
+        if !self_device_id.is_empty() && d.device_id == self_device_id {
+            continue;
+        }
         let presence = if !d.visible {
             Presence::Hidden
         } else {
@@ -139,7 +142,7 @@ pub fn build_roster(
                 transfer_port: None,
                 last_ip: d.last_ip.clone(),
                 is_paired: d.trust_level.is_paired(),
-                is_self: d.device_id == self_device_id,
+                is_self: false,
                 peer_caps: 0,
                 peer_version: String::new(),
             },
@@ -148,6 +151,9 @@ pub fn build_roster(
 
     // ---- 再用在线表覆盖（在线信息更准）----
     for o in online {
+        if !self_device_id.is_empty() && o.device_id == self_device_id {
+            continue;
+        }
         let trust_level = trust_devices
             .iter()
             .find(|d| d.device_id == o.device_id)
@@ -176,7 +182,7 @@ pub fn build_roster(
             transfer_port: Some(o.transfer_port),
             last_ip: o.ip.clone(),
             is_paired: trust_level.is_paired(),
-            is_self: o.device_id == self_device_id,
+            is_self: false,
             peer_caps: o.caps,
             peer_version: o.app_version.clone(),
         };
@@ -187,7 +193,6 @@ pub fn build_roster(
     list.sort_by(|a, b| {
         a.visible
             .cmp(&b.visible)
-            .then_with(|| b.is_self.cmp(&a.is_self))
             .then_with(|| b.is_paired.cmp(&a.is_paired))
             .then_with(|| online_rank(a.presence).cmp(&online_rank(b.presence)))
             .then_with(|| a.device_name.cmp(&b.device_name))

@@ -43,7 +43,6 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
-Name: "autostart"; Description: "开机自动启动飞梭（在后台待命）"; GroupDescription: "系统集成:"; Flags: unchecked
 
 [Files]
 Source: "..\..\target\release\feisuo-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -54,9 +53,8 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Registry]
-; 若用户勾选了 autostart 任务，或注册表已有 Run 键，则写入/更新自启指向安装目录
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Feisuo"; ValueData: """{app}\{#MyAppExeName}"" --daemon"; Flags: uninsdeletevalue; Tasks: autostart
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Feisuo"; ValueData: """{app}\{#MyAppExeName}"" --daemon"; Flags: uninsdeletevalue; Check: HasAutoStartValue; Tasks: not autostart
+; 若此前已开启自启（注册表已有 Run 键），覆盖安装时无缝更新指向当前安装目录
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Feisuo"; ValueData: """{app}\{#MyAppExeName}"" --daemon"; Flags: uninsdeletevalue; Check: HasAutoStartValue
 
 [Run]
 ; 放行 Windows 防火墙入站规则（UDP 42101 发现 + TCP 42100 传输），免除用户弹出安全警报
