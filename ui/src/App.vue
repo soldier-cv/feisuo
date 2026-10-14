@@ -3624,6 +3624,12 @@ onMounted(async () => {
     await FeisuoBridge.onOpenSettingsUpdate(() => {
       currentTab.value = "settings";
       manualCheckingUpdate.value = true;
+      updateStatus.value = {
+        ...updateStatus.value,
+        phase: "checking",
+        message: "正在检查更新…",
+        busy: true,
+      };
       showToast("正在检查更新…");
     }),
     await FeisuoBridge.onUpdateNotice((msg) => {
@@ -6351,10 +6357,17 @@ async function loadUpdateStatus() {
 
 async function checkForUpdate() {
   try {
-    // 手动点击: 失败要让用户看见, 不能安静吞掉
+    // 手动点击: 立即给出明确的进行中反馈，绝不让界面停滞在"尚未检查"
     manualCheckingUpdate.value = true;
+    updateStatus.value = {
+      ...updateStatus.value,
+      phase: "checking",
+      message: "正在检查更新…",
+      busy: true,
+    };
     showToast("正在检查更新…");
-    updateStatus.value = await FeisuoBridge.checkForUpdate(true);
+    const nextStatus = await FeisuoBridge.checkForUpdate(true);
+    updateStatus.value = nextStatus;
     if (updateStatus.value.phase === "uptodate") {
       showToast(`当前已是最新版本 v${updateStatus.value.currentVersion || localInfo.app_version}`);
     } else if (updateStatus.value.phase === "ready") {
@@ -6365,7 +6378,14 @@ async function checkForUpdate() {
       showToast(FeisuoBridge.describeError(updateStatus.value, "检查更新失败"), true);
     }
   } catch (e) {
-    showToast(FeisuoBridge.describeError(e, "检查更新失败"), true);
+    const errorMsg = FeisuoBridge.describeError(e, "检查更新失败");
+    updateStatus.value = {
+      ...updateStatus.value,
+      phase: "failed",
+      message: errorMsg,
+      busy: false,
+    };
+    showToast(errorMsg, true);
   } finally {
     manualCheckingUpdate.value = false;
   }

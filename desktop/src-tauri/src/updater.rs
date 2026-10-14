@@ -282,7 +282,13 @@ impl UpdateService {
     /// `interactive` 只影响**失败时是否主动弹窗**; 后台静默调度传 false,
     /// 免得一天弹 7 次错误。
     pub async fn check_and_download(&self, interactive: bool) -> UpdateStatus {
-        let _guard = self.gate.lock().await;
+        let _guard = match self.gate.try_lock() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::info!("更新检查或下载已在进行中，复用当前任务");
+                return self.status().await;
+            }
+        };
 
         // 已经有就绪的更新包, 且确实比当前版本新 —— 不必重新走网络。
         if let Some(p) = self.pending.lock().await.clone() {
@@ -294,6 +300,7 @@ impl UpdateService {
                         latest_version: p.version.clone(),
                         tag_name: p.tag_name.clone(),
                         pending_path: p.local_path.to_string_lossy().to_string(),
+                        busy: false,
                         ..UpdateStatus::idle()
                     })
                     .await;
@@ -304,6 +311,7 @@ impl UpdateService {
         self.publish(UpdateStatus {
             phase: UpdatePhase::Checking,
             message: "正在检查更新…".into(),
+            busy: true,
             ..self.status.lock().await.clone()
         })
         .await;
@@ -418,11 +426,16 @@ impl UpdateService {
     /// 复核走 [`STALE_PROBE_TIMEOUT`] 的短超时，失败就**维持** Gitee 的结论 ——
     /// 拿不到证据不等于有更新，绝不能因为探测失败就凭空提示有新版。
     async fn check_for_update(&self) -> Result<Option<ReleaseInfo>, String> {
+        tracing::info!("开始检查应用更新，当前本地版本: v{}", current_version());
         let gitee = self.try_gitee_api().await;
         match &gitee {
-            Ok(Some(v)) => return Ok(Some(v.clone())),
+            Ok(Some(v)) => {
+                tracing::info!("Gitee 通道发现新版本: {} (下载地址: {})", v.tag_name, v.download_url);
+                return Ok(Some(v.clone()));
+            }
             // Gitee 说已是最新：**先别信**，见本函数文档。
             Ok(None) => {
+                tracing::info!("Gitee 响应当前已是最新，启动 GitHub 探测以复核镜像状态...");
                 let probe = self.probe_github_api().await;
                 if let Ok(Some(v)) = &probe {
                     tracing::info!("Gitee 镜像落后, 已改用 GitHub 的 v{}", v.tag_name);
@@ -479,6 +492,7 @@ impl UpdateService {
             tracing::info!("检查更新({source}): 最新 {tag}，当前 v{}，无需更新", current_version());
             return Ok(None);
         }
+        tracing::info!("检查更新({source}): 发现新版本 {tag}，开始挑选适合当前客户端形态的安装附件",);
 
         // 附件缺失**不能**当成"没有新版本": 否则用户永远停在旧版本却毫无提示。
         let Some(asset) = pick_asset(&dto.assets) else {
@@ -594,21 +608,29 @@ impl UpdateService {
         std::fs::create_dir_all(&self.updates_dir)
             .map_err(|e| format!("创建更新目录失败: {e}"))?;
 
-        let dest = self
-            .updates_dir
-            .join(format!("Feisuo-win-x64-{}.exe", release.version));
+        let is_setup = is_installed_copy()
+            || release.download_url.to_ascii_lowercase().contains("setup");
+        let pkg_prefix = if is_setup { "Feisuo-Setup-x64-" } else { "Feisuo-win-x64-" };
+        let dest = self.updates_dir.join(format!("{pkg_prefix}{}.exe", release.version));
         let part = dest.with_extension("exe.part");
 
-        if dest.exists()
-            && (release.asset_size == 0
-                || std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) == release.asset_size)
-        {
-            return Ok(dest);
+        if dest.exists() {
+            if let Ok(m) = std::fs::metadata(&dest) {
+                let local_len = m.len();
+                if local_len > 1024 * 1024
+                    && (release.asset_size == 0 || local_len == release.asset_size)
+                {
+                    tracing::info!("复用已下载就绪的更新包: {}", dest.display());
+                    return Ok(dest);
+                }
+            }
         }
 
+        tracing::info!("开始下载更新包: {} -> {}", release.download_url, dest.display());
         let resp = self
             .client
             .get(&release.download_url)
+            .timeout(API_TIMEOUT)
             .send()
             .await
             .map_err(|e| format!("连接失败: {e}"))?;
@@ -800,19 +822,20 @@ impl UpdateService {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
             let name = path.file_name()?.to_string_lossy().to_string();
-            // 命名规则: Feisuo-win-x64-<version>.exe
-            let Some(rest) = name
-                .strip_prefix("Feisuo-win-x64-")
-                .and_then(|s| s.strip_suffix(".exe"))
-            else {
+            // 命名规则: Feisuo-Setup-x64-<version>.exe 或 Feisuo-win-x64-<version>.exe
+            let rest = name
+                .strip_prefix("Feisuo-Setup-x64-")
+                .or_else(|| name.strip_prefix("Feisuo-win-x64-"))
+                .and_then(|s| s.strip_suffix(".exe"));
+            let Some(rest) = rest else {
                 continue;
             };
             if rest.is_empty() || !is_newer(rest, &current_version()) {
                 continue;
             }
-            // 512 字节以下不可能是真实 exe, 多半是错误页
+            // 1MB 以下不可能是真实安装包或绿色版 exe, 多半是网络截断或错误页
             match std::fs::metadata(&path) {
-                Ok(m) if m.len() > 512 => {}
+                Ok(m) if m.len() > 1024 * 1024 => {}
                 _ => continue,
             }
             if best
@@ -839,7 +862,7 @@ impl UpdateService {
                     continue;
                 }
                 let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                if name.starts_with("Feisuo-win-x64-") {
+                if name.starts_with("Feisuo-win-x64-") || name.starts_with("Feisuo-Setup-x64-") {
                     let _ = tokio::fs::remove_file(p).await;
                 }
             }
