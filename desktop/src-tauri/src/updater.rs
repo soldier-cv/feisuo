@@ -16,6 +16,21 @@
 //! 与 QuickClip 一致 —— 国内直连 Gitee 毫秒级, GitHub 常常超时。
 //! 三级降级: Gitee API → GitHub API → GitHub Releases 页面(跟随 302 读 tag)。
 //!
+//! ## 「自动检查更新」= 检查 **并下载**
+//!
+//! 后台调度与手动点击走的是同一条 [`UpdateService::check_and_download`]:
+//! 发现新版本就**静默下载到本地**, 下载完成后界面进入 `ready`, 用户只需
+//! 点一下「立即更新」。设置页的开关文案因此写成「自动检查并下载更新」——
+//! 否则用户会以为关掉下载能省流量, 实际上并没有那个选项。
+//!
+//! ## 永远不卡死的两条硬约束
+//!
+//! 1. **每一次检查都有总预算** ([`CHECK_BUDGET`]) —— 单通道超时只是逐段兜底,
+//!    三级通道串起来最坏仍有几十秒, 再叠上 DNS/代理的异常停顿就成了
+//!    "按钮永远显示进行中"。总预算保证无论如何都会落到一个终态。
+//! 2. **下载请求绝不能带总超时** —— 见 [`DOWNLOAD_HEADERS_TIMEOUT`] 的注释。
+//!    这一条曾经是错的, 表现为"新版本明明存在, 自动下载却永远失败"。
+//!
 //! ## 安全约束
 //!
 //! 下载地址来自远端 JSON 响应, 因此 [`is_trusted_download_url`] 是硬闸门:
@@ -23,12 +38,14 @@
 //! 少了这一条, 一个被劫持的 API 响应就能让客户端执行任意 exe。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::os_shim::{open_url_in_browser, spawn_detached};
 
@@ -70,18 +87,42 @@ pub fn is_installed_copy() -> bool {
 /// 由下一次启动做"换名接力"(见 [`UpdateService::apply_pending`])。
 const ROLLOVER_SUFFIX: &str = ".new";
 
-/// 更新包体积上限。飞梭绿色版约 18 MB, 给到 200 MB 足够宽松,
+/// 更新包体积上限。飞梭绿色版约 22 MB, 给到 200 MB 足够宽松,
 /// 同时能挡住"Content-Length 谎报超大体积把磁盘写满"。
 const MAX_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
 
-const API_TIMEOUT: Duration = Duration::from_secs(8);
+const API_TIMEOUT: Duration = Duration::from_secs(6);
 /// 镜像落后复核用的 GitHub 探测超时（见 `check_for_update`）。
 ///
 /// 比 [`API_TIMEOUT`] 短，因为这次请求**只用来证伪**"已经最新"这个结论，
-/// 拿不到结果就维持原结论。它每 12 小时最多发生一次（用户已是最新时），
-/// 3.5 秒不会让人等不下去；反过来，若这里用 8 秒，国内用户每次点
-/// 「检查更新」都要先白等 8 秒才知道自己没更新。
-const STALE_PROBE_TIMEOUT: Duration = Duration::from_millis(3500);
+/// 拿不到结果就维持原结论。它每天最多发生一次（用户已是最新时），
+/// 3 秒不会让人等不下去；反过来，若这里用 6 秒，国内用户每次点
+/// 「检查更新」都要先白等 6 秒才知道自己没更新。
+const STALE_PROBE_TIMEOUT: Duration = Duration::from_millis(3000);
+/// **整轮检查**的总预算（三级通道全部奏效前的硬上界）。
+///
+/// 逐段超时（6s + 3s + 6s + 6s）已经覆盖了正常网络，但 DNS 挂起、
+/// 系统代理黑洞、TLS 握手卡死这类停顿没有上层兜底时，界面会永远停在
+/// "正在检查更新…" —— 用户看到的不是"网络慢"，而是"按钮卡住了"。
+/// 超预算后按检查失败处理：**必然有一个终态**，用户可以再点一次或
+/// 走「前往下载页」。
+const CHECK_BUDGET: Duration = Duration::from_secs(25);
+
+/// 下载请求**等待响应头**的上限（TCP 已连上、服务器迟迟不给响应头）。
+///
+/// ## 这里曾经有一个把自动下载整体废掉的 bug
+///
+/// 早先这一行的位置挂的是 `.timeout(API_TIMEOUT)`（6~8 秒）。reqwest 的
+/// 请求超时是**总超时**，覆盖"从连接开始到响应体读完"（见 `TotalTimeoutBody`），
+/// 于是 22 MB 的绿色版 exe 需要 **3.7 MB/s** 的持续速度才能下完——
+/// 慢速网络下换算出来就是"每次都在半途被掐断"（安装版 6.9 MB 也需 1.1 MB/s）。
+/// 用户看到的是"发现新版本，但下载失败"，重启再试还是一样。
+///
+/// 正确的分工:
+/// - **响应头**用本常量（超时说明对面不可用，早失败早降级）;
+/// - **响应体**用 [`DOWNLOAD_IDLE_TIMEOUT`] 逐块兜底 —— 只看"有没有进展"，
+///   纵容慢速连接，但不放过真正的停滞。
+const DOWNLOAD_HEADERS_TIMEOUT: Duration = Duration::from_secs(20);
 const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -145,6 +186,24 @@ pub struct UpdateStatus {
     pub busy: bool,
     /// 是否为标准安装版（true: 安装版; false: 绿色便携版）
     pub is_installed: bool,
+    /// 单调递增的发布序号。
+    ///
+    /// ## 为什么必须有它
+    ///
+    /// 状态有**两条通道**送到前端: `feisuo://update-status` 事件, 以及
+    /// `check_for_update` 命令的返回值。二者到达顺序**没有保证** ——
+    /// 命令返回值是 click 那一刻的快照, 可能比先到的事件更旧。
+    /// 早先前端无条件 `updateStatus.value = 返回值`, 于是一个迟到的
+    /// "正在检查更新…（busy=true）"快照可以覆盖掉已经到达的终态,
+    /// 界面就永久停在"进行中…" —— 后端早就没事了, 是界面卡住了。
+    ///
+    /// 前端只接受 `seq` 不小于当前值的快照, 这类覆盖被结构性排除。
+    pub seq: u64,
+    /// 最近一次**检查跑完**的时刻 (Unix 毫秒; 0 = 从未检查)。
+    ///
+    /// 与 `seq` 不同, 这是一个**粘性**字段: 下载进度、就绪状态等
+    /// 后续快照都会带着它, 否则"上次检查时间"会在下载开始时被抹掉。
+    pub last_checked_at_ms: i64,
 }
 
 impl UpdateStatus {
@@ -161,6 +220,8 @@ impl UpdateStatus {
             release_page: GITEE_RELEASES_PAGE.to_string(),
             busy: false,
             is_installed: is_installed_copy(),
+            seq: 0,
+            last_checked_at_ms: 0,
         }
     }
 }
@@ -212,6 +273,11 @@ pub struct UpdateService {
     /// 而不是让每一处调用方都得把 `&AppHandle` 一路传下来 ——
     /// 漏传一次的结果是"状态变了但界面不动", 极难排查。
     app: AppHandle,
+    /// 引擎里的同一份配置 (用来持久化"上次检查时间")。
+    ///
+    /// 与 `commands::update_app_config` 共用同一个 `RwLock`, 因此设置页
+    /// 刚改完的配置不会在下次检查时被旧内存副本覆盖写回。
+    config: Arc<RwLock<feisuo_core::AppConfig>>,
     /// 串行化"检查 + 下载", 防止用户连点与后台调度撞在一起
     gate: Mutex<()>,
     status: Mutex<UpdateStatus>,
@@ -219,10 +285,13 @@ pub struct UpdateService {
     pending: Mutex<Option<PendingUpdate>>,
     /// 连续失败计数, 达到 MAX_RETRY_ATTEMPTS 后熔断到下一个常规周期
     failures: Mutex<u32>,
+    /// 状态发布序号（见 [`UpdateStatus::seq`]）。`publish` 是唯一的
+    /// 递增点, 用原子量而不是再抢一把锁。
+    seq: AtomicU64,
 }
 
 impl UpdateService {
-    pub fn new(app: AppHandle) -> Self {
+    pub fn new(app: AppHandle, config: Arc<RwLock<feisuo_core::AppConfig>>) -> Self {
         let client = reqwest::Client::builder()
             .user_agent(format!("Feisuo/{} (+https://github.com/{REPO_OWNER}/{REPO_NAME})", current_version()))
             .connect_timeout(API_TIMEOUT)
@@ -233,14 +302,26 @@ impl UpdateService {
 
         let updates_dir = feisuo_core::AppConfig::get_app_dir().join("updates");
 
+        // 恢复持久化的「上次检查时间」: 托盘常驻下用户可能几周不看设置页,
+        // 启动后到首次检查之间显示"尚未检查"是错的。
+        let mut initial = UpdateStatus::idle();
+        initial.last_checked_at_ms = config
+            .try_read()
+            .ok()
+            .and_then(|c| c.last_update_check_utc.clone())
+            .and_then(|s| parse_rfc3339_millis(&s))
+            .unwrap_or(0);
+
         Self {
             updates_dir,
             client,
             app,
+            config,
             gate: Mutex::new(()),
-            status: Mutex::new(UpdateStatus::idle()),
+            status: Mutex::new(initial),
             pending: Mutex::new(None),
             failures: Mutex::new(0),
+            seq: AtomicU64::new(0),
         }
     }
 
@@ -316,7 +397,27 @@ impl UpdateService {
         })
         .await;
 
-        let check = match self.check_for_update().await {
+        // 整轮检查必须在预算内结束 —— 见 `CHECK_BUDGET`。
+        // 逐段超时管不了"某一段本身卡住"（DNS 挂起 / 代理黑洞 / TLS 假死），
+        // 那种情况下按钮会永远显示"进行中…"，用户能做的只有重启程序。
+        let check = match tokio::time::timeout(CHECK_BUDGET, self.check_for_update()).await {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::warn!("检查更新超过 {} 秒预算，强制以失败收尾", CHECK_BUDGET.as_secs());
+                Err(format!(
+                    "检查更新超时（{} 秒内未完成）。可稍后重试，或点「前往下载页」手动下载",
+                    CHECK_BUDGET.as_secs()
+                ))
+            }
+        };
+
+        // 无论成败都记下"检查跑完的时刻": 界面上的「上次检查」描述的是
+        // **尝试过**这件事, 而不是"成功过"—— 后者会让断网用户看到的时间
+        // 永远停在很久以前, 反而像是检查功能坏了。
+        // 必须在下方的终态 publish 之前: 终态快照带着这个粘性字段一起推给前端。
+        self.record_check_time().await;
+
+        let check = match check {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("检查更新失败: {e}");
@@ -425,8 +526,15 @@ impl UpdateService {
     ///
     /// 复核走 [`STALE_PROBE_TIMEOUT`] 的短超时，失败就**维持** Gitee 的结论 ——
     /// 拿不到证据不等于有更新，绝不能因为探测失败就凭空提示有新版。
+    ///
+    /// ## 每一段都要推进界面上的文案
+    ///
+    /// 三级通道串行跑满时是十几秒的等待。界面停在"正在检查更新…"一动不动，
+    /// 用户读到的是"卡住了"；把当前正在问哪条通道说出来，等待就变成
+    /// 可解释的过程（也顺便让用户知道为什么要等）。
     async fn check_for_update(&self) -> Result<Option<ReleaseInfo>, String> {
         tracing::info!("开始检查应用更新，当前本地版本: v{}", current_version());
+        self.note_stage("正在检查更新…（Gitee 主通道）").await;
         let gitee = self.try_gitee_api().await;
         match &gitee {
             Ok(Some(v)) => {
@@ -436,6 +544,7 @@ impl UpdateService {
             // Gitee 说已是最新：**先别信**，见本函数文档。
             Ok(None) => {
                 tracing::info!("Gitee 响应当前已是最新，启动 GitHub 探测以复核镜像状态...");
+                self.note_stage("正在检查更新…（GitHub 复核镜像）").await;
                 let probe = self.probe_github_api().await;
                 if let Ok(Some(v)) = &probe {
                     tracing::info!("Gitee 镜像落后, 已改用 GitHub 的 v{}", v.tag_name);
@@ -445,17 +554,30 @@ impl UpdateService {
             Err(e) => tracing::warn!("Gitee 通道不可用: {e}，降级 GitHub"),
         }
 
+        self.note_stage("正在检查更新…（GitHub 兜底）").await;
         let github = self.try_github_api().await;
         match &github {
             Ok(v) => return Ok(v.clone()),
             Err(e) => tracing::warn!("GitHub API 通道不可用: {e}，降级 Releases 页面"),
         }
 
+        self.note_stage("正在检查更新…（Releases 页面兜底）").await;
         let page = self.try_github_page().await;
         match &page {
             Ok(v) => Ok(v.clone()),
             Err(e) => Err(format!("检查更新失败（已尝试 Gitee / GitHub / 页面）: {e}")),
         }
+    }
+
+    /// 推送一条"检查进行中"的阶段文案（保持 `busy`, 只换 message）。
+    async fn note_stage(&self, message: &str) {
+        self.publish(UpdateStatus {
+            phase: UpdatePhase::Checking,
+            message: message.to_string(),
+            busy: true,
+            ..self.status.lock().await.clone()
+        })
+        .await;
     }
 
     /// "镜像说已是最新"之后，探测结果怎么用。**纯函数**，便于直接断言。
@@ -627,13 +749,22 @@ impl UpdateService {
         }
 
         tracing::info!("开始下载更新包: {} -> {}", release.download_url, dest.display());
-        let resp = self
-            .client
-            .get(&release.download_url)
-            .timeout(API_TIMEOUT)
-            .send()
-            .await
-            .map_err(|e| format!("连接失败: {e}"))?;
+        // 刻意**不设**总超时: 见 `DOWNLOAD_HEADERS_TIMEOUT` 的注释 ——
+        // 请求级超时覆盖整个响应体, 22 MB 的包会被半途掐断。
+        // 这里只兜住"TCP 连上但不给响应头"这一段, 响应体交给下面的
+        // 逐块读超时（只看有没有进展）。
+        let resp = tokio::time::timeout(
+            DOWNLOAD_HEADERS_TIMEOUT,
+            self.client.get(&release.download_url).send(),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "连接更新服务器超时（{} 秒内没有响应）",
+                DOWNLOAD_HEADERS_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|e| format!("连接失败: {e}"))?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -869,14 +1000,50 @@ impl UpdateService {
         }
     }
 
-    async fn publish(&self, status: UpdateStatus) -> UpdateStatus {
-        *self.status.lock().await = status.clone();
+    /// 把状态写进内存、推给前端, 并**保证两条通道的顺序可分辨**。
+    ///
+    /// - `seq` 每发布一次 +1: 前端凭它丢弃迟到的旧快照
+    ///   （命令返回值与事件是两条通道, 到达顺序没有保证）。
+    /// - `last_checked_at_ms` 是粘性字段: 谁都不许把它改小。
+    ///   有些快照是以 `UpdateStatus::idle()` 为底建的（如恢复待安装更新）,
+    ///   若不在这里兜住, "上次检查时间"会在这些路径上被抹成"从未检查"。
+    async fn publish(&self, mut status: UpdateStatus) -> UpdateStatus {
+        status.seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        {
+            let mut cur = self.status.lock().await;
+            if cur.last_checked_at_ms > status.last_checked_at_ms {
+                status.last_checked_at_ms = cur.last_checked_at_ms;
+            }
+            *cur = status.clone();
+        }
         // 事件推给前端: 后台调度触发的更新必须主动反映到界面上,
         // 托盘常驻下用户不会去点"检查更新"才发现新版本。
         if let Err(e) = self.app.emit(UPDATE_EVENT, status.clone()) {
             tracing::warn!("推送更新状态事件失败: {e}");
         }
         status
+    }
+
+    /// 记下"这一轮检查跑完了", 并持久化到 `config.json`。
+    ///
+    /// 只更新内存里的快照 + 配置文件, **不 emit** —— 调用方紧接着就会发布
+    /// 终态快照（已是最新 / 发现新版本 / 失败）, 那个快照带着这个粘性字段
+    /// 一起到前端。这里额外推一条只会让界面闪一下。
+    async fn record_check_time(&self) {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        self.status.lock().await.last_checked_at_ms = now_ms;
+
+        // 写配置失败不是致命错误: 内存里的时间已经生效, 下次检查成功
+        // 写盘时自然补上。**不能**因此影响检查流程本身。
+        let mut cfg = self.config.write().await;
+        cfg.last_update_check_utc = Some(
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now_ms)
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+        );
+        if let Err(e) = cfg.save() {
+            tracing::warn!("持久化「上次检查时间」失败: {e}");
+        }
     }
 
     async fn bump_failure(&self) {
@@ -1074,6 +1241,16 @@ fn parse_tag_from_url(url: &str) -> Option<(String, String)> {
     Some((tag.to_string(), version))
 }
 
+/// 把 `config.json` 里的 RFC3339 时间戳解析成 Unix 毫秒（失败返回 `None`）。
+///
+/// 配置是**可以被手工编辑的**, 解析失败必须安静地退回"从未检查"，
+/// 绝不能让一个手抖写坏的时间戳把设置页整段界面带崩。
+fn parse_rfc3339_millis(text: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(text.trim())
+        .ok()
+        .map(|t| t.timestamp_millis())
+}
+
 /// `x.y.z` 版本比较: `candidate` 比 `current` 新时为 true。
 ///
 /// 刻意不用 `semver` crate: 版本号由本项目自己打 tag, 形式固定,
@@ -1154,6 +1331,38 @@ mod tests {
         // 解析失败一律当作"不更新", 绝不能因为脏 tag 就触发下载
         assert!(!is_newer("not-a-version", "0.1.0"));
         assert!(!is_newer("", "0.1.0"));
+    }
+
+    /// 「上次检查时间」的解析: 合法值往返, 手改坏的配置安静退回"从未检查"。
+    ///
+    /// config.json 是可以被手工编辑的, 一个写坏的字符串不得让设置页
+    /// 显示出一个荒唐的时间（或直接崩掉那段界面）。
+    #[test]
+    fn last_check_time_is_parsed_defensively() {
+        let ms = parse_rfc3339_millis("2026-10-16T08:30:00Z").expect("合法 RFC3339 必须能解析");
+        let back = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms).unwrap();
+        assert_eq!(back.to_rfc3339(), "2026-10-16T08:30:00+00:00");
+
+        // 带时区偏移的写法同样接受
+        assert!(parse_rfc3339_millis("2026-10-16T16:30:00+08:00").is_some());
+        // 脏数据一律 None（界面显示"尚未检查"）, 绝不 panic
+        assert!(parse_rfc3339_millis("").is_none());
+        assert!(parse_rfc3339_millis("昨天下午").is_none());
+        assert!(parse_rfc3339_millis("2026-13-45T99:99:99Z").is_none());
+    }
+
+    /// 「上次检查时间」是**粘性**字段, 任何快照都不许把它改小/清零。
+    ///
+    /// 恢复待安装更新、下载进度这些快照是以 `UpdateStatus::idle()` 为底建的,
+    /// 清零之后设置页会显示"尚未检查" —— 而用户明明刚检查过。
+    /// 这里钉住 `publish` 内部用的合并规则（取两者较大值）。
+    #[test]
+    fn last_check_time_is_sticky() {
+        let merge = |cur: i64, incoming: i64| cur.max(incoming);
+        assert_eq!(merge(1_760_000_000_000, 0), 1_760_000_000_000, "idle() 为底的快照不得清零");
+        assert_eq!(merge(0, 1_760_000_000_000), 1_760_000_000_000);
+        // 新值更大时必须能前进, 否则时间会永远停在第一次检查
+        assert_eq!(merge(1_760_000_000_000, 1_760_000_100_000), 1_760_000_100_000);
     }
 
     /// 镜像落后时的复核规则（`prefer_probe_over_up_to_date`）。

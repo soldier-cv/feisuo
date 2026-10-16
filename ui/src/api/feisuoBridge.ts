@@ -48,6 +48,17 @@ export interface UpdateStatus {
   busy: boolean;
   /** 是否为安装版（true: 安装版; false: 绿色便携版） */
   isInstalled?: boolean;
+  /**
+   * 单调递增的发布序号（与 Rust 侧 `UpdateStatus.seq` 一一对应）。
+   *
+   * 状态有两条通道送到前端：`feisuo://update-status` 事件与命令返回值，
+   * 二者的到达顺序**没有保证**。界面只接受 `seq` 不小于当前值的快照，
+   * 否则一个迟到的"正在检查更新"（busy=true）会把已经到达的终态盖回去，
+   * 界面就永久停在"进行中…"。**任何**写入 updateStatus 的地方都要走这个判断。
+   */
+  seq: number;
+  /** 最近一次检查跑完的时刻（Unix 毫秒；0 = 从未检查） */
+  lastCheckedAtMs: number;
 }
 
 export interface TransferRecord {
@@ -1342,6 +1353,8 @@ export class FeisuoBridge {
         releasePage: "https://gitee.com/huaxudong/feisuo/releases",
         busy: false,
         isInstalled: false,
+        seq: 0,
+        lastCheckedAtMs: 0,
       };
     }
     return invokeSafe<UpdateStatus>("get_update_status");

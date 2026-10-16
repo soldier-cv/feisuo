@@ -1708,10 +1708,11 @@
 
             <div class="setting-item-block">
               <div class="setting-desc-text">
-                <strong title="启动及周期性自动检查最新版本并提醒更新">自动检查更新</strong>
+                <strong title="开启后周期性自动检查新版本并在后台静默下载，下载完成点「立即更新」即可安装">自动检查并下载更新</strong>
+                <span class="setting-sub-hint">发现新版本会后台自动下载，完成后点「立即更新」即可升级。</span>
               </div>
               <label class="fluent-switch">
-                <input aria-label="自动检查更新" type="checkbox" v-model="localInfo.auto_check_update" @change="toggleAutoUpdate" />
+                <input aria-label="自动检查并下载更新" type="checkbox" v-model="localInfo.auto_check_update" @change="toggleAutoUpdate" />
                 <span class="fluent-slider"></span>
               </label>
             </div>
@@ -1722,6 +1723,7 @@
                 <span class="path-mono" :class="{ 'update-failed': updateStatus.phase === 'failed' }">
                   {{ updateStatusText }}
                 </span>
+                <span class="setting-sub-hint">上次检查：{{ lastCheckedText }}</span>
               </div>
               <div class="setting-action-group">
                 <div
@@ -2756,6 +2758,8 @@ const updateStatus = ref<UpdateStatus>({
   releasePage: "",
   busy: false,
   isInstalled: false,
+  seq: 0,
+  lastCheckedAtMs: 0,
 });
 const manualCheckingUpdate = ref(false);
 
@@ -2791,6 +2795,28 @@ const updatePercent = computed(() => {
   const { bytesReceived, bytesTotal } = updateStatus.value;
   if (bytesTotal <= 0) return 0;
   return Math.min(100, Math.round((bytesReceived / bytesTotal) * 100));
+});
+
+/**
+ * 「上次检查」的展示文案。
+ *
+ * 用相对时间而不是精确时刻: 用户关心的是"多久没查了"。跨天时补上日期,
+ * 免得把"昨天 20:11"读成"今天"; 一分钟内用"刚刚", 手动点完看得见反馈。
+ */
+const lastCheckedText = computed(() => {
+  const ms = updateStatus.value.lastCheckedAtMs;
+  if (!ms) return "尚未检查";
+  const at = new Date(ms);
+  if (Number.isNaN(at.getTime())) return "尚未检查";
+  const now = new Date();
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  const hhmm = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+  if (now.getTime() - at.getTime() < 60_000) return "刚刚";
+  if (sameDay(at, now)) return `今天 ${hhmm}`;
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  if (sameDay(at, yesterday)) return `昨天 ${hhmm}`;
+  return `${at.getMonth() + 1}-${at.getDate()} ${hhmm}`;
 });
 
 // ---------------- 传输任务池（支持多任务并发传输） ----------------
@@ -3604,8 +3630,15 @@ onMounted(async () => {
     // 推到界面上的通路。**不能**在这里唤窗: 用户没要求看更新,
     // 为此把托盘常驻程序的主界面弹出来是打扰。
     await FeisuoBridge.onUpdateStatus((s) => {
+      // 迟到的旧快照直接丢弃（见 UpdateStatus.seq 的注释）: 事件与命令返回值
+      // 是两条通道, 没有这个判断时, 一个旧的"正在检查更新…（busy=true）"
+      // 可以盖掉已经到达的终态, 按钮就永远停在「进行中…」。
+      if (typeof s?.seq === "number" && s.seq < updateStatus.value.seq) return;
       const prevPhase = updateStatus.value?.phase;
       updateStatus.value = s;
+      // 有状态变化 = 后端还活着: 重置看门狗; 终态则撤除。
+      if (s.busy) armUpdateWatchdog();
+      else clearUpdateWatchdog();
       if (prevPhase !== s.phase) {
         if (s.phase === "ready") {
           showToast(`新版本 ${s.tagName || ""} 已下载就绪，可前往系统设置立即更新！`);
@@ -3630,6 +3663,9 @@ onMounted(async () => {
         message: "正在检查更新…",
         busy: true,
       };
+      // 托盘触发的检查同样要挂看门狗: 后端服务不可用时这里连失败都不会有,
+      // 没有兜底就会永远显示"正在检查更新…"。
+      armUpdateWatchdog();
       showToast("正在检查更新…");
     }),
     await FeisuoBridge.onUpdateNotice((msg) => {
@@ -6348,11 +6384,83 @@ async function openLogFolder() {
 /** 主动拉一次状态快照 —— 只靠事件会在"窗口挂机期间完成下载"时丢失结果 */
 async function loadUpdateStatus() {
   try {
-    updateStatus.value = await FeisuoBridge.getUpdateStatus();
+    // 经过 adoptUpdateStatus 而不是直接赋值: 主动拉取与事件回调是并发
+    // 到达的, 直接赋值可能把更晚的事件状态覆盖回一个更旧的快照。
+    adoptUpdateStatus(await FeisuoBridge.getUpdateStatus());
   } catch (e) {
     // 拿不到状态不是致命错误, 保留上一次的值即可
     console.warn("[update] 读取更新状态失败:", e);
   }
+}
+
+/**
+ * 采用一份状态快照 —— 只接受 `seq` 不小于当前值的。
+ *
+ * 事件与命令返回值两条通道没有顺序保证, 见 `UpdateStatus.seq`。
+ * 所有"写 updateStatus"的地方都要经过这里（事件回调内联了同一判断）。
+ */
+function adoptUpdateStatus(next: UpdateStatus) {
+  if (typeof next?.seq === "number" && next.seq < updateStatus.value.seq) return false;
+  updateStatus.value = next;
+  return true;
+}
+
+/**
+ * 「检查更新」看门狗：后端就算一个字节都不回, 界面也不许永远停在「进行中…」。
+ *
+ * 为什么必须有: 命令返回值和事件都可能因为任务 panic、IPC 丢失而永不到达,
+ * 而按钮的禁用绑定在 `busy` 上 —— 卡住的表现是"点了没反应, 也点不了第二次",
+ * 用户唯一能做的是重启程序。
+ *
+ * 触发后先**问一次后端**（很可能任务早已收尾, 只是结果没送到), 确认后端
+ * 也不忙时才把界面落到一个诚实的失败态。45 秒的取值比后端的总预算
+ * （`CHECK_BUDGET` 25 秒）和下载停滞判定（45 秒无数据即失败）都宽,
+ * 因此正常情况下它永远轮不到触发。
+ */
+let updateWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
+const UPDATE_WATCHDOG_MS = 45_000;
+
+function clearUpdateWatchdog() {
+  if (updateWatchdogTimer !== null) {
+    clearTimeout(updateWatchdogTimer);
+    updateWatchdogTimer = null;
+  }
+}
+
+function armUpdateWatchdog() {
+  clearUpdateWatchdog();
+  updateWatchdogTimer = setTimeout(async () => {
+    updateWatchdogTimer = null;
+    let st: UpdateStatus | null = null;
+    try {
+      st = await FeisuoBridge.getUpdateStatus();
+    } catch (e) {
+      console.warn("[update] 看门狗读取更新状态失败:", e);
+    }
+    if (st) {
+      adoptUpdateStatus(st);
+      if (!st.busy) {
+        // 后端其实已经收尾, 只是事件丢在路上 —— 悄悄对齐, 不打扰用户。
+        manualCheckingUpdate.value = false;
+        return;
+      }
+      if (st.phase === "downloading") {
+        // 慢速下载可以很久, 进度事件会重置看门狗; 这里再续一段继续守着。
+        armUpdateWatchdog();
+        return;
+      }
+    }
+    // 后端仍在检查中, 且 45 秒没有任何状态变化 —— 按超时收尾。
+    // 文案与后端的超时文案一致: 用户不需要区分是谁先放弃的。
+    manualCheckingUpdate.value = false;
+    updateStatus.value = {
+      ...updateStatus.value,
+      phase: "failed",
+      message: "检查更新超时，请稍后重试，或点「前往下载页」手动下载",
+      busy: false,
+    };
+    showToast("检查更新超时，请稍后重试", true);
+  }, UPDATE_WATCHDOG_MS);
 }
 
 async function checkForUpdate() {
@@ -6365,9 +6473,14 @@ async function checkForUpdate() {
       message: "正在检查更新…",
       busy: true,
     };
+    // 看门狗从点击那一刻就武装: 它兜的是"后端一个字节都不回"的情况。
+    armUpdateWatchdog();
     showToast("正在检查更新…");
     const nextStatus = await FeisuoBridge.checkForUpdate(true);
-    updateStatus.value = nextStatus;
+    adoptUpdateStatus(nextStatus);
+    // 读的是**当前**状态而不是返回值: 返回值可能因迟到被丢弃。
+    if (updateStatus.value.busy) armUpdateWatchdog();
+    else clearUpdateWatchdog();
     if (updateStatus.value.phase === "uptodate") {
       showToast(`当前已是最新版本 v${updateStatus.value.currentVersion || localInfo.app_version}`);
     } else if (updateStatus.value.phase === "ready") {
@@ -6413,7 +6526,11 @@ async function openUpdatePage() {
 async function toggleAutoUpdate() {
   try {
     await FeisuoBridge.updateAppConfig({ auto_check_update: localInfo.auto_check_update });
-    showToast(localInfo.auto_check_update ? "已开启自动检查更新" : "已关闭自动检查更新");
+    showToast(
+      localInfo.auto_check_update
+        ? "已开启自动检查并下载更新"
+        : "已关闭自动检查（仍可手动检查更新）"
+    );
   } catch (e) {
     localInfo.auto_check_update = !localInfo.auto_check_update;
     showToast(FeisuoBridge.describeError(e, "设置自动检查更新失败"), true);

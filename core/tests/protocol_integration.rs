@@ -138,6 +138,7 @@ impl Node {
             allowed_peer_subnets: Vec::new(),
             approval_timeout_secs: 60,
             session_grant_ttl_secs: 300,
+            last_update_check_utc: None,
         };
 
         let handles =
@@ -2458,12 +2459,14 @@ fn test_config_roundtrip_and_defaults() {
         allowed_peer_subnets: Vec::new(),
         approval_timeout_secs: 90,
         session_grant_ttl_secs: 300,
+        last_update_check_utc: Some("2026-10-16T08:00:00Z".into()),
     };
     let text = serde_json::to_string(&cfg).unwrap();
     let back: AppConfig = serde_json::from_str(&text).unwrap();
     assert_eq!(back.theme, "light");
     assert_eq!(back.log_level, "DEBUG");
     assert!(back.auto_check_update);
+    assert_eq!(back.last_update_check_utc.as_deref(), Some("2026-10-16T08:00:00Z"));
 
     // 缺省字段: serde(default) 兜底必须给出**合法**取值,
     // 不能是空字符串, 否则前端会拿到 theme="" 这种无法渲染的状态
@@ -2486,6 +2489,12 @@ fn test_config_roundtrip_and_defaults() {
     assert_eq!(
         parsed.session_grant_ttl_secs, 300,
         "老配置缺省必须是 300s（默认开启），不是 0（那会让功能静默消失）"
+    );
+    // 老配置里同样没有"上次检查时间"，必须缺省为 None（尚未检查），
+    // 而不是某个凭空造出来的时间 —— 界面会把它显示成"上次检查：…"。
+    assert!(
+        parsed.last_update_check_utc.is_none(),
+        "老配置缺省必须是「从未检查」，不得伪造一个时间"
     );
 }
 

@@ -126,6 +126,14 @@ pub struct AppConfig {
     /// 最大并发传输任务数，默认 3，取值范围 1..=10
     #[serde(default = "default_max_concurrent_transfers")]
     pub max_concurrent_transfers: u32,
+    /// 最近一次**检查更新跑完**的时刻（RFC3339 UTC；空 = 从未检查过）。
+    ///
+    /// 为什么必须落盘而不是只放内存：飞梭是托盘常驻应用，用户可能几周不
+    /// 打开一次设置页。只看一眼却显示"尚未检查"会让人以为检查功能没在跑，
+    /// 或者以为自己在开机后已经点过了 —— 两种猜测都是错的。
+    /// 该字段由桌面端宿主读写，core 本身不消费它。
+    #[serde(default)]
+    pub last_update_check_utc: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -153,6 +161,8 @@ impl Default for AppConfig {
             // 空 = 不限制来源网段。见 `allowed_peer_subnets` 的注释：
             // 不默认收紧是为了不改变既有行为，但界面上必须能看出"当前未设置"。
             allowed_peer_subnets: Vec::new(),
+            // 从未检查过 —— 界面上会显示"尚未检查"，第一次检查完成后写入。
+            last_update_check_utc: None,
         }
     }
 }

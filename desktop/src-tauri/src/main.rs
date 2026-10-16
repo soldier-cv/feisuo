@@ -89,7 +89,12 @@ async fn main() {
 
             // 更新服务在这里创建 (而非 main 开头): 它需要 AppHandle 推事件。
             // 恢复上次已下载未安装的更新 + 按配置启动静默调度。
-            let updater = Arc::new(UpdateService::new(app.handle().clone()));
+            // 同时把引擎的配置句柄交进来 —— "上次检查时间"要持久化到
+            // config.json, 共用同一个 RwLock 才能避免与设置页互相覆盖。
+            let updater = Arc::new(UpdateService::new(
+                app.handle().clone(),
+                engine_arc.config.clone(),
+            ));
             {
                 let boot = updater.clone();
                 tokio::spawn(async move { boot.restore_pending().await });

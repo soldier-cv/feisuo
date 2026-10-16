@@ -833,3 +833,142 @@ fn scheduler_must_respect_setting_and_have_circuit_breaker() {
         "调度器必须区分常规间隔与重试间隔"
     );
 }
+
+/// 下载请求**绝不能**带总超时。
+///
+/// ## 这条守卫对应一个真实发出去过的 bug
+///
+/// v0.1.6 把下载请求改成了 `.timeout(API_TIMEOUT)`（6~8 秒），本意是
+/// "补齐连接与头部超时控制"。但 reqwest 的请求级超时是**总超时**：
+/// 它覆盖"从连接开始到响应体读完"（`TotalTimeoutBody`）。于是 22 MB 的
+/// 绿色版 exe 需要约 3.7 MB/s 的持续速度才能下完——慢速网络下每次都在
+/// 半途被掐断，重启重试还是一样：**自动下载整体失效**，而且它并不报错，
+/// 只是永远停在失败态。
+///
+/// 正确的分工写在常量注释里:
+/// - 响应头用 `DOWNLOAD_HEADERS_TIMEOUT`（连上了但不给响应头, 早失败早降级）;
+/// - 响应体用 `DOWNLOAD_IDLE_TIMEOUT` 逐块兜底（只看有没有进展, 纵容慢速）。
+#[test]
+fn download_must_not_be_capped_by_api_timeout() {
+    let updater = updater_src();
+    let at = updater
+        .find("async fn download(")
+        .expect("找不到 download 实现");
+    let tail = &updater[at..];
+    let status_at = tail
+        .find("let status = resp.status()")
+        .expect("download 里找不到对响应状态的处理");
+    let request_seg = &tail[..status_at];
+
+    assert!(
+        request_seg.contains("DOWNLOAD_HEADERS_TIMEOUT"),
+        "下载请求必须用 DOWNLOAD_HEADERS_TIMEOUT 单独兜住『连上了但不给响应头』那一段"
+    );
+    assert!(
+        !request_seg.contains(".timeout("),
+        "下载请求上出现了总超时: reqwest 的请求级 timeout 覆盖整个响应体, \
+         会把正常下载中的大文件在半途掐断 —— 表现是『发现新版本但下载永远失败』"
+    );
+    assert!(
+        tail.contains("DOWNLOAD_IDLE_TIMEOUT"),
+        "响应体必须保留逐块读超时（只看有没有进展）, 否则真正的停滞无人兜底"
+    );
+}
+
+/// 整轮检查必须有**总预算**, 且超预算必须落到终态。
+///
+/// 单通道超时挡不住"某一段本身卡死"（DNS 挂起 / 系统代理黑洞 / TLS 假死）:
+/// 各段超时都"正常"，但按钮永远显示「进行中…」，用户唯一能做的是重启程序。
+#[test]
+fn check_must_have_a_total_budget() {
+    let updater = updater_src();
+
+    assert!(
+        updater.contains("const CHECK_BUDGET:"),
+        "缺少检查总预算常量 —— 三级通道各自超时兜不住整体挂起"
+    );
+    assert!(
+        updater.contains("tokio::time::timeout(CHECK_BUDGET, self.check_for_update())"),
+        "check_and_download 必须用 CHECK_BUDGET 包住整轮检查"
+    );
+
+    // 超预算必须变成一次**失败**（而不是继续挂着 busy）
+    let at = updater
+        .find("tokio::time::timeout(CHECK_BUDGET")
+        .expect("找不到总预算的落点");
+    let body: String = updater[at..].chars().take(900).collect();
+    assert!(
+        body.contains("Err(") && body.contains("超时"),
+        "超预算时必须返回可读的超时原因 —— 不然界面只会显示一句无意义的英文错误"
+    );
+}
+
+/// 「上次检查时间」与"永不卡死"必须端到端接上。
+///
+/// 两者都跨了语言边界（Rust 快照字段 → TS 接口 → 界面文案/回调），
+/// 任一环漏掉都不报错：界面只是永远不显示"上次检查"，或者永远停在
+/// 「进行中…」——都属于"用户以为程序坏了、而代码静默通过"的一类。
+#[test]
+fn last_check_time_and_anti_stuck_must_be_wired() {
+    let updater = updater_src();
+    let config = read(&Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("core")
+        .join("src")
+        .join("config.rs"));
+    let bridge = read(&ui_src().join("api").join("feisuoBridge.ts"));
+    let app = read(&ui_src().join("App.vue"));
+
+    // 1) 持久化字段: 重启后「上次检查」不能假装从未检查
+    assert!(
+        config.contains("pub last_update_check_utc"),
+        "AppConfig 缺少 last_update_check_utc —— 重启后「上次检查」会退回『尚未检查』"
+    );
+
+    // 2) 后端: 记录时机 + 快照字段 + 序号
+    assert!(
+        updater.contains("async fn record_check_time("),
+        "缺少记录『检查跑完时刻』的实现"
+    );
+    assert!(
+        updater.contains("self.record_check_time().await"),
+        "check_and_download 必须真的调用 record_check_time"
+    );
+    assert!(
+        updater.contains("last_checked_at_ms"),
+        "状态快照没带 last_checked_at_ms"
+    );
+    assert!(
+        updater.contains("pub seq: u64"),
+        "状态快照缺 seq —— 前端没有办法丢弃迟到的旧快照"
+    );
+
+    // 3) 桥接层: 字段名与 Rust 侧 camelCase 对齐（对不齐就是 undefined）
+    assert!(
+        bridge.contains("lastCheckedAtMs") && bridge.contains("seq: number"),
+        "feisuoBridge.ts 的 UpdateStatus 缺 lastCheckedAtMs / seq 字段"
+    );
+
+    // 4) 界面: 显示「上次检查」+ 丢弃旧快照 + 看门狗
+    assert!(
+        app.contains("上次检查：") && app.contains("lastCheckedText"),
+        "设置页没有「上次检查」文案"
+    );
+    assert!(
+        app.contains("s.seq < updateStatus.value.seq"),
+        "更新状态事件回调缺少 seq 判断 —— 迟到的旧快照会把终态盖回「进行中…」"
+    );
+    assert!(
+        app.contains("function armUpdateWatchdog("),
+        "缺少看门狗: 后端一个字节都不回时, 按钮会永远停在「进行中…」"
+    );
+    let at = app
+        .find("async function checkForUpdate(")
+        .expect("App.vue 缺少 checkForUpdate");
+    let body: String = app[at..].chars().take(2000).collect();
+    assert!(
+        body.contains("armUpdateWatchdog()"),
+        "手动「检查更新」必须武装看门狗 —— 这是界面卡死的最后一道防线"
+    );
+}
