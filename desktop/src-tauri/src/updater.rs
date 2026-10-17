@@ -297,8 +297,31 @@ impl UpdateService {
             .connect_timeout(API_TIMEOUT)
             // 不设全局 timeout: 大 exe 下载可能很久, 由 DOWNLOAD_IDLE_TIMEOUT
             // 逐次读超时兜底 —— 全局超时会误杀正在正常下载的慢速连接。
+            //
+            // 重定向必须**跟着走但每一跳都查**: Gitee 的下载地址连跳两次
+            // （gitee.com → gitee.com/attach_files → foruda.gitee.com），
+            // 而 `is_trusted_download_url` 只查了**初始** URL ——
+            // 一个被劫持的 API 响应完全可以返回 gitee.com 的地址、
+            // 再用 302 把客户端引到任意主机去下 exe。白名单在这里等于形同虚设。
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 5 {
+                    return attempt.error("重定向次数过多");
+                }
+                // 每一跳的**目标**都必须在白名单内
+                if is_trusted_download_url(attempt.url().as_str()) {
+                    attempt.follow()
+                } else {
+                    attempt.error("重定向目标不在受信任域名内")
+                }
+            }))
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .unwrap_or_else(|e| {
+                // 这里几乎不可能失败（策略是纯配置），但万一 TLS 后端初始化失败，
+                // 兜底的 `Client::new()` 会**丢掉上面的逐跳白名单** —— 至少让它可见，
+                // 而不是静默降级成一个不校验重定向的客户端。
+                tracing::warn!("构建更新 HTTP 客户端失败 ({e})，已退回默认客户端：重定向不再受域名白名单约束");
+                reqwest::Client::new()
+            });
 
         let updates_dir = feisuo_core::AppConfig::get_app_dir().join("updates");
 
@@ -340,8 +363,16 @@ impl UpdateService {
     /// 更新包还在磁盘上, 不恢复的话界面上会退回"无更新可用"。
     pub async fn restore_pending(&self) {
         if let Some(found) = self.scan_pending_dir().await {
+            // 不在 `pending` 锁内 await `publish`：那把锁会一直握到整个
+            // if 块结束，而 publish 内部虽然不碰 pending，却会因为
+            // 持锁跨 await 让并发的 `apply_pending` 白等。
             let mut p = self.pending.lock().await;
-            if p.is_none() {
+            let already = p.is_some();
+            if !already {
+                *p = Some(found.clone());
+            }
+            drop(p);
+            if !already {
                 tracing::info!("恢复已下载的更新: {}", found.local_path.display());
                 self.publish(UpdateStatus {
                     phase: UpdatePhase::Ready,
@@ -353,7 +384,6 @@ impl UpdateService {
                     ..UpdateStatus::idle()
                 })
                 .await;
-                *p = Some(found);
             }
         }
     }
@@ -372,7 +402,13 @@ impl UpdateService {
         };
 
         // 已经有就绪的更新包, 且确实比当前版本新 —— 不必重新走网络。
-        if let Some(p) = self.pending.lock().await.clone() {
+        //
+        // ⚠️ 必须先把快照取到变量再判。写成 `if let Some(p) = self.pending.lock().await.clone()`
+        // 时，那个 `MutexGuard` 是临时量，存活到**整个 if let 块**结束 ——
+        // 块里还有 `publish(...).await`，于是持着 `pending` 锁跨 await，
+        // 并发的 `apply_pending`（用户点「立即更新」）会白等这把锁。
+        let ready_pending = self.pending.lock().await.clone();
+        if let Some(p) = ready_pending {
             if p.local_path.exists() && is_newer(&p.version, &current_version()) {
                 let st = self
                     .publish(UpdateStatus {
@@ -389,11 +425,11 @@ impl UpdateService {
             }
         }
 
-        self.publish(UpdateStatus {
+        self.publish_from(|cur| UpdateStatus {
             phase: UpdatePhase::Checking,
             message: "正在检查更新…".into(),
             busy: true,
-            ..self.status.lock().await.clone()
+            ..cur.clone()
         })
         .await;
 
@@ -423,11 +459,11 @@ impl UpdateService {
                 tracing::warn!("检查更新失败: {e}");
                 self.bump_failure().await;
                 let st = self
-                    .publish(UpdateStatus {
+                    .publish_from(|cur| UpdateStatus {
                         phase: UpdatePhase::Failed,
                         message: e,
                         busy: false,
-                        ..self.status.lock().await.clone()
+                        ..cur.clone()
                     })
                     .await;
                 if interactive {
@@ -440,24 +476,24 @@ impl UpdateService {
         match check {
             None => {
                 self.reset_failures().await;
-                self.publish(UpdateStatus {
+                self.publish_from(|cur| UpdateStatus {
                     phase: UpdatePhase::UpToDate,
                     message: format!("当前已是最新版本 v{}", current_version()),
                     busy: false,
-                    ..self.status.lock().await.clone()
+                    ..cur.clone()
                 })
                 .await
             }
             Some(release) => {
                 let tag = release.tag_name.clone();
                 let version = release.version.clone();
-                self.publish(UpdateStatus {
+                self.publish_from(|cur| UpdateStatus {
                     phase: UpdatePhase::Downloading,
                     message: format!("发现新版本 {tag}，正在下载"),
                     latest_version: version,
                     tag_name: tag.clone(),
                     busy: true,
-                    ..self.status.lock().await.clone()
+                    ..cur.clone()
                 })
                 .await;
 
@@ -474,7 +510,7 @@ impl UpdateService {
                         drop(p);
                         self.cleanup_old_updates(&path).await;
 
-                        self.publish(UpdateStatus {
+                        self.publish_from(|cur| UpdateStatus {
                             phase: UpdatePhase::Ready,
                             message: format!("新版本 {} 已下载就绪", release.tag_name),
                             latest_version: release.version.clone(),
@@ -483,20 +519,20 @@ impl UpdateService {
                             bytes_received: size,
                             bytes_total: size,
                             busy: false,
-                            ..self.status.lock().await.clone()
+                            ..cur.clone()
                         })
                         .await
                     }
                     Err(e) => {
                         tracing::warn!("下载更新失败: {e}");
                         self.bump_failure().await;
-                        self.publish(UpdateStatus {
+                        self.publish_from(|cur| UpdateStatus {
                             phase: UpdatePhase::Failed,
                             message: format!("发现新版本 {tag}，但下载失败: {e}。可在设置页用浏览器手动下载。"),
                             latest_version: release.version,
                             tag_name: tag,
                             busy: false,
-                            ..self.status.lock().await.clone()
+                            ..cur.clone()
                         })
                         .await
                     }
@@ -571,11 +607,16 @@ impl UpdateService {
 
     /// 推送一条"检查进行中"的阶段文案（保持 `busy`, 只换 message）。
     async fn note_stage(&self, message: &str) {
-        self.publish(UpdateStatus {
+        // 必须走 `publish_from`: 早先这里写成
+        // `publish(UpdateStatus { ..self.status.lock().await.clone() })`,
+        // 而 `note_stage` 是**检查更新的第一个动作** —— 于是整条流水线在
+        // 打印第一行日志之后、发出第一次网络请求之前就永久挂起，
+        // 日志里因此连一条 update 记录都没有。
+        self.publish_from(|cur| UpdateStatus {
             phase: UpdatePhase::Checking,
             message: message.to_string(),
             busy: true,
-            ..self.status.lock().await.clone()
+            ..cur.clone()
         })
         .await;
     }
@@ -816,7 +857,7 @@ impl UpdateService {
             // 反而拖慢下载本身。
             if last_emit.elapsed() >= PROGRESS_EVENT_INTERVAL {
                 last_emit = std::time::Instant::now();
-                self.publish(UpdateStatus {
+                self.publish_from(|cur| UpdateStatus {
                     phase: UpdatePhase::Downloading,
                     message: format!(
                         "发现新版本 {}，正在下载 {}",
@@ -828,7 +869,7 @@ impl UpdateService {
                     bytes_received: received,
                     bytes_total: expected,
                     busy: true,
-                    ..self.status.lock().await.clone()
+                    ..cur.clone()
                 })
                 .await;
             }
@@ -1007,6 +1048,22 @@ impl UpdateService {
     /// - `last_checked_at_ms` 是粘性字段: 谁都不许把它改小。
     ///   有些快照是以 `UpdateStatus::idle()` 为底建的（如恢复待安装更新）,
     ///   若不在这里兜住, "上次检查时间"会在这些路径上被抹成"从未检查"。
+    ///
+    /// ## ⚠️ 调用方**绝不可**在参数里取 `self.status` 的锁
+    ///
+    /// `publish(UpdateStatus { ..self.status.lock().await.clone() })` 会
+    /// **永久死锁**，而且是从第一次调用就开始 —— 这一行曾经存在于本文件
+    /// 的 8 个调用点上，把整个更新子系统锁死到"检查更新永远转圈、
+    /// `get_update_status` 永不返回、连前端看门狗都一起挂住"。
+    ///
+    /// 原因不是逻辑错，是 Rust 的**临时量生命周期**：那个 `MutexGuard`
+    /// 或写作 `..self.status.lock().await.clone()` 时，guard 存活到**整条语句**
+    /// 结束，而这条语句包含 `publish(...).await`；`publish` 内部再取同一把
+    /// 锁 ⇒ 自己等自己，永不返回。
+    ///
+    /// 所以：**派生快照一律走 [`Self::publish_from`]**，那里锁在 `publish`
+    /// 之前就已经释放。守卫 `publish_must_not_nest_the_status_lock` 会拦住
+    /// 这种写法重新出现 —— 它是静默的，编译通过、运行时只是"卡住"。
     async fn publish(&self, mut status: UpdateStatus) -> UpdateStatus {
         status.seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         {
@@ -1022,6 +1079,24 @@ impl UpdateService {
             tracing::warn!("推送更新状态事件失败: {e}");
         }
         status
+    }
+
+    /// 以**当前快照**为底派生一份新状态并发布。
+    ///
+    /// 这是 [`Self::publish`] 的唯一安全入口，用于"只改几个字段、其余沿用"
+    /// 的所有场景（阶段文案、进度、终态）。锁在调用 `publish` **之前**
+    /// 就已经释放，因此不可能与 `publish` 内部的取锁相互嵌套。
+    ///
+    /// 直接写 `publish(UpdateStatus { ..cur, .. })` 也行，但必须先把
+    /// `self.status.lock().await.clone()` 绑到一个变量上 —— 写成行内
+    /// 展开就会死锁。这个函数把那一步变成不可能忘。
+    async fn publish_from<F>(&self, build: F) -> UpdateStatus
+    where
+        F: FnOnce(&UpdateStatus) -> UpdateStatus,
+    {
+        // 这行的 guard 在分号处就释放了（语句结束），远早于 publish。
+        let snapshot = self.status.lock().await.clone();
+        self.publish(build(&snapshot)).await
     }
 
     /// 记下"这一轮检查跑完了", 并持久化到 `config.json`。
@@ -1357,8 +1432,7 @@ mod tests {
     /// 清零之后设置页会显示"尚未检查" —— 而用户明明刚检查过。
     /// 这里钉住 `publish` 内部用的合并规则（取两者较大值）。
     #[test]
-    fn last_check_time_is_sticky() {
-        let merge = |cur: i64, incoming: i64| cur.max(incoming);
+    fn last_check_time_is_sticky() {        let merge = |cur: i64, incoming: i64| cur.max(incoming);
         assert_eq!(merge(1_760_000_000_000, 0), 1_760_000_000_000, "idle() 为底的快照不得清零");
         assert_eq!(merge(0, 1_760_000_000_000), 1_760_000_000_000);
         // 新值更大时必须能前进, 否则时间会永远停在第一次检查
@@ -1370,8 +1444,7 @@ mod tests {
     /// 三个方向都必须钉住, 因为这个规则**曾经整体是反的**:
     /// 镜像说「已是最新」就直接下结论, 用户永远停在旧版本且毫无提示。
     #[test]
-    fn stale_mirror_probe_rule() {
-        let mk = |v: &str| ReleaseInfo {
+    fn stale_mirror_probe_rule() {        let mk = |v: &str| ReleaseInfo {
             version: v.to_string(),
             tag_name: format!("v{v}"),
             download_url: format!(
@@ -1442,9 +1515,144 @@ mod tests {
         assert!(pick_asset(&only_zip).is_none());
     }
 
+    /// 真实下载端到端：从 Gitee 拉一小段，验证**重定向链每一跳都在白名单内**。
+    ///
+    /// 这条测的是 `real_gitee_release_is_parseable` 之后的下一环：
+    /// 地址白名单过了不算完 —— reqwest 还要连跳两次重定向才会落到
+    /// `foruda.gitee.com` 的实体文件上。早先客户端只校验**初始** URL，
+    /// 重定向完全不受约束，白名单形同虚设。
+    ///
+    /// 这里只读前 64KB 就断开，避免真的把 7MB 拉完。
+    #[test]
+    #[ignore = "需要公网：cargo test -- --ignored real_gitee_download_follows_trusted_redirects"]
+    fn real_gitee_download_follows_trusted_redirects() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    if is_trusted_download_url(attempt.url().as_str()) {
+                        attempt.follow()
+                    } else {
+                        attempt.error("重定向目标不在受信任域名内")
+                    }
+                }))
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap();
+
+            let url = "https://gitee.com/huaxudong/feisuo/releases/download/v0.1.8/Feisuo-Setup-x64.exe";
+            assert!(is_trusted_download_url(url), "初始地址必须过白名单");
+
+            let mut resp = client.get(url).send().await.expect("Gitee 下载应当可达");
+            assert!(resp.status().is_success(), "下载必须返回成功, 实际 {}", resp.status());
+            println!("最终落地: {}", resp.url());
+            assert!(
+                is_trusted_download_url(resp.url().as_str()),
+                "重定向后的最终地址也必须在白名单内, 实际: {}",
+                resp.url()
+            );
+            let declared = resp.content_length().unwrap_or(0);
+            assert!(
+                declared > 1024 * 1024,
+                "安装包体积应当 >1MB（{declared} 字节），否则是错误页而不是 exe"
+            );
+
+            // 读一小段确认真的是数据流（不是 HTML 错误页）
+            let mut got = 0usize;
+            while got < 64 * 1024 {
+                match resp.chunk().await {
+                    Ok(Some(c)) => got += c.len(),
+                    _ => break,
+                }
+            }
+            assert!(got > 0, "必须真的读到字节");
+            println!("已读 {got} 字节, 声明总体积 {declared}");
+        });
+    }
+
     #[test]
     fn open_url_refuses_non_http() {
         assert!(open_url_in_browser("file:///C:/Windows/System32/cmd.exe").is_err());
         assert!(open_url_in_browser("javascript:alert(1)").is_err());
+    }
+
+    /// 重定向白名单：Gitee 的 CDN 子域必须放行，外部主机必须拒绝。
+    ///
+    /// 这条规则是 download 时逐跳校验用的（`redirect::Policy::custom`）。
+    /// 早先只校验**初始** URL，于是"gitee.com 给的地址"可以 302 到任意主机 ——
+    /// 白名单看着在，实际上一次跳转就能绕过。
+    #[test]
+    fn redirect_hop_must_stay_trusted() {
+        // 真实链路：gitee.com → gitee.com/attach_files → foruda.gitee.com
+        for url in [
+            "https://gitee.com/huaxudong/feisuo/releases/download/v0.1.8/Feisuo-Setup-x64.exe",
+            "https://gitee.com/huaxudong/feisuo/attach_files/3417476/download/Feisuo-Setup-x64.exe",
+            "https://foruda.gitee.com/attach_file/1792243452011646866/feisuo-setup-x64.exe?token=x&ts=1",
+        ] {
+            assert!(is_trusted_download_url(url), "真实重定向链上的地址必须放行: {url}");
+        }
+
+        // 任何一跳跳到站外都要被拒
+        for url in [
+            "https://evil.example.com/Feisuo-Setup-x64.exe",
+            "https://gitee.com.evil.com/x.exe",
+            "https://evil-gitee.com/x.exe",
+            "http://127.0.0.1:8080/x.exe",
+            "file:///C:/Windows/System32/cmd.exe",
+        ] {
+            assert!(!is_trusted_download_url(url), "站外地址必须被拒: {url}");
+        }
+    }
+
+    /// **真实网络**端到端：Gitee 的 JSON 必须能被解析、挑出 exe、且地址通过白名单。
+    ///
+    /// ## 为什么这条测试必须真的打网络
+    ///
+    /// 这一轮的 bug 是**死锁**，它把 `note_stage()` 挂住，网络请求根本发不出去。
+    /// 用 mock 测"解析逻辑对不对"完全抓不到 —— 解析代码一行都没变过。
+    /// 真正的判据是：**能不能走到网络并拿回一个可下载的附件**。
+    ///
+    /// 用 `#[ignore]` 标成手动/CI 可选：它依赖公网。想跑就
+    /// `cargo test -p feisuo-desktop --ignored real_gitee`。
+    /// 这里顺带钉住"Gitee 的 assets 里 `size` 字段确实缺失"这个事实 ——
+    /// 客户端必须能容忍 `size: 0`（改由 Content-Length 兜底），
+    /// 而 `download()` 里的复用判断正是按 `asset_size == 0` 放行的。
+    #[test]
+    #[ignore = "需要公网：cargo test --ignored real_gitee_release_is_parseable"]
+    fn real_gitee_release_is_parseable() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(20))
+                .build()
+                .unwrap();
+            let resp = client
+                .get(GITEE_LATEST_API)
+                .header("Accept", "application/json")
+                .send()
+                .await
+                .expect("Gitee 应当可达");
+            assert_eq!(resp.status().as_u16(), 200, "Gitee 最新版本接口");
+            let dto: ReleaseDto = resp.json().await.expect("Gitee JSON 必须可解析");
+            assert!(!dto.tag_name.is_empty(), "Gitee 响应必须有 tag_name");
+
+            let asset = pick_asset(&dto.assets)
+                .expect("Gitee Release 里必须有可下载的 .exe 附件");
+            assert!(
+                asset.name.ends_with(".exe"),
+                "挑出来的附件必须是 exe, 实际: {}",
+                asset.name
+            );
+            assert!(
+                is_trusted_download_url(&asset.browser_download_url),
+                "Gitee 给的下载地址必须过白名单, 实际: {}",
+                asset.browser_download_url
+            );
+            // 真实存在的夹具：这条 URL 必须能拿到 3xx/200（不跟随也能看出可用）
+            println!(
+                "Gitee 最新: {} / 附件 {} (size={}) / {}",
+                dto.tag_name, asset.name, asset.size, asset.browser_download_url
+            );
+        });
     }
 }

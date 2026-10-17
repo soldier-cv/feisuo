@@ -6740,7 +6740,17 @@ async function loadUpdateStatus() {
   try {
     // 经过 adoptUpdateStatus 而不是直接赋值: 主动拉取与事件回调是并发
     // 到达的, 直接赋值可能把更晚的事件状态覆盖回一个更旧的快照。
-    adoptUpdateStatus(await FeisuoBridge.getUpdateStatus());
+    //
+    // 带超时: 这个函数会在**切到设置页**时被 await（见 watch(currentTab)），
+    // 而后端一旦卡在锁上，这个 await 就永不返回 —— 整个设置页的
+    // Promise.all 跟着挂住，用户看到的是"点设置页没反应"。
+    // 更新状态读不到只是少一块信息，不能拖住整页。
+    const st = await Promise.race([
+      FeisuoBridge.getUpdateStatus(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+    ]);
+    if (st) adoptUpdateStatus(st);
+    else console.warn("[update] 读取更新状态超时（后端无响应），保留上一次的值");
   } catch (e) {
     // 拿不到状态不是致命错误, 保留上一次的值即可
     console.warn("[update] 读取更新状态失败:", e);
@@ -6787,7 +6797,19 @@ function armUpdateWatchdog() {
     updateWatchdogTimer = null;
     let st: UpdateStatus | null = null;
     try {
-      st = await FeisuoBridge.getUpdateStatus();
+      // ⚠️ 这次询问**必须带超时**。
+      //
+      // `getUpdateStatus` 在后端要取 `status` 锁。如果后端因为死锁
+      // （本文件那句 `publish(UpdateStatus { ..self.status.lock()... })`
+      // 曾把它锁死）永远不释放，这个 await 就永远不返回 ——
+      // 于是**看门狗自己也挂住**，而它是界面卡死的最后一道防线。
+      // 防线自己失效，用户只能重启程序。
+      //
+      // 3 秒足够一次本地 IPC 往返；超时就当作"问不到"，直接落到失败态。
+      st = await Promise.race([
+        FeisuoBridge.getUpdateStatus(),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+      ]);
     } catch (e) {
       console.warn("[update] 看门狗读取更新状态失败:", e);
     }
@@ -6804,7 +6826,7 @@ function armUpdateWatchdog() {
         return;
       }
     }
-    // 后端仍在检查中, 且 45 秒没有任何状态变化 —— 按超时收尾。
+    // 后端仍在检查中（或连问都问不到），且 45 秒没有任何状态变化 —— 按超时收尾。
     // 文案与后端的超时文案一致: 用户不需要区分是谁先放弃的。
     manualCheckingUpdate.value = false;
     updateStatus.value = {
@@ -6830,7 +6852,24 @@ async function checkForUpdate() {
     // 看门狗从点击那一刻就武装: 它兜的是"后端一个字节都不回"的情况。
     armUpdateWatchdog();
     showToast("正在检查更新…");
-    const nextStatus = await FeisuoBridge.checkForUpdate(true);
+    // ⚠️ 这个 await 必须自带超时。
+    //
+    // 后端 `check_for_update` 是**长任务**（要串行问 Gitee / GitHub / 页面，
+    // 下载时还可能几分钟）。平时它一定会返回；但一旦后端卡在锁上
+    // （本文件那句 `publish(..self.status.lock()..)` 曾把它永久锁死），
+    // 这个 await 就永不返回，`finally` 也永远不执行 —— 按钮的 disabled
+    // 绑在 busy 上，用户看到的是"点了没反应，也点不了第二次"。
+    //
+    // 45 秒与看门狗同一量级：正常情况下后端 CHECK_BUDGET 25 秒内必收尾，
+    // 下载阶段由进度事件不断重置，不会误伤。
+    const nextStatus = await Promise.race([
+      FeisuoBridge.checkForUpdate(true),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 46_000)),
+    ]);
+    if (!nextStatus) {
+      // 超时：交给看门狗/下面这段统一落到诚实的失败态，不再干等。
+      throw new Error("检查更新超时（后端未在规定时间内响应）");
+    }
     adoptUpdateStatus(nextStatus);
     // 读的是**当前**状态而不是返回值: 返回值可能因迟到被丢弃。
     if (updateStatus.value.busy) armUpdateWatchdog();

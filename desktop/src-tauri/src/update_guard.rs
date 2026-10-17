@@ -963,6 +963,42 @@ fn last_check_time_and_anti_stuck_must_be_wired() {
         app.contains("function armUpdateWatchdog("),
         "缺少看门狗: 后端一个字节都不回时, 按钮会永远停在「进行中…」"
     );
+    // 看门狗自己必须带超时。
+    //
+    // 早先后端 `publish` 死锁时，`get_update_status` 命令也卡在取锁上，
+    // 于是看门狗那个 `await` 永不返回 —— 最后一道防线跟着一起失效。
+    // 判据: 看门狗函数体里必须出现 Promise.race（或等价的超时手段）。
+    let wd_at = app
+        .find("function armUpdateWatchdog(")
+        .expect("App.vue 缺少 armUpdateWatchdog");
+    let wd_body: String = app[wd_at..].chars().take(2600).collect();
+    assert!(
+        wd_body.contains("Promise.race("),
+        "看门狗询问后端的 await 没有超时 —— 后端一旦卡在锁上，\
+         看门狗也会永远挂住，用户只能重启程序"
+    );
+
+    // 同一条防线要覆盖到真正的调用点：
+    //  - `loadUpdateStatus` 会在切设置页时被 await，不能拖住整页；
+    //  - `checkForUpdate` 的返回值 await 不返回时，finally 不执行、按钮永久禁用。
+    let load_at = app
+        .find("async function loadUpdateStatus(")
+        .expect("App.vue 缺少 loadUpdateStatus");
+    let load_body: String = app[load_at..].chars().take(1400).collect();
+    assert!(
+        load_body.contains("Promise.race("),
+        "loadUpdateStatus 没有超时 —— 后端卡住时切到设置页会整页卡住"
+    );
+
+    let chk_at = app
+        .find("async function checkForUpdate(")
+        .expect("App.vue 缺少 checkForUpdate");
+    let chk_body: String = app[chk_at..].chars().take(1800).collect();
+    assert!(
+        chk_body.contains("Promise.race("),
+        "checkForUpdate 的 checkForUpdate(true) 调用没有超时 —— \
+         后端不返回时 finally 不执行，按钮永久停在「进行中…」"
+    );
     let at = app
         .find("async function checkForUpdate(")
         .expect("App.vue 缺少 checkForUpdate");
@@ -972,3 +1008,108 @@ fn last_check_time_and_anti_stuck_must_be_wired() {
         "手动「检查更新」必须武装看门狗 —— 这是界面卡死的最后一道防线"
     );
 }
+
+/// `publish` 的参数里**不许**再取 `self.status` 的锁。
+///
+/// ## 这条守卫守的是一个把整个更新子系统锁死的死锁
+///
+/// ```ignore
+/// self.publish(UpdateStatus { ..self.status.lock().await.clone() }).await;
+/// ```
+///
+/// 看起来完全正常，实际必然死锁。原因**不是**业务逻辑：Rust 的临时量
+/// 生命周期规定，`..expr` 里的 `MutexGuard` 是个临时量，它的 drop 在
+/// **整条语句**结束时才发生 —— 而这条语句包含 `publish(...).await`。
+/// `publish` 内部第一件事就是取同一把 `status` 锁 ⇒ 自己等自己，永不返回。
+///
+/// 后果不是"更新偶尔失败"，是**更新从来没有成功过**：
+/// - `note_stage()` 是检查流程的第一个动作，它一挂，网络请求根本没发出；
+/// - 日志里连一行 `开始检查应用更新` 都没有（那行在 `note_stage` 之后）；
+/// - `record_check_time()` 也轮不到跑，「上次检查」永远是「尚未检查」；
+/// - `get_update_status` 命令也要取同一把锁 ⇒ 前端 45 秒看门狗
+///   连"问一下后端"都做不到，界面永久停在「正在检查更新… · 进行中…」。
+///
+/// 编译期完全无感（`await` 之后仍是合法代码），clippy 也不报。
+/// 所以只能靠这条守卫把它钉住：派生快照必须走 `publish_from`。
+#[test]
+fn publish_must_not_nest_the_status_lock() {
+    let updater = updater_src();
+
+    // 把注释剥掉 —— 本文件的说明文字里就写着这个反例，
+    // 不剥的话守卫会对着自己的文档报警。
+    let mut code = String::with_capacity(updater.len());
+    let mut in_block = false;
+    for line in updater.lines() {
+        let t = line.trim();
+        if in_block {
+            if t.contains("*/") {
+                in_block = false;
+            }
+            continue;
+        }
+        if t.starts_with("/*") {
+            if !t.contains("*/") {
+                in_block = true;
+            }
+            continue;
+        }
+        if t.starts_with("//") {
+            continue;
+        }
+        code.push_str(line);
+        code.push('\n');
+    }
+
+    // 把 `publish` 的调用逐个切出来看参数里有没有 `status.lock()`。
+    // 只匹配**调用点**（`self.publish` / `.publish(`），不匹配定义
+    // （`async fn publish(`）—— 定义里当然要取锁，那是它的职责。
+    let mut offenders: Vec<String> = Vec::new();
+    for (idx, _) in code.match_indices(".publish(") {
+        // 定义处是 `async fn publish(`，前面没有点号；这里已经要求 `.publish(`
+        // 所以天然排除。再排除 `publish_from`（它没有的，名字不同）。
+        let tail = &code[idx..];
+        // 取到配对的右括号，参数可能跨多行
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, c) in tail.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else { continue };
+        let args = &tail[..=end];
+        if args.contains("status.lock()") || args.contains("self.status.lock") {
+            let line_no = code[..idx].lines().count();
+            offenders.push(format!("第 {line_no} 行: {}", args.lines().next().unwrap_or("").trim()));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "发现 `publish(...)` 的参数里取了 `self.status` 的锁 —— 这必然死锁，\
+         而且会把整个更新功能锁死（连前端看门狗一起挂住）：\n  {}\n\
+         正确写法：`self.publish_from(|cur| UpdateStatus {{ ..cur.clone(), .. }}).await`，\
+         或先把 `self.status.lock().await.clone()` 绑到变量上再用。",
+        offenders.join("\n  ")
+    );
+
+    // 正面的锚点：安全入口必须存在，否则上面的断言可以靠"什么都不写"通过。
+    assert!(
+        updater.contains("async fn publish_from<F>("),
+        "缺少 publish_from —— 派生快照的唯一安全入口"
+    );
+    assert!(
+        updater.contains("let snapshot = self.status.lock().await.clone();"),
+        "publish_from 必须先在**独立语句**里取快照（分号结束即释放锁），\
+         不能在调用 publish 的同一句里展开"
+    );
+}
+

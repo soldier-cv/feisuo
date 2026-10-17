@@ -4,6 +4,23 @@
 
 ## [Unreleased]
 
+## [0.1.9] — 2026-10-17
+
+### 修复
+
+- **检查更新永久卡在「正在检查更新…」（根治）**：
+  - 根因是后端 `publish` 的**自我死锁**：`self.publish(UpdateStatus { ..self.status.lock().await.clone() })`。那个 `MutexGuard` 是临时量，存活到整条语句结束，而该语句包含 `publish(...).await`；`publish` 内部又取同一把锁 —— 自己等自己，第一次调用就永久挂起。
+  - 后果是全链路锁死：`note_stage()` 是检查流程的第一个动作，一挂就再也发不出网络请求；`record_check_time()` 轮不到跑，界面「上次检查」永远是「尚未检查」；`get_update_status` 命令同样要取这把锁，于是前端 45 秒看门狗连"问一下后端"都做不到，只能重启程序。日志里因此连一条更新记录都没有。
+  - 8 处调用点全部改走新增的 `publish_from(|cur| ...)`：先在**独立语句**取快照（分号结束即释放锁），再派生状态；新增守卫 `publish_must_not_nest_the_status_lock` 拦住这种写法回归。
+  - **看门狗自身加超时**：询问后端改为 `Promise.race` + 3 秒。此前防线与后端同锁，后端一卡它也一起挂住。
+- **更新下载的重定向不受域名白名单约束**：此前只校验**初始** URL，而 Gitee 的下载要连跳两次（`gitee.com` → `/attach_files` → `foruda.gitee.com`），一个被劫持的 API 响应可以返回合法 gitee 地址再 302 到任意主机下 exe。现在逐跳校验，最多 5 跳。
+- `restore_pending` 与"复用已下载更新"两处存在持锁跨 `await`（`pending` 锁），会阻塞并发的「立即更新」，改为先取快照再进分支。
+
+### 新增
+
+- 两条**真实网络**端到端测试（`--ignored`）：Gitee Release 可解析且能挑出 exe、下载经重定向后每一跳仍在白名单内并能读到真实字节。
+- `redirect_hop_must_stay_trusted`：钉住真实重定向链放行、站外与仿冒域名拒绝。
+
 ## [0.1.8] — 2026-10-17
 
 ### 新增
