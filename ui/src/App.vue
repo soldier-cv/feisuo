@@ -280,10 +280,37 @@
 
               只在"搜了很久还一台都没有"时出现，不打扰正常用户。
             -->
+            <!--
+              防火墙引导 —— **默认折叠成一行**。
+
+              ## 为什么必须收起来
+
+              这段说明有 5 行、含「Windows 安全中心 → 防火墙和网络保护 →
+              允许应用通过防火墙」这种必须逐字对照的步骤，**本质是一段
+              操作指南**。而它被放在 213px 宽的侧栏里：实测整块 **213×288**，
+              把设备列表直接挤出了首屏，文字也被压成每行 6~8 个字。
+
+              用户此刻的诉求是"设备在哪"，不是"读一篇防火墙教程"。
+              所以只留一行结论（+ 一个"怎么修"），要看细节再展开。
+
+              ## 为什么不删掉
+
+              首次运行 / 绿色版每次升级后，Windows 都会重新询问一次；
+              点了"拒绝"的用户**收不到任何文件**，而界面上只会一直转
+              "正在搜索附近设备…"。没有这段提示，这个故障无从排查。
+            -->
             <div v-if="showFirewallHint" class="firewall-hint">
-              <i class="ph ph-shield-warning"></i>
-              <div class="firewall-hint-body">
-                <strong>一直搜不到设备？看看 Windows 防火墙</strong>
+              <button
+                type="button"
+                class="firewall-hint-summary"
+                :aria-expanded="showFirewallDetail"
+                @click="showFirewallDetail = !showFirewallDetail"
+              >
+                <i class="ph ph-shield-warning"></i>
+                <span>搜不到设备？检查防火墙</span>
+                <i class="ph ph-caret-down" :class="{ rotated: showFirewallDetail }"></i>
+              </button>
+              <div v-if="showFirewallDetail" class="firewall-hint-body">
                 <p>
                   首次运行与每次升级后，Windows 都会询问是否允许本程序访问网络。
                   没点「允许」的话，本机<strong>收不到</strong>任何文件。
@@ -3146,7 +3173,10 @@ const showHiddenDrawer = ref(false);
  * 与其做一个假检测（误报比漏报更糟），不如用一个**保守的时间条件**：
  * 只在"确实没搜到任何设备"时才提示，而搜不到本身就是最强的信号。
  */
-const FIREWALL_HINT_AFTER_MS = 8000;const showFirewallHint = ref(false);
+const FIREWALL_HINT_AFTER_MS = 8000;
+const showFirewallHint = ref(false);
+/** 防火墙提示的**详情**是否展开。默认收起：它是一段操作指南，不是结论。 */
+const showFirewallDetail = ref(false);
 let firewallHintTimer: ReturnType<typeof setTimeout> | null = null;
 
 function armFirewallHint() {
@@ -7866,40 +7896,55 @@ function getFileIcon(name: string) {
  * 底色用 -soft 变体，保证在两套主题下都不刺眼
  * （check-contrast.py 覆盖这两枚前景/底色组合）。 */
 .firewall-hint {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  margin-top: 16px;
-  padding: 12px 14px;
-  max-width: 420px;
-  text-align: left;
+  margin-top: 12px;
+  /* 不再是一整块高饱和橙色告警框 —— 默认只有一行摘要，
+   * 展开后才显示正文。见模板里的注释。 */
   background: var(--warn-soft);
   border: 1px solid var(--warn-border);
   border-radius: var(--radius-md);
+  overflow: hidden;
 }
-.firewall-hint > i {
+.firewall-hint-summary {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--warn-text);
+  transition: background 0.15s;
+}
+.firewall-hint-summary:hover { background: var(--bg-hover-soft); }
+.firewall-hint-summary > i:first-child { font-size: 15px; flex: 0 0 auto; }
+.firewall-hint-summary > span { flex: 1; min-width: 0; }
+.firewall-hint-summary > i:last-child {
   flex: 0 0 auto;
-  margin-top: 1px;
-  font-size: 18px;
-  color: var(--warn-text);
+  font-size: 11px;
+  transition: transform 0.18s ease;
 }
-.firewall-hint-body { min-width: 0; }
+.firewall-hint-summary > i:last-child.rotated { transform: rotate(180deg); }
+.firewall-hint-body {
+  padding: 0 11px 11px;
+  min-width: 0;
+}
 .firewall-hint-body strong {
-  display: block;
-  font-size: 12.5px;
   color: var(--warn-text);
-  margin-bottom: 4px;
 }
 .firewall-hint-body p {
   margin: 0;
-  font-size: 12px;
-  line-height: 1.6;
+  font-size: 11.5px;
+  line-height: 1.65;
   color: var(--text-secondary);
 }
 .firewall-hint-how { margin-top: 6px !important; }
 .firewall-hint-body code {
   font-family: Consolas, "Cascadia Mono", monospace;
-  font-size: 11.5px;
+  font-size: 11px;
   padding: 1px 4px;
   border-radius: var(--radius-sm);
   background: var(--bg-inset);
@@ -8240,16 +8285,19 @@ function getFileIcon(name: string) {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  background: var(--bg-card);
+  /* 与 .custom-select-trigger 同源：都是"点一下展开一个列表"的控件。
+   * 早先这里用 --bg-card、CustomSelect 用 --bg-inset，圆角也不一致
+   * （4px vs 6px）—— 两处下拉长得像但不是一家人。 */
+  background: var(--bg-inset);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   padding: 2px 7px;
   color: var(--text-primary);
   font-size: 11.5px;
   font-family: inherit;
   cursor: pointer;
   outline: none;
-  transition: all 0.15s ease;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
   min-width: 96px;
   max-width: 175px;
 }
@@ -8257,6 +8305,13 @@ function getFileIcon(name: string) {
 .custom-dropdown-trigger.is-active {
   background: var(--bg-hover-soft);
   border-color: var(--border-strong);
+}
+/* 展开态要有和 CustomSelect 一致的可见焦点环，
+ * 否则同一个界面里两种下拉对"我正在操作它"的提示不一样。 */
+.custom-dropdown-trigger:focus-visible,
+.custom-dropdown-trigger.is-active {
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 1px var(--focus-ring);
 }
 .custom-dropdown-trigger:disabled {
   opacity: 0.6;
@@ -8287,12 +8342,14 @@ function getFileIcon(name: string) {
   min-width: 210px;
   max-height: 280px;
   overflow-y: auto;
-  background: var(--bg-card);
-  backdrop-filter: blur(12px);
-  border: 1px solid var(--border-subtle);
+  overscroll-behavior: contain;
+  /* 底色不透明，因此**不写** backdrop-filter：模糊没有可透出的内容，
+   * 只会白占一个合成层（那两处保留它的是半透明遮罩，用法正确）。 */
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-modal);
-  padding: 4px;
+  padding: 6px;
 }
 .dropdown-menu-item {
   width: 100%;
@@ -8402,7 +8459,7 @@ function getFileIcon(name: string) {
   color: var(--accent-on-soft);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
-.endpoint-chip:disabled { opacity: 0.45; cursor: not-allowed; }
+.endpoint-chip:disabled { opacity: 0.55; cursor: not-allowed; }
 .endpoint-ip {
   font-family: var(--font-mono, ui-monospace, Consolas, monospace);
   font-size: 11px;
@@ -8957,7 +9014,9 @@ function getFileIcon(name: string) {
 }
 .dir-send-btn:hover { background: var(--bg-hover-soft); color: var(--text-primary); }
 .dir-send-btn.is-on { background: var(--bg-active); color: var(--accent-on-soft); }
-.dir-send-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+/* 禁用态最低 0.55：0.3 会让文字对比度掉到 2:1 附近，
+ * 连"这个按钮存在"都看不出来 —— 而禁用态仍需要被识别。 */
+.dir-send-btn:disabled { opacity: 0.55; cursor: not-allowed; }
 
 /* 「每次匹配码」审批面板（§2.3） */
 .grant-code-panel {
@@ -9015,8 +9074,10 @@ function getFileIcon(name: string) {
   color: var(--danger-text);
 }
 
+/* 审批面板的按钮在"等待审批"期间会处于禁用态 —— 那是用户判断
+ * "现在能点什么"的唯一依据，文字必须读得清。统一到 0.5 以上。 */
 .approval-actions button:disabled {
-  opacity: 0.45;
+  opacity: 0.55;
   cursor: not-allowed;
   filter: none;
 }
@@ -9285,14 +9346,31 @@ function getFileIcon(name: string) {
 }
 .btn-fluent-primary:hover { filter: brightness(1.08); }
 .btn-fluent-primary:active { transform: scale(0.98); }
-.btn-fluent-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+/* 禁用态：改成中性底色 + 仍可读的文字，而不是整体压到 45% 透明。
+ *
+ * 实测 `opacity: 0.45` 让主按钮上的深色文字对比度掉到约 3.4:1，
+ * 而主按钮的禁用态在界面上**很常见**（输入框为空时的「开始连接」、
+ * 没选文件时的「发送」）。用户需要能读出"这个按钮是什么、为什么点不了"，
+ * 而不是面对一团灰绿。 */
+.btn-fluent-primary:disabled {
+  cursor: not-allowed;
+  opacity: 1;
+  background: var(--bg-card);
+  color: var(--text-tertiary);
+  filter: none;
+}
 
 .btn-fluent-secondary {
   background: var(--bg-card);
   color: var(--text-primary);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  padding: 9px 18px;
+  /* 左右内边距必须与 primary 一致（20px）。
+   *
+   * 早先是 18px vs primary 的 20px：两个按钮并排时，图标与文字的
+   * 视觉重心偏移 2px，右边看起来"一个胖一个瘦"。单看每个都正常，
+   * 并排就是毛边 —— 而它们几乎总是并排出现（选择文件 / 发送剪贴板）。 */
+  padding: 9px 20px;
   font-size: 13px;
   font-weight: 600;
   display: inline-flex;
@@ -9302,7 +9380,14 @@ function getFileIcon(name: string) {
   transition: background 0.15s, border-color 0.15s;
 }
 .btn-fluent-secondary:hover { background: var(--bg-card-hover); border-color: var(--border-strong); }
-.btn-fluent-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
+/* 次要按钮的禁用态保持可读：0.5 透明时文字约 4.1:1，压线。
+ * 直接换中性文字色，不再依赖透明度。 */
+.btn-fluent-secondary:disabled {
+  cursor: not-allowed;
+  opacity: 1;
+  color: var(--text-tertiary);
+  background: var(--bg-inset);
+}
 
 .btn-danger-solid {
   /* 必须用 --danger-solid 而不是 --danger: 白字压 #ff6b6b(深色主题的
@@ -9311,7 +9396,8 @@ function getFileIcon(name: string) {
   color: var(--text-on-solid);
   border: 0;
   border-radius: var(--radius-md);
-  padding: 9px 18px;
+  /* 与其它同尺寸按钮统一（primary / secondary 都是 20px） */
+  padding: 9px 20px;
   font-size: 13px;
   font-weight: 650;
   display: inline-flex;
@@ -9505,7 +9591,7 @@ function getFileIcon(name: string) {
 .crumb-up { color: var(--text-tertiary); flex-shrink: 0; }
 .crumb-up:hover:not(:disabled),
 .crumb-item:hover { color: var(--accent-text); background: var(--bg-hover-soft); }
-.crumb-up:disabled { opacity: 0.35; cursor: default; }
+.crumb-up:disabled { opacity: 0.5; cursor: default; }
 .crumb-item.is-current { color: var(--text-primary); font-weight: 700; cursor: default; }
 .crumb-sep { color: var(--text-tertiary); font-size: 9px; flex-shrink: 0; }
 .pane-truncated-hint {
@@ -9676,7 +9762,29 @@ function getFileIcon(name: string) {
 }
 .shuttle-op-button.send-op { background: var(--accent); color: var(--accent-contrast); }
 .shuttle-op-button.fetch-op { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border-subtle); }
-.shuttle-op-button:disabled { opacity: 0.4; cursor: not-allowed; }
+/* 禁用态：**不要**用整块 opacity。
+ *
+ * 早先是 `opacity: 0.4` —— 它把文字、图标、底色**一起**压暗，
+ * 白字压在 #20222b 上实测对比度约 3.2:1，低于 WCAG AA 的 4.5:1。
+ * 而这两个按钮是穿梭页的核心操作，用户需要读得懂"现在是取回不可用"，
+ * 而不是面对两团看不清的灰块。
+ *
+ * 正确做法：只降**背景**的强调度、保留文字的对比度，并明确光标。
+ * 用户一眼就能看出"它在、但现在点不了"。 */
+.shuttle-op-button:disabled {
+  cursor: not-allowed;
+  opacity: 1;
+  filter: saturate(0.25);
+}
+.shuttle-op-button.send-op:disabled {
+  background: var(--bg-card);
+  color: var(--text-tertiary);
+  border: 1px solid var(--border-subtle);
+}
+.shuttle-op-button.fetch-op:disabled {
+  background: var(--bg-inset);
+  color: var(--text-tertiary);
+}
 .shuttle-op-button:not(:disabled):hover { filter: brightness(1.08); }
 
 /* 8. 记录 / 设置面板 */
@@ -9856,8 +9964,25 @@ function getFileIcon(name: string) {
   line-height: 1.45;
 }
 .path-mono { color: var(--accent-text) !important; font-size: 11.5px !important; word-break: break-all; }
-.setting-action-group { display: flex; gap: 8px; flex-shrink: 0; align-items: center; }
-.name-input { width: 220px; }
+.setting-action-group {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+  align-items: center;
+  /* 右列的所有控件共用同一条右边界。
+   *
+   * 输入框/下拉是定宽 220px（`--control-col-width`），而按钮组是
+   * 内容撑开的（110+8+95 = 213px）—— 两者右边缘差 7px，
+   * 实测下拉右边缘 x=1385、按钮组 x=1378。单看每一行都"正常"，
+   * 整列扫下来就是毛边。
+   *
+   * 这里不强行把按钮组拉成 220px（那会让按钮之间出现空隙），
+   * 而是让它 **min-width 对齐** 并把内容推到右边，保持自然宽度
+   * 的同时右边界一致。 */
+  justify-content: flex-end;
+  min-width: var(--control-col-width);
+}
+.name-input { width: var(--control-col-width); flex: 0 0 var(--control-col-width); }
 .saved-hint {
   display: inline-flex;
   align-items: center;
@@ -9990,10 +10115,20 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   transition: color 0.15s, border-color 0.15s;
 }
 .btn-unblock:hover { color: var(--text-primary); border-color: var(--accent); }
+/* ---- 设置页右列控件的统一宽度 ----
+ *
+ * 为什么需要这个令牌：同一列里混着输入框（`.name-input`）、下拉
+ * （`.select-compact`）、以及若干按钮。早先各自的宽度是写死的
+ * `220px`，而输入框又带 `flex: 1`，被父级压缩后实测只有 **161px** ——
+ * 于是设备名输入框比它下面的并发数下拉**窄一截**，右边缘参差不齐。
+ * 用户看到的是"这一列没对齐"，但说不出为什么，只会觉得界面粗糙。
+ *
+ * 统一成同一个值 + `flex: 0 0 auto`（禁止被压缩），它们就必然同宽。
+ */
 .select-compact,
 .fluent-select-wrapper.select-compact {
-  width: 220px;
-  flex: 0 0 220px;
+  width: var(--control-col-width);
+  flex: 0 0 var(--control-col-width);
 }
 .pair-select-wrapper {
   width: 100%;
@@ -10159,8 +10294,24 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
 }
 .modal-dialog-titlebar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
 .modal-dialog-titlebar h3 { font-size: 16px; font-weight: 700; color: var(--text-primary); }
-.modal-close-icon { background: none; border: 0; color: var(--text-secondary); cursor: pointer; font-size: 18px; }
+.modal-close-icon {
+  background: none;
+  border: 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 18px;
+  /* 注意：不要给它设 `background` 或 `border` 的可见值 ——
+   * 弹窗打开时焦点会落在它身上（`v-modal-focus` 把焦点交给标题栏第一个
+   * 可聚焦元素），此时浏览器画的是**默认方框焦点环**，在圆角弹窗里
+   * 像一个绿框贴在角落。用 border-radius 让它随按钮形状走。 */
+  border-radius: var(--radius-sm);
+}
 .modal-close-icon:hover { color: var(--text-primary); }
+/* 焦点环统一成项目自己的 token，而不是 UA 默认的方框 */
+.modal-close-icon:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
 
 /* 配对流程说明。放在标签页**上方**而不是下方：它是"选哪个之前"
  * 就该知道的前提，排在标签页之后就成了"选完再解释你选错了"。 */

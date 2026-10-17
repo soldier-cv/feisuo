@@ -105,6 +105,35 @@ function isOptionSelected(val: string | number): boolean {
   return val === props.modelValue;
 }
 
+/**
+ * 决定向上还是向下展开。
+ *
+ * ## 为什么要在打开**之后**再算一次，且滚动时也要重算
+ *
+ * 早先只在 `openDropdown` 的 `nextTick` 里算一次方向就再也不管了。
+ * 但设置页本身就是可滚动的：用户展开一个靠近底部的下拉、往上滚两下，
+ * 那个面板仍固执地向上弹 —— 因为它盖住了它自己的触发器。
+ *
+ * 判据用面板**实际**需要的空间（`panelRef.scrollHeight`），而不是
+ * 写死的 220：选项多的时候宁可向上，也不要被裁掉一半。
+ */
+function updatePlacement() {
+  if (!isOpen.value) return;
+  const el = selectRef.value;
+  if (!el) return;
+  const rect = el.getBoundingClientRect();
+
+  // 面板还没有渲染时用选项数估一个高度：每项约 34px + 12px 内边距。
+  const estimated = Math.min(320, props.options.length * 34 + 12);
+  const wanted = panelRef.value?.scrollHeight || estimated;
+
+  const spaceBelow = window.innerHeight - rect.bottom - 12;
+  const spaceAbove = rect.top - 12;
+
+  // 只有"下面确实放不下、且上面更宽裕"时才向上翻。
+  placement.value = spaceBelow < wanted && spaceAbove > spaceBelow ? "top" : "bottom";
+}
+
 function toggleDropdown() {
   if (props.disabled) return;
   if (isOpen.value) {
@@ -120,24 +149,17 @@ function openDropdown() {
   const currentIdx = props.options.findIndex((opt) => opt.value === props.modelValue);
   highlightedIndex.value = currentIdx >= 0 ? currentIdx : 0;
 
-  // 自适应判断展开方向（若下方空间不足则向上弹出）
-  nextTick(() => {
-    if (selectRef.value) {
-      const rect = selectRef.value.getBoundingClientRect();
-      const spaceBelow = window.innerHeight - rect.bottom;
-      const spaceAbove = rect.top;
-      if (spaceBelow < 220 && spaceAbove > spaceBelow) {
-        placement.value = "top";
-      } else {
-        placement.value = "bottom";
-      }
-    }
-  });
+  nextTick(updatePlacement);
+  // 滚动 / 窗口尺寸变化时重新判方向。用 passive 避免拖慢滚动。
+  window.addEventListener("scroll", updatePlacement, true);
+  window.addEventListener("resize", updatePlacement);
 }
 
 function closeDropdown() {
   isOpen.value = false;
   highlightedIndex.value = -1;
+  window.removeEventListener("scroll", updatePlacement, true);
+  window.removeEventListener("resize", updatePlacement);
 }
 
 function handleSelect(opt: SelectOption) {
@@ -185,6 +207,11 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   document.removeEventListener("mousedown", handleClickOutside, true);
+  // 组件在下拉展开状态被卸载时（切页签、列表重排），
+  // 那两个 window 监听器不会自己消失 —— 它们闭包着已经销毁的
+  // 组件实例，之后每次滚动都会白跑一次。
+  window.removeEventListener("scroll", updatePlacement, true);
+  window.removeEventListener("resize", updatePlacement);
 });
 </script>
 
@@ -200,12 +227,21 @@ onBeforeUnmount(() => {
 .custom-select-trigger {
   width: 100%;
   height: 38px;
-  background: var(--bg-card);
+  /* 底色必须与 `.standard-text-input` 一致（`--bg-inset`）。
+   *
+   * 早先这里是 `--bg-card`(#20222b)，而同一列里的设备名输入框是
+   * `--bg-inset`(#16181f) —— 两个并排的控件深浅不同，看起来像
+   * 一个是可编辑的、一个不是，而它们其实是同一层级的设置项。 */
+  background: var(--bg-inset);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md, 8px);
   color: var(--text-primary);
   padding: 0 12px;
   font-size: 13px;
+  /* `text-align` 必须显式给 left：按钮的 UA 默认是 center，
+   * 它会**穿透**到 .custom-select-label 之前的那一层盒子，
+   * 在窄宽度下把选项文字推到中间。 */
+  text-align: left;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -221,10 +257,16 @@ onBeforeUnmount(() => {
   border-color: var(--border-strong);
 }
 
+/* 展开态用**柔和**的焦点环，与输入框的 focus 视觉统一。
+ *
+ * 早先这里是 `0 0 0 2px var(--accent-glow)`：2px 实心品牌色外扩环
+ * 在深色背景上过于抢眼，展开一个下拉就让整页视线被拽过去。
+ * 输入框的 focus 用的是 `--focus-ring` 描边（不改变盒模型尺寸），
+ * 两者应当看起来是同一个系统。 */
 .custom-select-trigger.is-active,
 .custom-select-trigger:focus-visible {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-glow);
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 1px var(--focus-ring);
 }
 
 .custom-select-trigger:disabled {
@@ -262,26 +304,40 @@ onBeforeUnmount(() => {
   position: absolute;
   left: 0;
   width: 100%;
-  min-width: 160px;
-  max-height: 220px;
+  min-width: 100%;
+  /* 高度自适应，但留出上下各 12px 的呼吸空间。
+   *
+   * 早先写死 `max-height: 220px`：选项一多就出现内部滚动条，而滚动条
+   * 只在鼠标移上去时才浮现（`::-webkit-scrollbar-thumb` 是深色的），
+   * 用户容易以为列表就这么几项。改成跟随视口，最多到 `min(320px, ...)`，
+   * 同时靠 `overflow-y: auto` 兜住极端情况。 */
+  max-height: min(320px, calc(100vh - 24px));
   overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
-  padding: 4px;
+  /* 内边距与选项的圆角必须**同源**：padding 4px + option 圆角 4px
+   * 时，选中项的高亮块会贴着面板边缘显得局促；6px 让高亮块四周
+   * 都有均等的空隙。 */
+  padding: 6px;
   box-shadow: var(--shadow-modal);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  /* 刻意**不用** backdrop-filter。
+   *
+   * 它在这里完全无效：面板底色 `--bg-elevated` 是不透明色，
+   * 模糊没有可透出的内容 —— 浏览器仍会为它分配一个合成层并每帧
+   * 重算，纯粹白烧 GPU。要真正做毛玻璃，底色必须先带透明度
+   * （如 rgba），而那会让长中文列表的可读性下降。 */
   z-index: var(--z-overlay-nested);
   box-sizing: border-box;
 }
 
 .custom-select-panel.panel-bottom {
-  top: calc(100% + 5px);
+  top: calc(100% + 6px);
 }
 
 .custom-select-panel.panel-top {
-  bottom: calc(100% + 5px);
+  bottom: calc(100% + 6px);
 }
 
 /* 选项项 */

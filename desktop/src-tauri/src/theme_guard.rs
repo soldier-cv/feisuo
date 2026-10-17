@@ -2712,6 +2712,166 @@ fn progress_bars_must_not_animate_layout_properties() {
     );
 }
 
+/// 同一列 / 同一组的控件必须**共享**同一条尺寸与外观来源。
+///
+/// ## 这条守卫对应的是"看起来没坏，但就是不齐"的一类问题
+///
+/// 本轮 UI 复核里实际发现的三处，都是**单看每个控件都正常、并排就露馅**：
+///
+/// 1. 设置页右列的输入框写 `width: 220px` 且带 `flex: 1`，被父级压缩后
+///    实测只有 **161px**，而它下面的下拉是 220px —— 右边缘相差 59px。
+/// 2. 两个下拉实现（`CustomSelect` 与穿梭页的 `.custom-dropdown-trigger`）
+///    一个用 `--bg-inset` + 6px 圆角，一个用 `--bg-card` + 4px 圆角，
+///    同样的交互长得不像一家人。
+/// 3. `btn-fluent-primary` 的左右内边距是 20px，`btn-fluent-secondary`
+///    是 18px —— 并排时（选择文件 / 发送剪贴板）重心偏移 2px。
+///
+/// 这类问题**没有任何运行时报错**，样式写错也只是"看起来糙一点"，
+/// 所以只能靠静态断言把"必须同源"这件事钉住。
+#[test]
+fn sibling_controls_must_share_their_size_and_surface() {
+    let app = strip_comments(
+        &std::fs::read_to_string(ui_src().join("App.vue")).expect("读取 App.vue 失败"),
+    );
+    let select = strip_comments(
+        &std::fs::read_to_string(ui_src().join("components").join("CustomSelect.vue"))
+            .expect("读取 CustomSelect.vue 失败"),
+    );
+    let css = strip_comments(
+        &std::fs::read_to_string(ui_src().join("style.css")).expect("读取 style.css 失败"),
+    );
+
+    // 1) 设置页右列必须走同一个宽度令牌，不许再出现裸数字宽度。
+    assert!(
+        css.contains("--control-col-width:"),
+        "style.css 缺少 --control-col-width —— 设置页右列的输入框与下拉\
+         会各自写死宽度，压缩后右边缘参差"
+    );
+    for rule in [".name-input", ".select-compact"] {
+        let needle = format!("{rule} {{");
+        let at = app
+            .find(&needle)
+            .unwrap_or_else(|| panic!("App.vue 里找不到 {rule}"));
+        let body: String = app[at..].chars().take(400).collect();
+        assert!(
+            body.contains("var(--control-col-width)"),
+            "{rule} 没有使用 --control-col-width 令牌 —— \
+             同一列里的控件会宽窄不一，右边缘对不齐"
+        );
+    }
+
+    // 2) 两个下拉的外观必须同源：底色与圆角都要一致。
+    let trigger_at = select
+        .find(".custom-select-trigger {")
+        .expect("CustomSelect 缺少 .custom-select-trigger");
+    let trigger: String = select[trigger_at..].chars().take(900).collect();
+    assert!(
+        trigger.contains("background: var(--bg-inset)"),
+        "CustomSelect 触发器的底色要与其他输入控件一致（--bg-inset），\
+         否则同一列里深浅不同，看起来像「只有这个不能编辑」"
+    );
+    assert!(
+        trigger.contains("border-radius: var(--radius-md"),
+        "CustomSelect 触发器的圆角要与常规控件一致（--radius-md）"
+    );
+
+    let compact_at = app
+        .find(".custom-dropdown-trigger {")
+        .expect("App.vue 缺少 .custom-dropdown-trigger");
+    let compact: String = app[compact_at..].chars().take(900).collect();
+    assert!(
+        compact.contains("background: var(--bg-inset)"),
+        "穿梭页的紧凑下拉底色必须与 CustomSelect 同源（--bg-inset）"
+    );
+    assert!(
+        compact.contains("border-radius: var(--radius-md"),
+        "穿梭页紧凑下拉的圆角必须与 CustomSelect 一致 —— \
+         两处都是「点开一个列表」，圆角不同就是两套观感"
+    );
+
+    // 3) 主/次按钮的左右内边距必须相同，并排时重心才不会偏。
+    let pad_of = |cls: &str| -> String {
+        let needle = format!("{cls} {{");
+        let at = app
+            .find(&needle)
+            .unwrap_or_else(|| panic!("App.vue 里找不到 {cls}"));
+        let body: String = app[at..].chars().take(700).collect();
+        body.lines()
+            .find(|l| l.trim().starts_with("padding:"))
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let primary = pad_of(".btn-fluent-primary");
+    let secondary = pad_of(".btn-fluent-secondary");
+    assert!(
+        !primary.is_empty() && !secondary.is_empty(),
+        "主/次按钮应当显式声明 padding，便于比较"
+    );
+    // 比较左右内边距（取 `9px 20px` 的第二段）
+    let horiz = |p: &str| p.split_whitespace().nth(1).map(|s| s.trim_end_matches(';').to_string());
+    assert_eq!(
+        horiz(&primary),
+        horiz(&secondary),
+        "主按钮与次按钮的左右内边距必须相同（现在 primary={primary:?} / secondary={secondary:?}）\
+         —— 并排时（选择文件 / 发送剪贴板）会有 2px 的重心偏移"
+    );
+
+    // 4) 禁用态不许用整块 opacity 把文字一起压暗到不可读。
+    //
+    // 实测 `opacity: 0.4` 时白字压在 #20222b 上只有 3.70:1（AA 要 4.5:1）。
+    // 禁用态仍然需要被读懂"这是什么、为什么点不了"。
+    for (name, src) in [("App.vue", &app), ("CustomSelect.vue", &select)] {
+        let mut idx = 0;
+        while let Some(rel) = src[idx..].find(":disabled") {
+            let at = idx + rel;
+            // 取该选择器后面的第一个规则体
+            if let Some(open) = src[at..].find('{') {
+                if let Some(close) = src[at + open..].find('}') {
+                    let body = &src[at + open..at + open + close];
+                    if let Some(op_pos) = body.find("opacity:") {
+                        let val: String = body[op_pos + "opacity:".len()..]
+                            .chars()
+                            .take_while(|c| *c != ';' && *c != '}')
+                            .collect();
+                        if let Ok(v) = val.trim().parse::<f32>() {
+                            assert!(
+                                v >= 0.5,
+                                "{name} 的禁用态用了 opacity: {v} —— \
+                                 它会把文字一起压暗到 AA 线以下（0.4 实测仅 3.70:1）。\
+                                 改用中性底色 + 可读的文字色"
+                            );
+                        }
+                    }
+                }
+            }
+            idx = at + ":disabled".len();
+        }
+    }
+
+    // 5) 不透明的面板上不许挂 backdrop-filter：模糊没有可透出的内容，
+    //    只会白占一个合成层。
+    for (name, src) in [("App.vue", &app), ("CustomSelect.vue", &select)] {
+        let mut idx = 0;
+        while let Some(rel) = src[idx..].find("backdrop-filter") {
+            let at = idx + rel;
+            // 往回找同一个规则的开头
+            let rule_start = src[..at].rfind('{').map(|i| i + 1).unwrap_or(0);
+            let rule = &src[rule_start..at];
+            let opaque = rule.contains("background: var(--bg-card)")
+                || rule.contains("background: var(--bg-elevated)")
+                || rule.contains("background: var(--bg-inset)");
+            assert!(
+                !opaque,
+                "{name} 在**不透明**背景上写了 backdrop-filter —— \
+                 模糊没有可透出的内容，纯属白烧 GPU。\
+                 要么给背景加透明度，要么去掉模糊。"
+            );
+            idx = at + "backdrop-filter".len();
+        }
+    }
+}
+
 /// 假链接 `<a href="javascript:void(0)">` 不允许再出现。
 ///
 /// 它带着链接的全部视觉暗示 (可点、有 hover、屏幕阅读器念"链接"),

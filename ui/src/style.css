@@ -96,10 +96,19 @@
    * 7px 单独存在（`.scope-mode`，只出现一次）、9px 只出现在
    * `.scope-foot` 的"只有下两角圆"里。这些都是随手写的痕迹。
    */
-  --radius-pill: 999px;
+   --radius-pill: 999px;
   --radius-lg: 10px;
   --radius-md: 6px;
   --radius-sm: 4px;
+
+  /* ---- 布局度量 ----
+   * 设置页右列控件（输入框 / 下拉 / 联动按钮组）的统一宽度。
+   *
+   * 抽成令牌的理由是**一致性必须能被一个数字表达**：早先这里散落着
+   * 三个 220px 和一个 `flex: 1`，被父级压缩后实测输入框只剩 161px ——
+   * 同一列里两个控件宽窄不同，右边缘参差。
+   * 两套主题都要声明：未定义的 var() 会让整条声明失效。 */
+  --control-col-width: 220px;
 
   /* ---- 文本 ---- */
   --text-primary: #ffffff;
@@ -215,6 +224,9 @@
   --radius-lg: 10px;
   --radius-md: 6px;
   --radius-sm: 4px;
+
+  /* 与深色主题同值：它是布局度量，不随主题变化，但必须声明 */
+  --control-col-width: 220px;
 
   --bg-window: #f3f5f9;
   --bg-sidebar: #e9edf4;
