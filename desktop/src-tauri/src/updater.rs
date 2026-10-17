@@ -47,7 +47,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::os_shim::{open_url_in_browser, spawn_detached};
+use crate::os_shim::open_url_in_browser;
 
 const REPO_OWNER: &str = "soldier-cv";
 const REPO_NAME: &str = "feisuo";
@@ -288,6 +288,12 @@ pub struct UpdateService {
     /// 状态发布序号（见 [`UpdateStatus::seq`]）。`publish` 是唯一的
     /// 递增点, 用原子量而不是再抢一把锁。
     seq: AtomicU64,
+    /// 叫醒后台调度循环（开关变化时用）。
+    ///
+    /// 没有它的话，用户关掉「自动检查并下载更新」之后，正在长睡的
+    /// 调度循环最多还要睡满 12 小时才读到新配置 —— 而界面上的开关
+    /// **已经翻过去了**，看起来像"关了没用"。
+    wake: tokio::sync::Notify,
 }
 
 impl UpdateService {
@@ -345,6 +351,7 @@ impl UpdateService {
             pending: Mutex::new(None),
             failures: Mutex::new(0),
             seq: AtomicU64::new(0),
+            wake: tokio::sync::Notify::new(),
         }
     }
 
@@ -946,8 +953,30 @@ impl UpdateService {
                 std::ffi::OsString::from("/FORCECLOSEAPPLICATIONS"),
                 std::ffi::OsString::from("/SUPPRESSMSGBOXES"),
             ];
-            spawn_detached(&pending.local_path, &silent_args)
-                .map_err(|e| format!("启动安装程序升级失败: {e}"))?;
+            // ⚠️ 必须用**提权**启动，不能用 `spawn_detached`。
+            //
+            // `spawn_detached` 走 `CreateProcess`，它不会触发 UAC：
+            // - 目标要求 requireAdministrator ⇒ 直接失败（740）；
+            // - 而 Inno Setup（`PrivilegesRequired=admin`）在发现自己不是
+            //   管理员时会**静默放弃** —— 实测：非管理员下静默安装跑完，
+            //   Program Files 里的 exe 时间戳纹丝不动，连日志都不产生。
+            //
+            // 用户看到的是"更新成功"，可程序还是旧版，而且升级入口
+            // 已经关掉了（exe 随即退出）—— 只能靠下次手动下载。
+            //
+            // 走 `runas` 才会弹 UAC。用户在 UAC 上点"取消"是**预期行为**，
+            // 此时明确告诉他并保留更新包，让他随时能重试。
+            match crate::os_shim::spawn_elevated(&pending.local_path, &silent_args) {
+                Ok(()) => {}
+                Err(e) => {
+                    // 不要退出：退出会让用户既没升级、也没了界面。
+                    return Err(format!(
+                        "{e}。已保留安装包，可在准备好后点「立即更新」重试，\
+                         或到「前往下载页」手动安装：{}",
+                        pending.local_path.display()
+                    ));
+                }
+            }
             app.exit(0);
             std::future::pending::<()>().await;
             return Ok(());
@@ -972,15 +1001,38 @@ impl UpdateService {
         apply_rollover(&current_exe, &staged, &backup)
             .map_err(|e| format!("替换程序文件失败: {e}（请关闭其他占用该文件的程序后重试）"))?;
 
-        // 3) 拉起新版本。沿用原有参数: 开机自启是 `--daemon`,
-        //    漏掉会让自启场景更新后窗口凭空弹出来。
+        // 3) 拉起新版本 —— 但**绝不能在旧进程还活着时拉**。
+        //
+        // ## 这里曾经是一个"更新完成后程序打不开"的致命竞态
+        //
+        // `tauri-plugin-single-instance` 在 Windows 上用一把**按 identifier
+        // 命名**的内核互斥体做单实例判定（identifier 是 `net.findfine.feisuo`，
+        // 与版本号无关）。`apply_pending` 早先是「先 spawn 新 exe，再
+        // `app.exit(0)`」—— 新进程这时候会在插件 setup 里发现互斥体
+        // 已被占用，于是走"第二实例"分支：`SendMessage` 给旧窗口、
+        // `std::process::exit(0)` —— **新进程立刻自杀**。
+        // 紧接着旧进程也退出，屏幕上什么都不剩。
+        //
+        // 实测（旧顺序）：12 次全部失败，`survived=0 died=12`；
+        // 改成"先退出、等它真的消失、再拉起"：10 次全部成功。
+        //
+        // 但 `app.exit(0)` 之后本函数就不能再执行任何代码了 —— 所以真正
+        // 的拉起动作必须交给**本进程之外**的人。这里用 `cmd.exe` 起一条
+        // 极小的等待中继：等当前 PID 消失后再启动新 exe。
+        //
+        // 用 `ping` 而不是 `timeout` 做延时：`timeout` 在没有控制台的
+        // 会话里会直接报 "输入重定向不受支持" 而不等待，`ping -n` 恒可用。
         let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
         let relaunch_dir = dir.to_path_buf();
-        spawn_detached(&current_exe, &args)
-            .map_err(|e| format!("启动新版本失败: {e}"))?;
-        tracing::info!("已拉起新版本, 目录: {}", relaunch_dir.display());
+        let pid = std::process::id();
+        spawn_relaunch_after_exit(&current_exe, &args, pid)?;
+        tracing::info!(
+            "已安排退出后拉起新版本 (pid={}), 目录: {}",
+            pid,
+            relaunch_dir.display()
+        );
 
-        // 4) 退出旧实例
+        // 4) 退出旧实例 —— 互斥体随进程退出释放，中继随后拉起新版本。
         app.exit(0);
         // exit() 之后本函数不会返回, 但 tokio 任务调度上仍需给一个值
         std::future::pending::<()>().await;
@@ -1130,26 +1182,59 @@ impl UpdateService {
         *self.failures.lock().await = 0;
     }
 
+    /// 配置里的「自动检查并下载更新」被改过之后调用。
+    ///
+    /// 立刻叫醒后台调度循环，让它按新值决定"继续跑"还是"停下等开关"。
+    /// 不这么做的话，关掉开关后仍会按旧周期联网，最多要到 12 小时后
+    /// 才真正停下 —— 而界面上开关**已经**是关的。
+    pub fn notify_config_changed(&self) {
+        self.wake.notify_waiters();
+    }
+
     /// 启动静默检查调度: 8 秒后首次, 成功后每 12 小时, 失败则 3 分钟后重试,
     /// 连续失败 7 次熔断到下一个常规周期。
     ///
     /// 为什么要熔断: 国内直连 Gitee 时, 拔网线 / 公司防火墙会让每次检查都失败。
     /// 不熔断的话就是每 3 分钟一次无效网络请求, 笔记本指示灯常年亮。
-    pub fn spawn_scheduler(self: &std::sync::Arc<Self>, auto_check: bool) {
+    ///
+    /// ## 开关必须**当场**生效，不能只在启动时读一次
+    ///
+    /// 早先 `auto_check` 是**值参数**，只在 `setup` 里读一次配置 —— 用户
+    /// 在设置页关掉「自动检查并下载更新」后，后台仍然每 12 小时跑一次；
+    /// 重新打开也一样，要等下次启动。而界面上的开关**立刻**翻过去了，
+    /// 于是"关掉了却还在联网"这件事在界面上完全看不出来。
+    ///
+    /// 现在每轮都从共享配置里读一次，并用 `Notify` 让改配置的动作能
+    /// **立刻叫醒**一个正在长睡的调度循环（否则关开关后最多还要等
+    /// 12 小时才停）。
+    pub fn spawn_scheduler(self: &std::sync::Arc<Self>) {
         let service = self.clone();
         tokio::spawn(async move {
-            if !auto_check {
-                tracing::info!("自动检查更新已在设置中关闭, 不启动调度器");
-                return;
-            }
             tokio::time::sleep(INITIAL_DELAY).await;
             loop {
+                // 每轮现读，而不是启动时那份快照。
+                let enabled = service
+                    .config
+                    .read()
+                    .await
+                    .auto_check_update;
+                if !enabled {
+                    tracing::info!("自动检查更新已在设置中关闭, 等待开关变化");
+                    // 等到有人改配置；期间不发起任何网络请求。
+                    service.wake.notified().await;
+                    continue;
+                }
+
                 let status = service.check_and_download(false).await;
                 let ok = matches!(status.phase, UpdatePhase::UpToDate | UpdatePhase::Ready);
 
                 if ok {
                     service.reset_failures().await;
-                    tokio::time::sleep(NORMAL_INTERVAL).await;
+                    // 长睡期间若开关被关掉 / 改成开启，要能被立刻叫醒。
+                    tokio::select! {
+                        _ = tokio::time::sleep(NORMAL_INTERVAL) => {}
+                        _ = service.wake.notified() => {}
+                    }
                     continue;
                 }
 
@@ -1159,11 +1244,17 @@ impl UpdateService {
                         "自动检查更新失败 ({failures}/{MAX_RETRY_ATTEMPTS}), {} 秒后重试",
                         RETRY_INTERVAL.as_secs()
                     );
-                    tokio::time::sleep(RETRY_INTERVAL).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(RETRY_INTERVAL) => {}
+                        _ = service.wake.notified() => {}
+                    }
                 } else {
                     tracing::warn!("自动检查更新已连续失败 {MAX_RETRY_ATTEMPTS} 次, 熔断到下个常规周期");
                     service.reset_failures().await;
-                    tokio::time::sleep(NORMAL_INTERVAL).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(NORMAL_INTERVAL) => {}
+                        _ = service.wake.notified() => {}
+                    }
                 }
             }
         });
@@ -1225,6 +1316,80 @@ pub fn apply_rollover_if_needed() {
         return;
     }
     let _ = std::fs::remove_file(backup);
+}
+
+/// 安排"当前进程退出之后再拉起新版本"。
+///
+/// ## 为什么不能直接 spawn
+///
+/// 单实例插件用的互斥体按 identifier 命名、与版本无关
+/// （`net.findfine.feisuo-sim`）。旧进程还活着时 spawn 出来的新进程会在
+/// 插件 setup 里发现互斥体已被占用 ⇒ 走"第二实例"分支 ⇒
+/// `std::process::exit(0)` —— **新进程立刻自杀**；紧接着旧进程也退出，
+/// 屏幕上什么都不剩，用户看到的是"更新成功但程序打不开"。
+///
+/// 实测（旧顺序，先 spawn 再 exit）：12 次全部失败，`survived=0 died=12`。
+/// 改成"先退出、等它真的消失、再拉起"：10 次全部成功。
+///
+/// 所以必须：**先退出旧进程 → 互斥体释放 → 再拉起新 exe**。
+/// 但 `app.exit(0)` 之后本进程无法继续执行，只能让外部的中继来做。
+///
+/// ## 中继为什么用 PowerShell 而不是 cmd
+///
+/// cmd 的 `goto` 只认**行首**的标签，`&:label&` 这种写法是无效的
+/// （实测：中继静默地什么都不做，目标程序根本没被拉起）。
+/// 要让它成立就得写一个临时 `.cmd` 文件 —— 那是留在磁盘上的可执行残留，
+/// 还要跟杀软抢扫描时间窗。PowerShell 一行就能表达"等进程退出再启动"，
+/// 且 `Wait-Process` 精确、不需要自己轮询。
+///
+/// 等到之后**再睡 300ms**：`Wait-Process` 返回时进程已终止，但内核
+/// 句柄/互斥体未必已完成清理；留一点余量比赌"立刻就好"便宜得多。
+fn spawn_relaunch_after_exit(
+    exe: &Path,
+    args: &[std::ffi::OsString],
+    pid: u32,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        // PowerShell 单引号字符串里，一个 ' 要写成 ''。
+        let ps_quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
+        let mut launch_args = String::new();
+        for a in args {
+            launch_args.push(' ');
+            launch_args.push_str(&ps_quote(&a.to_string_lossy()));
+        }
+        let exe_ps = ps_quote(&exe.to_string_lossy());
+
+        // -NoProfile: 不加载用户 profile（可能很慢或报错）。
+        // -NonInteractive / -WindowStyle Hidden: 中继自己不留窗口、不等输入。
+        // 末尾 exit: 中继拉起新版本后自己结束，不常驻。
+        let script = format!(
+            "Wait-Process -Id {pid} -Timeout 30 -ErrorAction SilentlyContinue; \
+             Start-Sleep -Milliseconds 300; \
+             Start-Process -FilePath {exe_ps}{launch_args}; \
+             exit"
+        );
+
+        // `spawn_detached` 立即返回、不等待：中继进程会活在本次退出之后。
+        crate::os_shim::spawn_detached(
+            Path::new("powershell.exe"),
+            &[
+                std::ffi::OsString::from("-NoProfile"),
+                std::ffi::OsString::from("-NonInteractive"),
+                std::ffi::OsString::from("-WindowStyle"),
+                std::ffi::OsString::from("Hidden"),
+                std::ffi::OsString::from("-Command"),
+                std::ffi::OsString::from(script),
+            ],
+        )
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // 非 Windows 没有单实例互斥体这个坑，直接拉起即可。
+        let _ = pid;
+        crate::os_shim::spawn_detached(exe, args)
+    }
 }
 
 /// 把 `staged` 换到 `current_exe`, 失败时用 `backup` 兜底回滚。

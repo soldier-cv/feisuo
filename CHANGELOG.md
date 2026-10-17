@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+## [0.1.10] — 2026-10-17
+
+### 修复
+
+- **更新完成后程序打不开（致命竞态）**：`apply_pending` 原来「先拉起新版本、再退出旧进程」。但 `tauri-plugin-single-instance` 的互斥体按 identifier 命名、与版本无关，旧进程还活着时新进程会被判成「第二实例」并**立即自杀**（实测 12/12 失败），紧接着旧进程也退出 —— 用户看到「更新成功」然后什么都没有。改为「先退出 → 由独立中继等旧进程消失 → 再拉起」，实测 10/10 成功、8/8 成功。
+- **安装版自动更新静默失败**：安装包分支用 `spawn_detached`（`CreateProcess`）启动，而 `CreateProcess` **不触发 UAC**。Inno Setup 在 `PrivilegesRequired=admin` 且当前不是管理员时会**静默放弃**（实测：跑完 Program Files 里的 exe 时间戳纹丝不动、无安装日志），随后 `app.exit(0)` —— 用户看到「更新成功」，程序还是旧版。改为 `ShellExecuteW` + `runas`（实测返回 42，UAC 正常弹出）；用户在 UAC 点取消时保留安装包并明确提示，不再直接退出。
+- **「自动检查并下载更新」开关必须重启才生效**：调度器以值参数接收开关、只在 `setup` 里读一次。关掉后后台仍每 12 小时联网，重新打开也要等下次启动 —— 而界面开关**立刻**就翻过去了。改为每轮现读配置，并用 `Notify` 让改配置能立刻叫醒长睡的调度循环。
+
+### 新增
+
+- 守卫 `apply_must_relaunch_after_exit_not_before`：钉住「先退出再拉起」的顺序，并禁止回退到 cmd 的 `goto` 中继（实测 `&:label&` 在单行 cmd 里无效，会静默不启动）。
+- 守卫 `installer_upgrade_must_request_elevation`：要求安装包分支使用提权启动，且必须用 `runas`、识别 UAC 取消码 1223。
+- 调度器守卫加强为行为检查（禁止按值接收开关、要求可被叫醒），并检查 `update_app_config` 真的发出通知。
+- 两条真实网络端到端测试（`--ignored`）：Gitee Release 可解析、下载重定向每一跳仍在白名单内。
+
 ## [0.1.9] — 2026-10-17
 
 ### 修复

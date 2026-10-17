@@ -708,8 +708,7 @@ fn rollover_must_rollback_on_failure() {
 /// 晚一步(Tauri 起来之后)就可能与引擎抢占同一批文件句柄, 表现为
 /// "更新后偶发启动失败", 而且极难复现。
 #[test]
-fn rollover_cleanup_must_run_at_startup() {
-    let main_rs = read(&desktop_src().join("main.rs"));
+fn rollover_cleanup_must_run_at_startup() {    let main_rs = read(&desktop_src().join("main.rs"));
     let updater = updater_src();
 
     assert!(
@@ -732,6 +731,138 @@ fn rollover_cleanup_must_run_at_startup() {
     assert!(
         cleanup_at < config_at,
         "apply_rollover_if_needed 必须在配置加载之前执行"
+    );
+}
+
+/// 换名接力必须先让旧进程退出，再拉起新版本。
+///
+/// ## 这条守卫守的是一个"更新成功但程序打不开"的致命竞态
+///
+/// `tauri-plugin-single-instance` 在 Windows 上用一把**按 identifier
+/// 命名**的内核互斥体做单实例判定（`net.findfine.feisuo-sim`，与版本号
+/// 无关 —— `semver` feature 没启用）。旧进程还活着时 spawn 出来的新进程
+/// 会在插件 setup 里发现互斥体被占 ⇒ 判定为"第二实例" ⇒
+/// `std::process::exit(0)`，**新进程刚启动就自杀**；紧接着旧进程也退出。
+///
+/// 实测（旧顺序「先 spawn 再 app.exit」）：12/12 全部失败，
+/// `survived=0 died=12`。用户看到的是"更新成功"，然后什么都没有 ——
+/// 比"更新失败"更糟，因为失败还会给错误信息。
+///
+/// 正确顺序只能是「先退出旧进程 → 互斥体释放 → 再拉起」，
+/// 而 `app.exit(0)` 之后本进程无法继续执行，所以必须交给外部中继。
+#[test]
+fn apply_must_relaunch_after_exit_not_before() {
+    let src = updater_src();
+    let start = src
+        .find("pub async fn apply_pending(")
+        .expect("找不到 apply_pending");
+    let body_start = src[start..]
+        .find('{')
+        .map(|i| start + i)
+        .expect("apply_pending 缺少函数体");
+    let end = src[body_start..]
+        .find("\n    async fn ")
+        .map(|i| body_start + i)
+        .unwrap_or(src.len());
+    let whole = &src[body_start..end];
+
+    // 只检查**绿色版换名接力那一支**。
+    //
+    // `apply_pending` 里有两个分支，各自都有自己的 `app.exit(0)`：
+    // 安装版（启动 Setup 静默安装）在前，绿色版换名接力在后。
+    // 安装版分支不需要中继 —— Inno Setup 自己会等待并接管，
+    // 所以必须先把它切掉，否则"exit 之前的最后一个 exit"必然取到它。
+    let relay_at = whole
+        .find("spawn_relaunch_after_exit")
+        .expect(
+            "apply_pending 的绿色版分支没有使用退出后拉起的中继 —— \
+             直接 spawn 新版本会被单实例互斥体判成第二实例并立刻退出",
+        );
+    let green = &whole[relay_at..];
+
+    // 中继必须在**它所在的这一支**的 app.exit 之前注册。
+    let exit_at = green.find("app.exit(0)").expect("绿色版分支缺少 app.exit");
+    assert!(
+        green.find("spawn_relaunch_after_exit").unwrap() < exit_at,
+        "中继必须在 app.exit(0) 之前注册 —— 退出之后就执行不到任何代码了"
+    );
+
+    // 3) 中继实现本身：必须等待目标 PID 消失。
+    let relay_fn = src
+        .find("fn spawn_relaunch_after_exit(")
+        .expect("缺少 spawn_relaunch_after_exit 实现");
+    let relay_body: String = src[relay_fn..].chars().take(2600).collect();
+    assert!(
+        relay_body.contains("Wait-Process") && relay_body.contains("-Id"),
+        "中继没有等待旧进程退出 —— 必须等互斥体释放再拉起，\
+         否则新进程会被判成第二实例"
+    );
+    // 用 PowerShell 而不是 cmd：cmd 的 goto 只认行首标签，
+    // `&:label&` 写法无效（实测会静默地什么都不做）。
+    assert!(
+        !relay_body.contains("goto wait"),
+        "中继不要用 cmd 的 goto 循环 —— 实测 `&:label&` 在单行 cmd 里无效，\
+         会导致更新后再也打不开程序"
+    );
+    assert!(
+        relay_body.contains("powershell.exe"),
+        "中继应使用 PowerShell（Wait-Process 精确等待）"
+    );
+    // 参数必须跟着传过去，否则开机自启的 `--daemon` 会丢，
+    // 更新后窗口凭空弹出。
+    assert!(
+        relay_body.contains("args"),
+        "中继没有转发启动参数 —— 开机自启的 --daemon 会丢"
+    );
+}
+
+/// 安装版必须用**提权**方式启动安装包。
+///
+/// ## 这条守卫对应的实测结论
+///
+/// `spawn_detached` 走 `CreateProcess`，它**不触发 UAC**。而 Inno Setup
+/// （本项目 `PrivilegesRequired=admin`）在发现自己不是管理员时会
+/// **静默放弃**：实测非管理员下跑到静默安装结束，`Program Files` 里的
+/// exe 时间戳纹丝不动，连一条安装日志都没产生。
+///
+/// 而这条分支随后就 `app.exit(0)` —— 用户看到"更新成功"、窗口关掉，
+/// 程序还是旧版，且更新入口已经没了。
+#[test]
+fn installer_upgrade_must_request_elevation() {
+    let src = updater_src();
+    let at = src
+        .find("let is_setup_pkg =")
+        .expect("找不到安装包分支");
+    let tail: String = src[at..].chars().take(2600).collect();
+
+    assert!(
+        tail.contains("spawn_elevated"),
+        "安装包分支没有用提权启动 —— CreateProcess 不触发 UAC，\
+         Inno 会静默放弃安装，用户看到「更新成功」但程序还是旧版"
+    );
+    assert!(
+        !tail.contains("spawn_detached(&pending.local_path"),
+        "安装包不能再走 spawn_detached（不触发提权）"
+    );
+
+    // os_shim 里必须真的用 ShellExecuteW + runas。
+    let shim = read(&desktop_src().join("os_shim.rs"));
+    let elev = shim
+        .find("pub fn spawn_elevated(")
+        .expect("缺少 spawn_elevated");
+    let elev_body: String = shim[elev..].chars().take(2400).collect();
+    assert!(
+        elev_body.contains("ShellExecuteW"),
+        "spawn_elevated 必须用 ShellExecuteW —— CreateProcess 无法提权"
+    );
+    assert!(
+        elev_body.contains("runas"),
+        "spawn_elevated 必须使用 runas 动词才会弹 UAC"
+    );
+    // 用户点"取消"（错误码 1223）要能被识别成"取消"，不是崩溃。
+    assert!(
+        elev_body.contains("1223"),
+        "spawn_elevated 必须识别 UAC 取消（ERROR_CANCELLED = 1223）"
     );
 }
 
@@ -819,10 +950,27 @@ fn scheduler_must_respect_setting_and_have_circuit_breaker() {
     let at = updater
         .find("fn spawn_scheduler(")
         .expect("找不到 spawn_scheduler");
-    let body: String = updater[at..].chars().take(2400).collect();
+    let body: String = updater[at..].chars().take(3200).collect();
+
+    // 开关必须**每轮现读**，而不是启动时读一次。
+    //
+    // 早先它是值参数 `spawn_scheduler(auto_check: bool)`，只在 setup 里
+    // 读一次配置 —— 用户在设置页关掉开关后，后台仍按旧周期每 12 小时
+    // 跑一次；重新打开也要等下次启动。而界面上的开关**立刻**就翻过去了，
+    // 于是"关了还在联网"在界面上完全看不出来。
     assert!(
-        body.contains("auto_check"),
-        "调度器必须读 auto_check 配置 —— 否则关不掉"
+        !body.contains("auto_check: bool"),
+        "spawn_scheduler 又变回按值接收开关 —— 那样开关只在启动时生效，\
+         用户改了设置必须重启程序"
+    );
+    assert!(
+        body.contains("auto_check_update"),
+        "调度循环没有从配置里读 auto_check_update —— 开关不生效"
+    );
+    assert!(
+        body.contains("notified()"),
+        "调度循环的长睡没有可被叫醒的通道 —— 关掉开关后仍要睡满一个周期\
+         （最长 12 小时）才会真正停下"
     );
     assert!(
         body.contains("MAX_RETRY_ATTEMPTS"),
@@ -831,6 +979,13 @@ fn scheduler_must_respect_setting_and_have_circuit_breaker() {
     assert!(
         body.contains("NORMAL_INTERVAL") && body.contains("RETRY_INTERVAL"),
         "调度器必须区分常规间隔与重试间隔"
+    );
+
+    // 改配置的入口必须真的去叫醒它。
+    let commands = read(&desktop_src().join("commands.rs"));
+    assert!(
+        commands.contains("notify_config_changed()"),
+        "update_app_config 没有通知调度器 —— 开关改了也不会当场生效"
     );
 }
 

@@ -39,6 +39,8 @@ windows = { version = "0.61", features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_UI_WindowsAndMessaging",
+    # ShellExecuteW（提权安装：runas 动词，触发 UAC）
+    "Win32_UI_Shell",
     # GetLogicalDrives / GetDriveTypeW / GetVolumeInformationW / GetDiskFreeSpaceExW
     "Win32_Storage_FileSystem",
     # CF_HDROP / CF_DIB / CF_UNICODETEXT 常量在 Ole 模块

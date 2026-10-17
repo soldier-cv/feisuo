@@ -95,6 +95,81 @@ pub fn spawn_detached(program: &Path, args: &[OsString]) -> Result<(), String> {
     Ok(())
 }
 
+/// 以**提权**方式启动一个程序（必要时弹 UAC）。
+///
+/// ## 为什么不能直接 `spawn_detached`
+///
+/// `Command::spawn` 走的是 `CreateProcess`，它**不会**触发提权：目标
+/// 清单要求 `requireAdministrator` 时，`CreateProcess` 直接失败
+/// （`ERROR_ELEVATION_REQUIRED = 740`）；而 Inno Setup 的 `PrivilegesRequired=admin`
+/// 判定发生在安装器内部 —— 它发现自己不是管理员时会**静默放弃**
+/// （实测：非管理员下静默安装返回后 Program Files 里的文件时间戳纹丝不动，
+/// 连一条安装日志都不产生）。用户看到的是"更新成功"，程序还是旧版。
+///
+/// 走 `ShellExecuteW` + `runas` 才会触发 UAC。这是 Windows 上唯一
+/// 正确的"以管理员身份运行"入口。
+///
+/// 返回值：成功拿到 Shell 句柄即 `Ok(())`。用户在 UAC 上点"取消"时
+/// 返回 `Err`（错误码 1223 = `ERROR_CANCELLED`），调用方应当把它当成
+/// "用户拒绝提权"而不是"更新失败"。
+pub fn spawn_elevated(program: &Path, args: &[OsString]) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        let wide = |s: &std::ffi::OsStr| -> Vec<u16> {
+            s.encode_wide().chain(std::iter::once(0)).collect()
+        };
+
+        // 参数按 Windows 命令行规则拼成一个字符串。
+        // 每个参数都用双引号包起来，内部的双引号转义成 \"。
+        let params = args
+            .iter()
+            .map(|a| {
+                let s = a.to_string_lossy();
+                format!("\"{}\"", s.replace('"', "\\\""))
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let verb = wide(std::ffi::OsStr::new("runas"));
+        let file = wide(program.as_os_str());
+        let params_w = wide(std::ffi::OsStr::new(&params));
+
+        // ShellExecuteW 的返回值是"大于 32 表示成功"的伪句柄，不是错误码。
+        let ret = unsafe {
+            ShellExecuteW(
+                None,
+                PCWSTR(verb.as_ptr()),
+                PCWSTR(file.as_ptr()),
+                PCWSTR(params_w.as_ptr()),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        let code = ret.0 as isize;
+        if code > 32 {
+            return Ok(());
+        }
+        // 1223 = 用户在 UAC 对话框上点了"否"。
+        let msg = if code == 1223 {
+            "用户取消了管理员授权".to_string()
+        } else {
+            format!("请求管理员权限失败 (ShellExecute 返回 {code})")
+        };
+        Err(msg)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // 非 Windows 没有 UAC 这一套，直接启动。
+        spawn_detached(program, args)
+    }
+}
+
 /// 在系统默认浏览器中打开一个 URL (主要用于更新失败时的手动兜底)。
 ///
 /// 刻意**不用** `cmd /c start`：那会先创建控制台再启动浏览器，

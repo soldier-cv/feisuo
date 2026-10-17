@@ -1456,6 +1456,7 @@ pub async fn update_app_config(
     payload: serde_json::Value,
     app: AppHandle,
     state: State<'_, AppState>,
+    updater: State<'_, Arc<UpdateService>>,
 ) -> Result<bool, String> {
     let patch: serde_json::Value = payload;
     let mut cfg = state.engine.config.write().await;
@@ -1564,6 +1565,11 @@ pub async fn update_app_config(
 
     // 日志级别立即生效, 无需重启
     crate::logger::set_level(&new_level);
+
+    // 「自动检查并下载更新」开关也必须**当场**生效。
+    // 后台调度平时在长睡（最长 12 小时），叫醒它才能立刻按新值行事；
+    // 否则关掉开关后它还会按旧周期联网，而界面上的开关已经翻过去了。
+    updater.notify_config_changed();
 
     // 设备名/落盘目录变更后广播一条事件, 前端可立即刷新显示
     let _ = app.emit("feisuo://config-updated", ());

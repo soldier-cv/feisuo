@@ -99,8 +99,9 @@ async fn main() {
                 let boot = updater.clone();
                 tokio::spawn(async move { boot.restore_pending().await });
             }
-            let auto_check = engine_arc.config.try_read().map(|c| c.auto_check_update).unwrap_or(true);
-            updater.spawn_scheduler(auto_check);
+            // 调度器每轮自己读配置，这里不再传值 —— 传值会把开关
+            // 冻在启动那一刻，用户改动后必须重启才生效。
+            updater.spawn_scheduler();
             app.manage(updater);
 
             // 引擎在这里启动: 端口被占用等失败必须能反馈到界面上,
