@@ -469,3 +469,64 @@ fn native_drop_must_surface_the_hidden_window() {
         "commands.rs 里缺少 ensure_window_visible 的实现"
     );
 }
+
+/// 拖到设备卡片上松手，必须发给**光标下那台**设备。
+///
+/// ## 这条守卫守的是一个「在浏览器里好、在产物里不存在」的交互
+///
+/// Tauri 在原生层接管文件拖放（`dragDropEnabled` 默认开），WebView2
+/// 因此**收不到 HTML 的 `dragover` / `drop`**。模板里那些
+/// `@dragover` / `@drop` 只在 `vite dev` 的浏览器里触发 ——
+/// 真实的 Windows 产物上一次都不会跑。
+///
+/// 后果不是报错，而是**发错设备**：用户拖到 FIND-H 卡片上，代码走
+/// `routeDroppedPaths` → `store.selectedDevice`，文件去了旁边那台。
+/// 界面上看不出任何异常，用户要等到对端说"没收到"才发现。
+///
+/// 判据（三条必须同时成立）：
+/// 1. 原生拖放事件把 `position` 转出来了（否则前端无从做命中测试）；
+/// 2. App.vue 用 `elementFromPoint` + `data-device-id` 找出目标卡片；
+/// 3. 落盘时把命中的设备 id 传给 `handleNativeDrop`，而不是无视它。
+#[test]
+fn native_drop_must_target_the_device_under_the_cursor() {
+    let bridge = read(&ui_src().join("api").join("feisuoBridge.ts"));
+    let app = read(&ui_src().join("App.vue"));
+
+    // 1. 位置必须被转出来。物理像素是 Tauri 的定义，这里只确认字段在。
+    assert!(
+        bridge.contains("position: { x: p.position.x, y: p.position.y }"),
+        "onNativeDragDrop 没有把 position 转给前端 —— 没有坐标就永远只能发给\
+         「最后一次选中的设备」，而用户是照着光标下的卡片拖的"
+    );
+
+    // 2. 命中测试必须存在，且必须按 devicePixelRatio 换算。
+    assert!(
+        app.contains("elementFromPoint("),
+        "App.vue 里没有 elementFromPoint 命中测试 —— 原生拖放拿不到 HTML 的 \
+         dragover，卡片高亮与目标判定都必须自己做"
+    );
+    assert!(
+        app.contains("window.devicePixelRatio"),
+        "命中测试没有按 devicePixelRatio 换算：Tauri 给的是物理像素，\
+         elementFromPoint 要 CSS 像素。125% 缩放下会偏到隔壁那台设备"
+    );
+    assert!(
+        app.contains("data-device-id") || app.contains("deviceCardAtPoint"),
+        "设备卡片没有可被命中测试识别的标记"
+    );
+
+    // 3. 落盘必须用命中的设备，而不是无脑走「当前选中」。
+    let drop_fn = app
+        .find("async function handleNativeDrop(")
+        .expect("App.vue 里找不到 handleNativeDrop");
+    let fn_body = &app[drop_fn..drop_fn + 2000.min(app.len() - drop_fn)];
+    assert!(
+        fn_body.contains("explicitDeviceId") && fn_body.contains("routeDroppedPathsToDevice"),
+        "handleNativeDrop 没有使用松手处的设备 id —— 拖到哪张卡片上都会发给\
+         当前选中的设备，这正是本改动要修的那个 bug"
+    );
+    assert!(
+        app.contains("function routeDroppedPathsToDevice("),
+        "缺少「发给指定设备」的分派函数"
+    );
+}

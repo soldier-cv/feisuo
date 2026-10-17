@@ -2632,6 +2632,10 @@ fn progress_bars_must_not_animate_layout_properties() {
             "speed-dock-fill",
             "update-progress-fill",
             "pin-countdown-fill",
+            // 「正在进行」弹窗里的任务进度条。加进来是因为它曾经写成
+            // `width` + `transition: width`：批量传输时每秒 20 多次重排，
+            // 而弹窗里同时可能有 3 条在跑。
+            "card-progress-fill",
         ] {
             // 只取**裸类名**规则(`.speed-dock-fill {`), 不取
             // `.desktop-speed-dock.failed .speed-dock-fill {` 这种带前置

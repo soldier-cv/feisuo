@@ -83,6 +83,16 @@
 
         <div class="devices-scroll-area">
           <!--
+            原生拖放期间的侧栏提示。
+            为什么需要一句话而不只是放大动画：卡片放大只能说明
+            "这里能接"，还差一步"接给谁"。这句文案把动作说全：
+            松手即发给光标下那台。
+          -->
+          <div v-if="isNativeFileDrag" class="drag-drop-sidebar-hint" role="status">
+            <i class="ph-bold ph-arrow-fat-lines-down"></i>
+            <span>松手即发到光标下的设备</span>
+          </div>
+          <!--
             分组而不是一锅端（§3.7）：「我的设备」= 信任库全量, **含离线**
             （灰显 + 上次在线时间）, 永不消失；「其他」= 仅在线的未配对设备, 可折叠。
           -->
@@ -94,13 +104,19 @@
             v-for="dev in store.myDevices"
             :key="dev.device_id"
             class="device-card-row"
+            :data-device-id="dev.device_id"
             :class="{
               active: dev.device_id === store.selectedDeviceId && currentTab !== 'settings',
               offline: dev.presence !== 'online',
               // §5.1 目标即动作：拖到卡片上高亮, 松手直接发
               'drop-target': dragOverDeviceId === dev.device_id && canDropTo(dev),
               'drop-blocked': dragOverDeviceId === dev.device_id && !canDropTo(dev),
+              // 原生拖放进窗口时，可用设备整体上浮一点：告诉用户
+              // 这些卡片是能接住的，而不是只有指针正对的那一张有反应。
+              'drag-armed': isNativeFileDrag && canDropTo(dev),
+              'drag-armed-blocked': isNativeFileDrag && !canDropTo(dev),
             }"
+
             v-key-activate
             role="button"
             tabindex="0"
@@ -209,6 +225,7 @@
             v-show="!store.othersCollapsed"
             :key="dev.device_id"
             class="device-card-row nearby"
+            :data-device-id="dev.device_id"
             v-key-activate
             role="button"
             tabindex="0"
@@ -1325,7 +1342,14 @@
                   <span class="entry-speed-text" :class="{ unknown: log.speed_display === '—' }">
                     {{ log.speed_display }}
                   </span>
-                  <span class="entry-status-badge" :class="{ failed: log.status === 'failed' || log.status === 'cancelled' }">
+                  <span
+                    class="entry-status-badge"
+                    :class="{
+                      failed: log.status === 'failed' || log.status === 'cancelled',
+                      running: log.status === 'running',
+                    }"
+                  >
+                    <i v-if="log.status === 'running'" class="ph-bold ph-circle-notch spinning"></i>
                     {{ historyStatusText(log.status) }}
                   </span>
                 </div>
@@ -2388,19 +2412,23 @@
               正在进行的传输任务 ({{ runningCount }})
             </h3>
             <span class="active-dialog-sub">
-              最大并发限制: {{ maxConcurrency }} · 当前活跃任务数: {{ Array.from(activeTransfers.values()).length }}
+              最大并发限制: {{ maxConcurrency }} · 当前活跃任务数: {{ runningCount }}<template
+                v-if="activeTransferCards.length > runningCount"
+              >
+                · 已完成 {{ activeTransferCards.length - runningCount }}</template
+              >
             </span>
           </div>
           <button class="modal-close-icon" @click="showActiveTransfersModal = false" title="关闭"><i class="ph ph-x"></i></button>
         </div>
 
         <div class="active-transfers-list-container">
-          <div v-if="Array.from(activeTransfers.values()).length === 0" class="empty-active-box">
+          <div v-if="activeTransferCards.length === 0" class="empty-active-box">
             <i class="ph ph-check-circle"></i>
             <span>当前没有正在进行的传输任务</span>
           </div>
           <div
-            v-for="item in Array.from(activeTransfers.values())"
+            v-for="item in activeTransferCards"
             :key="item.transfer_id"
             class="active-transfer-card"
             :class="{ 'card-settled': !!item.settled }"
@@ -2416,12 +2444,43 @@
               <i class="ph ph-file-text"></i>
               <span class="card-filename" :title="item.current_file">{{ item.current_file }}</span>
             </div>
+            <!--
+              多文件批次的**逐个文件**状态。
+              一次拖 5 个文件是一个传输任务（同一条连接、同一个 transfer_id），
+              早先卡片只显示"当前正在传哪个"，前面几个传完就再也看不到了 ——
+              用户分不清"这 5 个里已经成了 3 个"和"只发了第 3 个"。
+            -->
+            <div v-if="item.files.length > 1" class="card-file-checklist">
+              <div
+                v-for="f in item.files"
+                :key="f.index"
+                class="card-file-check"
+                :class="f.status"
+              >
+                <i
+                  :class="
+                    f.status === 'done'
+                      ? 'ph-bold ph-check-circle'
+                      : f.status === 'active'
+                        ? 'ph-bold ph-circle-notch spinning'
+                        : 'ph ph-circle'
+                  "
+                ></i>
+                <span class="card-file-check-name" :title="f.name">{{ f.name }}</span>
+                <span class="card-file-check-state">{{
+                  f.status === 'done' ? '已完成' : f.status === 'active' ? '传输中' : '等待中'
+                }}</span>
+              </div>
+              <div v-if="item.filesPending > 0" class="card-file-more">
+                还有 {{ item.filesPending }} 个文件等待传输
+              </div>
+            </div>
             <div class="card-progress-track">
-              <div class="card-progress-fill" :style="{ width: item.progress_percent + '%' }"></div>
+              <div class="card-progress-fill" :style="{ transform: `scaleX(${item.progress_percent / 100})` }"></div>
             </div>
             <div class="card-footer-row">
               <span class="card-bytes-text">
-                {{ formatBytes(item.bytes_transferred) }} / {{ formatBytes(item.total_bytes) }} ({{ item.progress_percent }}%)
+                {{ formatBytes(item.bytes_transferred) }} / {{ formatBytes(item.total_bytes) }} ({{ Math.round(item.progress_percent) }}%)
               </span>
               <div class="card-action-wrap">
                 <button
@@ -2498,6 +2557,7 @@ import {
   AccessScope,
   TransferRecord,
   TransferProgress,
+  NativeDragEvent,
   UpdateStatus,
   VOLUME_ANY,
   CAPS,
@@ -2834,6 +2894,23 @@ export interface ActiveTransferItem {
   settled: "ok" | "failed" | "cancelled" | null;
   last_updated_at: number;
   cleanupTimer?: any;
+  /**
+   * 本次传输里**逐个文件**的状态（按清单下标）。
+   *
+   * 一次拖 5 个文件 = 一个 transfer_id（同一条连接），而进度事件只带
+   * `file_index` / `current_file` / `total_files`。早先只用 `current_file`
+   * 覆盖显示，于是"已传完的那 4 个"在界面上**从来没有出现过** ——
+   * 用户看到的是"任务列表里只有一个文件"，而实际上另外几个已经成功了。
+   */
+  files: ActiveTransferFile[];
+  /** 还没出现在清单里的文件数（后端只在进入某文件时才报 index） */
+  filesPending: number;
+}
+
+export interface ActiveTransferFile {
+  index: number;
+  name: string;
+  status: "pending" | "active" | "done";
 }
 
 const activeTransfers = ref<Map<string, ActiveTransferItem>>(new Map());
@@ -2841,6 +2918,16 @@ const activeTransfers = ref<Map<string, ActiveTransferItem>>(new Map());
 const showActiveTransfersModal = ref(false);
 let transferWatchdogTimer: any = null;
 let lastProgressAt = 0;
+
+/**
+ * 任务列表弹窗里展示的条目。
+ *
+ * 不再直接 `Array.from(activeTransfers.values())`：批量传输完成后
+ * 各条目会在 2.5 秒后被清掉，弹窗于是**当场变空**，上面的"已完成"
+ * 一闪而过（截图里那个"当前没有正在进行的传输任务"就是这么来的）。
+ * 这里保留已结单的条目，由 `activeTransferCards` 决定弹窗何时收起。
+ */
+const activeTransferCards = computed(() => Array.from(activeTransfers.value.values()));
 
 const runningTransfers = computed(() => {
   const list: ActiveTransferItem[] = [];
@@ -3679,8 +3766,10 @@ onMounted(async () => {
     })
   );
 
-  // 原生拖放: WebView2 下浏览器拿不到真实磁盘路径, 必须靠这个事件
-  unlisteners.push(await FeisuoBridge.onNativeDragDrop(handleNativeDrop));
+  // 原生拖放: WebView2 下浏览器拿不到真实磁盘路径, 必须靠这个事件。
+  // 它同时是**唯一**的拖放反馈来源 —— Tauri 接管原生拖放后，
+  // WebView2 收不到 HTML 的 dragover（见 `handleNativeDrag`）。
+  unlisteners.push(await FeisuoBridge.onNativeDragDrop(handleNativeDrag));
 
   // 兜底轮询: mDNS 信标 3 秒一次, 保证列表最终收敛
   deviceTimer = setInterval(() => refreshDevices(true), 5000);
@@ -3689,6 +3778,7 @@ onMounted(async () => {
 onUnmounted(() => {
   stopPinCountdown();
   clearTransferWatchdog();
+  clearHistoryPolling();
   if (deviceTimer) clearInterval(deviceTimer);
   if (deviceRefreshTimer) clearTimeout(deviceRefreshTimer);
   for (const item of activeTransfers.value.values()) {
@@ -4322,6 +4412,49 @@ async function loadTransferHistory() {
   }
 }
 
+/** 只刷传输记录本身（不含诊断），供传输进行中的轮询使用。 */
+async function refreshTransferLogsOnly() {
+  try {
+    transferLogs.value = await FeisuoBridge.getTransferHistory(200);
+  } catch {
+    // 轮询失败静默：这是后台刷新，弹红条只会打断用户正在看的页面。
+  }
+}
+
+/**
+ * 「记录」页在**有传输进行中**时轻量轮询（2 秒）。
+ *
+ * 记录现在是发起即写、收尾才改成终态。没有轮询的话，用户停在记录页
+ * 看一个正在传的文件，那行的「传输中」会一直挂着 —— 传完了界面也不变，
+ * 他会以为程序卡了，然后再点一次发送。
+ *
+ * 为什么是 200 条全量重拉而不是增量：`getTransferHistory(200)` 本来
+ * 就是记录页的数据源，一次局域网内 SQLite 查询的代价远小于"维护一个
+ * 增量同步状态机"的复杂度。2 秒一次、只在记录页可见时才跑。
+ */
+let historyPollTimer: any = null;
+function syncHistoryPolling() {
+  const shouldPoll = currentTab.value === "log" && runningCount.value > 0;
+  if (shouldPoll && !historyPollTimer) {
+    historyPollTimer = setInterval(() => {
+      if (currentTab.value !== "log") {
+        clearHistoryPolling();
+        return;
+      }
+      void refreshTransferLogsOnly();
+    }, 2000);
+  } else if (!shouldPoll) {
+    clearHistoryPolling();
+  }
+}
+function clearHistoryPolling() {
+  if (historyPollTimer) {
+    clearInterval(historyPollTimer);
+    historyPollTimer = null;
+  }
+}
+watch([() => currentTab.value, runningCount], () => syncHistoryPolling());
+
 function toggleDiagnostics() {
   showDiagnostics.value = !showDiagnostics.value;
 }
@@ -4334,6 +4467,7 @@ function diagOutcomeText(outcome: string): string {
 
 /** 传输记录的状态。不认识的值不能显示成「已完成」。 */
 function historyStatusText(status: string): string {
+  if (status === "running") return "传输中";
   if (status === "completed") return "已完成";
   if (status === "failed") return "失败";
   if (status === "cancelled") return "已取消";
@@ -4527,10 +4661,16 @@ function handleTransferProgress(p: TransferProgress) {
   const existing = activeTransfers.value.get(id);
   const settled =
     kind === "Completed" ? "ok" : kind === "Failed" ? "failed" : kind === "Cancelled" ? "cancelled" : null;
+  // 上一轮已经结单、但条目还留在列表里的（成功后挂 6 秒）：
+  // 同一 id 又来进度 = **新的一次传输**（`transfer_id` 是内容派生的，
+  // 同一批文件重发必然撞号）。此时必须从空白文件清单重新开始，
+  // 否则上一轮的"已完成"会直接盖到这一轮上，看起来像已经传完了。
+  const isNewRound = !!existing && existing.settled !== null && settled === null;
+  const inherited = existing && !isNewRound ? existing : undefined;
 
   const item: ActiveTransferItem = {
     transfer_id: id,
-    current_file: p.current_file || existing?.current_file || (p.total_files > 1 ? `${p.total_files} 个文件` : "文件"),
+    current_file: p.current_file || inherited?.current_file || (p.total_files > 1 ? `${p.total_files} 个文件` : "文件"),
     direction: p.direction,
     progress_percent: Math.max(0, Math.min(100, Number(p.progress_percent) || 0)),
     speed_bytes_per_sec: p.speed_bytes_per_sec || 0,
@@ -4541,15 +4681,65 @@ function handleTransferProgress(p: TransferProgress) {
     peer_device_name: p.peer_device_name,
     settled,
     last_updated_at: Date.now(),
+    // 逐个文件的状态从**上一版**继承：进度事件只报"当前这个文件"，
+    // 新建对象会把前面几个的"已完成"抹掉（表现就是清单里永远只有一行）。
+    files: inherited ? inherited.files.map((f) => ({ ...f })) : [],
+    filesPending: inherited ? inherited.filesPending : 0,
   };
+
+  // ---- 记录"哪个文件传到了哪一步" ----
+  //
+  // `file_index` 是清单下标，单调递增。进入 file_index 时：
+  //   · 比它小的都算完成（后端一定按顺序发，跳过的一定已传完）；
+  //   · 它自己标成 active。
+  // 用 `>= 0` 而不是 `> 0`：第一个文件是 0 号，省略这个判断会让
+  // "第一个文件已完成"永远记不上，清单第一行永远停在"传输中"。
+  const totalFiles = p.total_files || 0;
+  const idx = Number.isFinite(p.file_index) ? p.file_index : -1;
+  const name = (p.current_file || "").trim();
+  if (totalFiles > 1 && idx >= 0) {
+    for (const f of item.files) {
+      if (f.index < idx && f.status !== "done") f.status = "done";
+    }
+    // 同一个下标换了名字：说明上一次是"网络抖动恢复中"这类占位名，
+    // 以真实文件名为准。
+    const cur = item.files.find((f) => f.index === idx);
+    if (cur) {
+      if (name && !name.includes("恢复")) cur.name = name;
+      if (cur.status !== "done") cur.status = "active";
+    } else {
+      item.files.push({ index: idx, name: name || `第 ${idx + 1} 个文件`, status: "active" });
+    }
+    item.files.sort((a, b) => a.index - b.index);
+    item.filesPending = Math.max(0, totalFiles - item.files.length);
+  }
+  // 成功终态：已知的每个文件都标完成。
+  //
+  // 放在 `totalFiles > 1` 之外：发送侧的 Completed 事件历史上只带
+  // `total_files: 1`（见 `emit_terminal`），而这一批实际有几个文件
+  // 只有前面那些进度事件知道。只按本条事件判断的话，最后一个文件
+  // 会永远停在"传输中"，而整个任务已经显示"已完成" ——
+  // 同一张卡片里两句话互相打脸。
+  if (settled === "ok") {
+    for (const f of item.files) if (f.status !== "done") f.status = "done";
+  }
 
   activeTransfers.value.set(id, item);
 
   if (!settled) {
     resetTransferWatchdog();
   } else {
-    // 该任务已结单，安排 2.5 秒后从 Map 中清理该任务
+    // 该任务已结单：**先留一会儿让用户看见结果**，再清理。
+    //
+    // 早先无论成功失败都是 2.5 秒后删掉。批量传输的最后一条 Completed
+    // 到达时，前面几个文件的条目可能已经被删了、这一条也只剩 2.5 秒，
+    // 于是弹窗当场变成"当前没有正在进行的传输任务"（用户截图里的样子）。
+    // 成功多留 6 秒：那种"我明明传完了，列表却空着"的观感是错的。
+    const lingerMs = kind === "Completed" ? 6000 : 2500;
     setTimeout(() => {
+      const cur = activeTransfers.value.get(id);
+      // 期间又收到同一 id 的新进度（断点续传重试 / 同名批次）就别删了。
+      if (cur && cur.last_updated_at !== item.last_updated_at) return;
       activeTransfers.value.delete(id);
       if (runningCount.value === 0) {
         clearTransferWatchdog();
@@ -4558,7 +4748,7 @@ function handleTransferProgress(p: TransferProgress) {
           loadLocalFiles();
         }
       }
-    }, 2500);
+    }, lingerMs);
 
     if (kind === "Completed") {
       FeisuoBridge.ensureWindowVisible().catch(() => {});
@@ -4571,6 +4761,35 @@ function handleTransferProgress(p: TransferProgress) {
     }
   }
 }
+
+/**
+ * 全部任务结单后，把"正在进行"弹窗自动收起。
+ *
+ * ## 为什么必须自动收
+ *
+ * 这个弹窗的标题是"**正在进行的**传输任务"。全部传完之后它留着，
+ * 里面只剩一行"当前没有正在进行的传输任务"加一个关闭按钮 ——
+ * 用户刚刚明明看到进度条跑完，却要自己点一次关闭才能看清结果。
+ * 那个空状态不是信息，是**残留**。
+ *
+ * 延迟 900ms 再收：给终端状态一个被看见的窗口（否则成功提示
+ * 会和弹窗一起消失，用户根本不知道成没成）。失败/取消**不在此列** ——
+ * 那两种结果需要用户确认，留着让他自己关。
+ */
+watch(
+  () => [showActiveTransfersModal.value, runningCount.value, activeTransferCards.value.length] as const,
+  ([visible, running, cards]) => {
+    if (!visible || running > 0 || cards === 0) return;
+    const allOk = activeTransferCards.value.every((t) => t.settled === "ok");
+    if (!allOk) return;
+    setTimeout(() => {
+      if (runningCount.value === 0 && activeTransferCards.value.every((t) => t.settled === "ok")) {
+        showActiveTransfersModal.value = false;
+      }
+    }, 900);
+  }
+);
+
 
 /** 主动取消当前进行中的传输（来自底部进度栏或超时应急） */
 async function cancelActiveTransfer(transferId?: string) {
@@ -4778,6 +4997,14 @@ async function pickFilesToSend() {
 
 /** 正在被悬停的设备卡片（用于高亮反馈） */
 const dragOverDeviceId = ref("");
+/**
+ * 是否正有一次**原生文件拖放**在窗口内移动。
+ *
+ * 与 `isDragOver`（发送页那个大框）分开：那个框只在"发送"页可见，
+ * 而拖放可能落在任何页签的设备列表上。这个标志只驱动侧栏的
+ * "现在是拖放状态"提示与卡片动效。
+ */
+const isNativeFileDrag = ref(false);
 
 /** 直发撤销窗口内的最近一次发送（用于 toast 的「撤销」按钮） */
 /**
@@ -5770,7 +5997,89 @@ function isLocalAbort(e: unknown): boolean {
   return msg.includes("已撤销") || msg.includes("已在本机撤销");
 }
 
-function handleNativeDrop(paths: string[]) {
+/**
+ * 把原生拖放的**物理像素坐标**换算成"光标下面是哪张设备卡片"。
+ *
+ * ## 为什么必须自己做命中测试
+ *
+ * Tauri 在原生层接管了文件拖放（`dragDropEnabled` 默认开），
+ * WebView2 因此**收不到 HTML 的 `dragover`** —— 模板里那些
+ * `@dragover` / `@drop` 在真实桌面端**一次都不会触发**。
+ *
+ * 于是"拖到设备卡片上高亮、松手发给它"这个在浏览器里好用的交互，
+ * 在真正的产物里根本不存在：用户拖到 FIND-H 上，松手却是发给
+ * 「最后一次选中的设备」。而这两者在界面上长得一模一样。
+ *
+ * `elementFromPoint` 用的是 **CSS 像素**，而 Tauri 给的是物理像素，
+ * 所以必须先除以 `devicePixelRatio`（125% 缩放下差 1.25 倍，
+ * 用错就会往上一行偏，指向隔壁那台设备 —— 比不响应更糟）。
+ */
+function deviceCardAtPoint(position: { x: number; y: number } | undefined): string {
+  if (!position) return "";
+  const ratio = window.devicePixelRatio || 1;
+  const el = document.elementFromPoint(position.x / ratio, position.y / ratio);
+  // 事件可能落在卡片里的任意子元素上（图标、徽标、按钮），向上找卡片。
+  const card = el?.closest?.("[data-device-id]") as HTMLElement | null;
+  if (!card) return "";
+  return card.dataset.deviceId || "";
+}
+
+/** 光标下的设备卡片 id（用于高亮） */
+function updateDragHoverTarget(position: { x: number; y: number } | undefined) {
+  const overId = deviceCardAtPoint(position);
+  if (overId === dragOverDeviceId.value) return;
+  dragOverDeviceId.value = overId;
+  // 侧栏被折叠 / 卡片在滚动区外时，elementFromPoint 也拿不到 —— 那是
+  // "拖到空白处"，此时不该有任何卡片保持高亮（否则用户以为还指着它）。
+}
+
+/**
+ * 原生拖放事件的唯一入口。
+ *
+ * 三种状态各司其职：
+ * - `enter` / `over`：只做**反馈**（高亮光标下那台设备），不发文件；
+ * - `drop`：若光标下有可用设备，**直接发给它**；否则走原来的分派
+ *   （进待发清单 / 发给当前选中设备）；
+ * - `leave`：清掉所有拖放态。不清理的话，用户把文件拖出窗口后
+ *   卡片会一直亮着 —— 看起来像程序卡住了。
+ */
+function handleNativeDrag(ev: NativeDragEvent) {
+  if (ev.type === "leave") {
+    isNativeFileDrag.value = false;
+    dragOverDeviceId.value = "";
+    isDragOver.value = false;
+    return;
+  }
+  if (ev.type === "enter" || ev.type === "over") {
+    // 拖进窗口就唤出窗口：托盘常驻下窗口可能是隐藏的，
+    // 而原生拖放在隐藏时照样触发 —— 不唤出的话用户不知道拖到了哪。
+    if (ev.type === "enter") {
+      isNativeFileDrag.value = true;
+      FeisuoBridge.ensureWindowVisible().catch(() => {});
+    }
+    isDragOver.value = true;
+    updateDragHoverTarget(ev.position);
+    // 拖放停留在窗口内时，"发送"页那个大框也不该抢焦点：
+    // 它只在当前页签就是"发送"时才有意义。
+    return;
+  }
+  // ---- drop ----
+  const targetId = deviceCardAtPoint(ev.position);
+  isNativeFileDrag.value = false;
+  dragOverDeviceId.value = "";
+  isDragOver.value = false;
+  void handleNativeDrop(ev.paths, targetId);
+}
+
+/**
+ * 处理一次落盘。
+ *
+ * `explicitDeviceId` 是**松手时光标下那台设备**。它是这次改动的核心：
+ * 早先这里无条件走 `routeDroppedPaths`，而那条路发给
+ * `store.selectedDevice` —— 用户拖到 FIND-H 卡片上，只要左侧选中的
+ * 是 HPC，文件就去 HPC 了，而界面上没有任何东西提示这件事。
+ */
+async function handleNativeDrop(paths: string[], explicitDeviceId = "") {
   isDragOver.value = false;
   if (paths.length === 0) return;
   // 必须先把窗口唤出来: 关窗后窗口处于隐藏状态, 而 Tauri 的原生拖放在
@@ -5795,8 +6104,53 @@ function handleNativeDrop(paths: string[]) {
   }
   // 缓存真实路径, 供"拖到设备卡片直发"取用（网页层 DataTransfer 拿不到磁盘路径）
   lastNativeDropPaths.value = files;
+
+  // ---- 松手在设备卡片上：目标就是那台，不再走"当前选中设备" ----
+  const dropTarget = explicitDeviceId
+    ? store.roster.find((d) => d.device_id === explicitDeviceId)
+    : undefined;
+  if (dropTarget) {
+    await routeDroppedPathsToDevice(files, dropTarget);
+    return;
+  }
   void routeDroppedPaths(files);
 }
+
+/**
+ * 拖到某台设备卡片上松手：**这台**就是目标。
+ *
+ * 与 [`onDeviceDrop`]（浏览器里的 HTML5 拖放）共用同一套分派规则：
+ * 目录要确认后进清单，纯文件直发。两者的差别只是"目标从哪来"。
+ */
+async function routeDroppedPathsToDevice(paths: string[], dev: DeviceRosterEntry) {
+  let preview: Awaited<ReturnType<typeof FeisuoBridge.previewSendPaths>>;
+  try {
+    preview = await FeisuoBridge.previewSendPaths(paths);
+  } catch (e) {
+    showToast(FeisuoBridge.describeError(e, "无法读取拖入的内容"), true);
+    return;
+  }
+  if (preview.fileCount === 0) {
+    showToast("拖入的内容里没有可发送的文件", true);
+    return;
+  }
+  if (preview.hasDirectory) {
+    await previewAndStage(paths, preview);
+    showToast(
+      `已加入待发清单（${preview.fileCount} 个文件）。` +
+        `在清单点「发送」即发给 ${dev.device_name}`,
+      true
+    );
+    return;
+  }
+  const gate = await canDirectSendTo(dev);
+  if (!gate.ok || !gate.endpoint) {
+    pushStaged(paths);
+    return;
+  }
+  await directSendTo(dev, gate.endpoint, paths);
+}
+
 
 /**
  * 拖入窗口后的分派：**文件直发，文件夹才要确认**（§5.1）
@@ -7364,11 +7718,33 @@ function getFileIcon(name: string) {
   padding: 8px 10px;
   border-radius: var(--radius-md);
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  /* transform 加进 transition 才能让"拖放时放大"是渐变而不是瞬间跳一格。
+   * 只动 transform / opacity / border-color / background：都是合成层属性，
+   * 拖动过程中每帧 elementFromPoint 都在跑，重排会直接把反馈拖成卡顿。 */
+  transition: background 0.15s, border-color 0.15s, transform 0.16s ease, box-shadow 0.16s ease;
   border: 1px solid transparent;
+  will-change: transform;
 }
 .device-card-row:hover { background: var(--bg-hover-soft); }
 .device-card-row.active { background: var(--bg-active); border-color: var(--accent); }
+
+/* ---- 原生拖放进行中：可用设备轻微上浮 ----
+ *
+ * 为什么不是只有指针下那张放大：用户拖着文件在列表上扫过时，
+ * 需要先**看见有哪些**能接（整个列表给出可接的信号），
+ * 才能瞄准其中一张。只让指针下的动，其余毫无变化，
+ * 用户会以为只有那一张"碰巧"有反应。
+ */
+.device-card-row.drag-armed {
+  transform: scale(1.015);
+  border-color: var(--accent-border);
+  background: var(--bg-hover-soft);
+}
+/* 不能接的设备（离线 / 未配对）在拖放期间淡出，不参与缩放：
+ * "缩小 + 变淡"是同一句话的两种说法，混用会让用户以为它在动 */
+.device-card-row.drag-armed-blocked {
+  opacity: 0.4;
+}
 .os-icon-box {
   width: 32px;
   height: 32px;
@@ -7733,19 +8109,43 @@ function getFileIcon(name: string) {
   color: var(--text-main);
 }
 
-/* 拖到设备卡片：目标即动作（§5.1） */
+/* 拖到设备卡片：目标即动作（§5.1）
+ *
+ * 这是**光标正对着**的那一张，必须比周围的 `drag-armed` 更明确：
+ * 放大、实心描边、投影抬起。三件事叠加而不是只换颜色 ——
+ * 用户此刻要做的判断是"松手会发给谁"，只改底色在深色主题下
+ * 几乎看不出来（--accent-soft 的透明度只有 0.16）。
+ */
 .device-card-row.drop-target {
   opacity: 1;
   outline: 2px solid var(--accent);
   outline-offset: -2px;
   background: var(--accent-soft);
   border-radius: var(--radius-md);
+  transform: scale(1.03);
+  box-shadow: 0 6px 18px var(--accent-glow);
+  cursor: copy;
 }
 .device-card-row.drop-blocked {
   opacity: 0.5;
   outline: 2px dashed var(--border-strong);
   outline-offset: -2px;
   cursor: not-allowed;
+}
+
+/* 拖放期间的侧栏提示条 */
+.drag-drop-sidebar-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--accent-on-soft);
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 2px;
 }
 
 /* 直发撤销 toast（D4：5 秒窗口） */
@@ -9290,6 +9690,13 @@ function getFileIcon(name: string) {
 .entry-size-text { font-size: 11.5px; color: var(--text-secondary); display: block; }
 .entry-status-badge { font-size: 10.5px; color: var(--accent-text); font-weight: 600; }
 .entry-status-badge.failed { color: var(--danger-text); }
+/* 「传输中」：带转圈图标，和"已完成"必须一眼分得开 */
+.entry-status-badge.running {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--info-text);
+}
 .empty-log-box {
   padding: 40px;
   text-align: center;
@@ -10443,8 +10850,14 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
 }
 .card-progress-fill {
   height: 100%;
+  width: 100%;
   background: var(--accent);
-  transition: width 0.2s ease;
+  /* 必须用 scaleX 而不是动画 width：core 每 4MB 一个进度事件，
+   * 110MB/s 下每秒约 27 次 —— 用 width 就是持续重排整个文档。
+   * 圆角留在 track 上，由它的 overflow:hidden 裁出胶囊。 */
+  transform-origin: left center;
+  transform: scaleX(0);
+  transition: transform 0.2s ease;
 }
 .card-footer-row {
   display: flex;
@@ -10481,6 +10894,47 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
 .card-settled-text.ok { color: var(--success-text); }
 .card-settled-text.cancelled { color: var(--text-secondary); }
 .card-settled-text.failed { color: var(--danger-text); }
+
+/* 批量传输里逐个文件的状态清单 */
+.card-file-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  max-height: 132px;
+  overflow-y: auto;
+}
+.card-file-check {
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  min-width: 0;
+}
+.card-file-check i { font-size: 12px; }
+.card-file-check.done i { color: var(--success-text); }
+.card-file-check.active { color: var(--text-primary); font-weight: 600; }
+.card-file-check.active i { color: var(--accent-text); }
+.card-file-check.pending { opacity: 0.6; }
+.card-file-check-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-file-check-state {
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.card-file-more {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding-left: 20px;
+}
 .active-dialog-footer {
   display: flex;
   align-items: center;

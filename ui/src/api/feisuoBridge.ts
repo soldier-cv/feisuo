@@ -63,13 +63,21 @@ export interface UpdateStatus {
 
 export interface TransferRecord {
   id: number;
+  /** 同一次传输的自关联键（接收侧=清单 id，发送侧=续传 key，可能为空） */
+  transfer_id?: string;
   file_name: string;
   file_size: number;
   file_size_formatted: string;
   direction: "send" | "recv";
   peer_name: string;
   peer_ip: string;
-  status: "completed" | "failed" | "cancelled";
+  /**
+   * `running` = **已经发起、还没结束**。
+   *
+   * 记录不再是"传完才写"：发起时就落一行，收尾改成终态。用户中途
+   * 切到记录页能看到"正在传什么"，而不是一片空白。
+   */
+  status: "running" | "completed" | "failed" | "cancelled";
   created_at: number;
   time_formatted: string;
   // ---- v2：速度度量的原始量（速度是派生值，由后端算好）----
@@ -506,6 +514,15 @@ export interface SendOutcome {
   expandLimitHit: string | null;
   /** 本机撤销。不是失败，也不是发送成功 —— 待发清单必须留下。 */
   locallyAborted: boolean;
+}
+
+/** 原生拖放事件（Tauri `onDragDropEvent` 的薄封装）。 */
+export interface NativeDragEvent {
+  type: "enter" | "over" | "drop" | "leave";
+  /** `over` / `leave` 没有路径；`enter` / `drop` 有。 */
+  paths: string[];
+  /** 物理像素，相对 webview 左上角。前端要除以 devicePixelRatio。 */
+  position?: { x: number; y: number };
 }
 
 /** 一张生效中的短期授权（§2.3.1）。 */
@@ -1464,17 +1481,39 @@ export class FeisuoBridge {
 
   // ------------------------------------------------------------------ 原生拖放
   /**
-   * 监听 Tauri 原生拖放事件。
-   * 浏览器 File 对象在 WebView2 下拿不到真实磁盘路径,
-   * 必须靠这个事件才能把"用户拖进来的文件"真正发出去。
+   * 监听 Tauri 原生拖放事件（**带光标位置**）。
+   *
+   * 浏览器 File 对象在 WebView2 下拿不到真实磁盘路径，必须靠这个事件
+   * 才能把"用户拖进来的文件"真正发出去。
+   *
+   * ## 为什么必须把 `enter` / `over` / `leave` 也转出来
+   *
+   * Tauri 在**原生层**接管了文件拖放（`dragDropEnabled` 默认开），
+   * WebView2 因此**收不到 HTML 的 `dragover`**。于是"拖到设备卡片上
+   * 高亮"这件事在真实环境里从未生效过 —— 模板里那个 `@dragover`
+   * 只在浏览器里跑 demo 时才触发。
+   *
+   * 用户看到的结果是：把文件拖到右侧设备列表上，哪个设备都不会有反应，
+   * 松手之后文件却发出去了 —— 发给了**最后一次选中的**那台，
+   * 而不是光标下面那台。想确认"到底发给谁"完全没有线索。
+   *
+   * 位置是**物理像素**、相对 webview 左上角，前端要除以
+   * `devicePixelRatio` 才能拿去 `elementFromPoint` 做命中测试。
    */
-  static async onNativeDragDrop(cb: (paths: string[]) => void): Promise<() => void> {
+  static async onNativeDragDrop(cb: (ev: NativeDragEvent) => void): Promise<() => void> {
     if (notInTauri()) return () => {};
     const { getCurrentWebview } = await import("@tauri-apps/api/webview");
     return await getCurrentWebview().onDragDropEvent((event) => {
-      if (event.payload.type === "drop") {
-        cb(event.payload.paths);
+      const p = event.payload;
+      if (p.type === "leave") {
+        cb({ type: "leave", paths: [] });
+        return;
       }
+      cb({
+        type: p.type,
+        paths: p.type === "over" ? [] : p.paths,
+        position: { x: p.position.x, y: p.position.y },
+      });
     });
   }
 

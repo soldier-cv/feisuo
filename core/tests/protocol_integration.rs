@@ -3048,6 +3048,152 @@ fn test_transfer_history_retention_policy() {
 }
 
 // ==============================================================
+// 22. 传输记录: 发起即记账, 收尾改成终态
+// ==============================================================
+//
+// ## 这组测试在防什么
+//
+// 用户报的现象: 传一个几百 MB 的文件，中途切到「记录」页，那里**空的**。
+// 因为旧实现只在收尾时 `add_transfer_record` —— 正在发生的事情
+// 在账本上根本不存在。
+//
+// 现在拆成 `begin_transfer_record` + `finish_transfer_record(_by_transfer_id)`。
+// 这三条测试分别锁住:
+//   1. 发起就有行、且 `created_at` 不被收尾改写（跨午夜也不挪到第二天）;
+//   2. 按 `transfer_id` 收口只认 `running`，不会把已收尾的记录再改一次
+//      （接收侧失败收尾有十几处，重复调用是常态）;
+//   3. 进程被强杀留下的 `running` 行，下次打开库时自动收成 `failed`。
+#[test]
+fn test_transfer_record_starts_at_launch_and_settles() {
+    let dir = temp_dir("history-lifecycle");
+    let store = TrustStore::open_at(dir.join("trust_store.db")).unwrap();
+    let metrics = feisuo_core::security::TransferMetrics {
+        declared_size: 9_000,
+        duration_active_ms: 1_000,
+        ..Default::default()
+    };
+
+    let row_id = store
+        .begin_transfer_record(
+            "tid-1",
+            "big.bin",
+            "send",
+            "peer",
+            "127.0.0.1",
+            9_000,
+            &["C:/a/big.bin".to_string()],
+            500,
+            30,
+        )
+        .expect("发起时应当能写一行");
+
+    // 发起后，记录页立刻能看到它 —— 状态必须是 running，不是 completed。
+    let rows = store.list_transfer_records(10).unwrap();
+    assert_eq!(rows.len(), 1, "发起即记账：此刻就应该有一条");
+    assert_eq!(rows[0].status, "running");
+    assert_eq!(rows[0].transfer_id, "tid-1");
+    assert_eq!(rows[0].declared_size, 9_000);
+    let created_at = rows[0].created_at;
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    store
+        .finish_transfer_record(row_id, "completed", 9_000, metrics.clone(), None)
+        .expect("收口");
+
+    let rows = store.list_transfer_records(10).unwrap();
+    assert_eq!(rows.len(), 1, "收口是更新同一条，不是另开一条");
+    assert_eq!(rows[0].status, "completed");
+    assert_eq!(rows[0].file_size, 9_000);
+    // created_at 是"这次传输是什么时候发起的"。被改成完成时刻的话，
+    // 一次跨午夜的传输会出现在第二天的记录里。
+    assert_eq!(
+        rows[0].created_at, created_at,
+        "收口不能改写 created_at（记录时间是发起时刻）"
+    );
+
+    // 按 transfer_id 收口：只认 running，重复调用是空操作。
+    let changed = store
+        .finish_transfer_record_by_transfer_id("tid-1", "failed", 0, metrics.clone(), None)
+        .unwrap();
+    assert_eq!(changed, 0, "已经收过口的记录不能被二次改写");
+    assert_eq!(store.list_transfer_records(10).unwrap()[0].status, "completed");
+
+    // 删掉正在跑的那行（协商回合 / 提前放弃）
+    let pending_id = store
+        .begin_transfer_record("tid-2", "x.bin", "send", "peer", "127.0.0.1", 1, &[], 500, 30)
+        .unwrap();
+    store.discard_running_transfer_record(pending_id).unwrap();
+    assert!(
+        store
+            .list_transfer_records(10)
+            .unwrap()
+            .iter()
+            .all(|r| r.transfer_id != "tid-2"),
+        "协商回合的行必须能被删掉，否则用户重试成功后会多出一条假失败"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_stale_running_records_are_failed_on_reopen() {
+    let dir = temp_dir("history-stale");
+    let db = dir.join("trust_store.db");
+    {
+        let store = TrustStore::open_at(db.clone()).unwrap();
+        store
+            .begin_transfer_record("tid-stale", "half.bin", "recv", "peer", "127.0.0.1", 100, &[], 500, 30)
+            .unwrap();
+        // 不调用 finish —— 模拟进程被强杀 / 断电
+    }
+
+    let store = TrustStore::open_at(db).unwrap();
+    let rows = store.list_transfer_records(10).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].status, "failed",
+        "上次进程留下的 running 行必须在下次打开时收成 failed —— \
+         否则记录页会永远挂着一条不动的「传输中」"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_running_record_is_never_trimmed_by_history_limit() {
+    let dir = temp_dir("history-trim");
+    let store = TrustStore::open_at(dir.join("trust_store.db")).unwrap();
+
+    // 正在跑的那条先建，后面再灌满已完成记录
+    store
+        .begin_transfer_record("tid-live", "live.bin", "send", "peer", "127.0.0.1", 1, &[], 2, 30)
+        .unwrap();
+    for i in 0..5 {
+        store
+            .add_transfer_record(
+                &format!("done{}.bin", i),
+                1,
+                "send",
+                "peer",
+                "127.0.0.1",
+                "completed",
+                2,
+                30,
+                feisuo_core::security::TransferMetrics::default(),
+                &[],
+            )
+            .unwrap();
+    }
+    let rows = store.list_transfer_records(100).unwrap();
+    assert!(
+        rows.iter().any(|r| r.status == "running"),
+        "条数上限只能裁已收口的记录 —— 把正在传的那条裁掉，用户就永远\
+         看不到它的结果了"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ==============================================================
 // 22. 拒绝必须**出站**: 发送方要拿到原因, 而不是一句 "early eof"
 // ==============================================================
 //

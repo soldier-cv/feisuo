@@ -684,6 +684,40 @@ impl FeisuoEngine {
             .iter()
             .map(|(p, _)| p.to_string_lossy().to_string())
             .collect();
+        let label = if file_count > 1 {
+            format!("{} 等 {} 个文件", first_name, file_count)
+        } else {
+            first_name.clone()
+        };
+
+        // ---- 先落一行「进行中」，再去连对端 ----
+        //
+        // 顺序不能反。记录页是"这台机器发生过什么"的唯一账本，
+        // 而一次大文件传输可能要几分钟 —— 早先只在收尾时写，于是
+        // 那几分钟里记录页空着，用户切过去看会以为文件压根没发。
+        //
+        // 行 id 存下来给收尾用（而不是按 `transfer_id` 反查）：
+        // 发送侧的 `resume_key` 可以为空（`_ => Uuid::new_v4()` 那条分支
+        // 在 client 内部生成），空 id 反查不到任何行。
+        let history_row_id = self
+            .trust_store
+            .begin_transfer_record(
+                resume_key.as_deref().unwrap_or(""),
+                &label,
+                "send",
+                target_device_name,
+                target_ip,
+                total_size,
+                &file_paths,
+                max_records,
+                retention_days,
+            )
+            .map_err(|e| {
+                // 记录写不进去不该拦住传输本身 —— 用户要的是文件送到。
+                tracing::warn!("写入进行中传输记录失败: {}", e);
+                e
+            })
+            .ok();
 
         // 走带诊断的通道: 旧实现把 elapsed 算出来后丢弃, 导致"速度"无从取数
         let res = self
@@ -700,9 +734,17 @@ impl FeisuoEngine {
             )
             .await;
 
-        // 「需要传输码」是**协商回合**不是失败 —— 不该在历史里留一条
-        // "传输失败" 记录。用户接下来会带上码重试, 那时才是真正的一次传输。
+        // 「需要传输码」是**协商回合**不是失败 —— 不该在历史里留任何痕迹。
+        // 用户接下来会带上码重试, 那时才是真正的一次传输。
+        //
+        // 刚才那行「进行中」必须**删掉**而不是改成失败：留着的话，
+        // 他带码重试成功后会出现两条记录，其中一条是从来没发生过的失败。
         if matches!(res, Err(FeisuoError::GrantCodeRequired(_))) {
+            if let Some(id) = history_row_id {
+                if let Err(e) = self.trust_store.discard_running_transfer_record(id) {
+                    tracing::warn!("清理协商回合的传输记录失败 (id={}): {}", id, e);
+                }
+            }
             return res.map(|_| 0);
         }
         // 本机撤销不是失败，但不能当没发生过。写「失败」会让人以为没撤成，
@@ -716,11 +758,6 @@ impl FeisuoEngine {
             "completed"
         } else {
             "failed"
-        };
-        let label = if file_count > 1 {
-            format!("{} 等 {} 个文件", first_name, file_count)
-        } else {
-            first_name
         };
         let report = res.as_ref().ok();
         // 完整诊断落库, 供事后导出分析（§9.7.6 的链路信息展示也依赖它）
@@ -741,18 +778,35 @@ impl FeisuoEngine {
             Err(FeisuoError::LocallyAborted { bytes_sent, .. }) => *bytes_sent,
             Err(_) => 0,
         };
-        let _ = self.trust_store.add_transfer_record(
-            &label,
-            bytes_recorded,
-            "send",
-            target_device_name,
-            target_ip,
-            status,
-            max_records,
-            retention_days,
-            metrics,
-            &file_paths,
-        );
+        match history_row_id {
+            Some(id) => {
+                if let Err(e) = self.trust_store.finish_transfer_record(
+                    id,
+                    status,
+                    bytes_recorded,
+                    metrics,
+                    None,
+                ) {
+                    tracing::warn!("收口传输记录失败 (id={}): {}", id, e);
+                }
+            }
+            // 发起时那行没写进去（库忙 / 磁盘满）时的兜底：
+            // 宁可"只有一条完成的记录"，也不要"这次传输在账本上不存在"。
+            None => {
+                let _ = self.trust_store.add_transfer_record(
+                    &label,
+                    bytes_recorded,
+                    "send",
+                    target_device_name,
+                    target_ip,
+                    status,
+                    max_records,
+                    retention_days,
+                    metrics,
+                    &file_paths,
+                );
+            }
+        }
 
         // 断点续传（P1 ⑪）：把跳过的文件追加到传输记录标签里。
         //

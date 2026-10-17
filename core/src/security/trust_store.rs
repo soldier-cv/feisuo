@@ -38,6 +38,13 @@ pub struct TrustedDevice {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferRecord {
     pub id: i64,
+    /// 同一次传输的自关联键。
+    ///
+    /// 接收侧拿清单里的 `transfer_id` 填，发送侧拿断点续传的稳定 key 填
+    /// （没有 key 时留空）。它存在的唯一理由是**收尾时找得到自己那一行**：
+    /// 接收侧的失败收尾分散在十几处，手上只有清单，没有行 id。
+    #[serde(default)]
+    pub transfer_id: String,
     pub file_name: String,
     pub file_size: u64,
     pub file_size_formatted: String,
@@ -296,6 +303,12 @@ impl TrustStore {
 
         Self::migrate(&conn)?;
 
+        // 上一轮进程被强杀时留下的 `running` 行，在这里一次性收成 `failed`。
+        // 必须等 `migrate` 之后（`transfer_id` 列与索引那时才存在）。
+        if let Err(e) = Self::fail_stale_running_records(&conn) {
+            tracing::warn!("收口上次残留的进行中传输记录失败: {}", e);
+        }
+
         Ok(Self {
             conn: Mutex::new(conn),
             active_pair_pin: Mutex::new(None),
@@ -438,6 +451,18 @@ impl TrustStore {
         Self::ensure_column(conn, "transfer_history", "over_overlay", "INTEGER NOT NULL DEFAULT 0")?;
         Self::ensure_column(conn, "transfer_history", "connect_ms", "INTEGER NOT NULL DEFAULT 0")?;
         Self::ensure_column(conn, "transfer_history", "file_paths", "TEXT NOT NULL DEFAULT '[]'")?;
+        // 传输进行中就先落一行（`status = 'running'`），收尾时按 `transfer_id`
+        // 收口成 completed / failed / cancelled。
+        //
+        // 为什么要有这一列：早先是"传完才写记录"，于是**正在进行**的传输在
+        // 「记录」页里完全不存在 —— 用户传一个 5GB 的文件，中途去记录页看，
+        // 那里空得像什么都没发生。而失败收尾分散在接收侧十几处、手上只有
+        // 清单，没有行 id，所以必须有一个能被反向查到的键。
+        Self::ensure_column(conn, "transfer_history", "transfer_id", "TEXT NOT NULL DEFAULT ''")?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_transfer_history_tid ON transfer_history(transfer_id)",
+            [],
+        )?;
 
         // ---- v2：完整诊断记录（整条 JSON，供事后离线分析）----
         conn.execute(
@@ -1127,23 +1152,204 @@ impl TrustStore {
             ],
         )?;
 
-        // 按保留天数清理过期记录
+        // 按保留天数与条数上限裁剪。走同一个 `trim_history`：
+        // 在这里各写一份的话，收尾路径会把**另一条正在进行**的记录
+        // 一起裁掉（它的 `created_at` 最新，但条数上限是按 id 算的）。
+        Self::trim_history(&conn, now, max_records, retention_days);
+        Ok(())
+    }
+
+    /// 传输**发起**时先落一行（`status = 'running'`），返回行 id。
+    ///
+    /// ## 为什么不是"传完再写"
+    ///
+    /// 早先只在收尾时写一条。后果是：用户传一个 5 GB 的文件、中途切到
+    /// 「记录」页，那里**什么都没有** —— 而"正在进行"这件事在界面上
+    /// 只能从底部进度条看到，那条会随窗口切走 / 关闭而消失。
+    /// 记录页本该是"我这台机器上发生过什么"的唯一账本，
+    /// 却在事情**正在发生**时是空的。
+    ///
+    /// ## 为什么不复用 [`Self::add_transfer_record`]
+    ///
+    /// 那个方法一次写完整行（含终态与全部度量）。进行中的行还不知道
+    /// 终态、字节数、耗时，硬塞进去就得写一堆假 0，收尾时再整行重写 ——
+    /// 而重写会丢掉 `created_at`（用户看到的时间会变成"完成时间"）。
+    pub fn begin_transfer_record(
+        &self,
+        transfer_id: &str,
+        file_name: &str,
+        direction: &str,
+        peer_name: &str,
+        peer_ip: &str,
+        declared_size: u64,
+        file_paths: &[String],
+        max_records: u32,
+        retention_days: u32,
+    ) -> Result<i64> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().timestamp();
+        let paths_json = serde_json::to_string(file_paths).unwrap_or_else(|_| "[]".to_string());
+        conn.execute(
+            "INSERT INTO transfer_history
+                (transfer_id, file_name, file_size, direction, peer_name, peer_ip, status, created_at,
+                 declared_size, duration_active_ms, duration_wall_ms, duration_verify_ms,
+                 over_overlay, connect_ms, file_paths)
+             VALUES (?1, ?2, 0, ?3, ?4, ?5, 'running', ?6, ?7, 0, 0, 0, 0, 0, ?8)",
+            params![
+                transfer_id,
+                file_name,
+                direction,
+                peer_name,
+                peer_ip,
+                now,
+                declared_size as i64,
+                paths_json,
+            ],
+        )?;
+        let row_id = conn.last_insert_rowid();
+        Self::trim_history(&conn, now, max_records, retention_days);
+        Ok(row_id)
+    }
+
+    /// 传输收尾：把 [`Self::begin_transfer_record`] 那一行补成终态。
+    ///
+    /// 只更新终态相关的列，**不动 `created_at`** —— 记录页的时间是
+    /// "这次传输是什么时候发起的"，改成完成时刻会让一次跨午夜的传输
+    /// 出现在第二天的记录里。
+    pub fn finish_transfer_record(
+        &self,
+        row_id: i64,
+        status: &str,
+        bytes_transferred: u64,
+        metrics: TransferMetrics,
+        file_name: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE transfer_history SET
+                status = ?1,
+                file_size = ?2,
+                declared_size = ?3,
+                duration_active_ms = ?4,
+                duration_wall_ms = ?5,
+                duration_verify_ms = ?6,
+                over_overlay = ?7,
+                connect_ms = ?8,
+                file_name = COALESCE(?9, file_name)
+             WHERE id = ?10",
+            params![
+                status,
+                bytes_transferred as i64,
+                metrics.declared_size as i64,
+                metrics.duration_active_ms as i64,
+                metrics.duration_wall_ms as i64,
+                metrics.duration_verify_ms as i64,
+                if metrics.over_overlay { 1 } else { 0 },
+                metrics.connect_ms as i64,
+                file_name,
+                row_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 丢弃一行**还没收口**的记录（按行 id）。
+    ///
+    /// 用于「协商回合」：对端要求每次匹配码、一个字节都还没传，这一回合
+    /// 不该在历史里留下任何痕迹。让行留在库里改成 `failed` 的话，
+    /// 用户会看到一条"传输失败"，然后他带上码重试成功 —— 一来一回
+    /// 就是两条记录，其中一条是假的失败。
+    ///
+    /// 只删 `running` 的行：传过字节的记录不能因为"这次是协商回合"被抹掉。
+    pub fn discard_running_transfer_record(&self, row_id: i64) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM transfer_history WHERE id = ?1 AND status = 'running'",
+            params![row_id],
+        )?;
+        Ok(())
+    }
+
+    /// 按 `transfer_id` 收口（返回受影响行数）。
+    ///
+    /// 接收侧的失败收尾有十几处（分块错序、写盘失败、提交失败、撤销……），
+    /// 每一处手上只有**清单**，没有行 id —— 让它们各自保存行 id 会把
+    /// 一个纯展示需求扩散成十几处签名改动。这里按清单里的稳定 id 反查，
+    /// 只收口 `running` 的行，绝不覆盖已经收过口的记录。
+    pub fn finish_transfer_record_by_transfer_id(
+        &self,
+        transfer_id: &str,
+        status: &str,
+        bytes_transferred: u64,
+        metrics: TransferMetrics,
+        file_name: Option<&str>,
+    ) -> Result<u32> {
+        if transfer_id.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn();
+        let changed = conn.execute(
+            "UPDATE transfer_history SET
+                status = ?1,
+                file_size = ?2,
+                declared_size = ?3,
+                duration_active_ms = ?4,
+                duration_wall_ms = ?5,
+                duration_verify_ms = ?6,
+                over_overlay = ?7,
+                connect_ms = ?8,
+                file_name = COALESCE(?9, file_name)
+             WHERE transfer_id = ?10 AND status = 'running'",
+            params![
+                status,
+                bytes_transferred as i64,
+                metrics.declared_size as i64,
+                metrics.duration_active_ms as i64,
+                metrics.duration_wall_ms as i64,
+                metrics.duration_verify_ms as i64,
+                if metrics.over_overlay { 1 } else { 0 },
+                metrics.connect_ms as i64,
+                file_name,
+                transfer_id,
+            ],
+        )?;
+        Ok(changed as u32)
+    }
+
+    /// 把上次进程留下的 `running` 行收成 `failed`。
+    ///
+    /// 进程被强杀 / 断电时收尾逻辑根本没有机会跑。不处理的话，那些行
+    /// 会以"进行中"的样子**永久**挂在记录页上（还有一个永远不会动的
+    /// 进度条），而实际上什么都没在进行 —— 下次用户看到它只会以为
+    /// 程序又卡住了。
+    ///
+    /// 在 [`Self::open_at`] 里调用是安全的：库刚打开时不可能有本进程
+    /// 的传输在跑，所以此刻所有 `running` 行必定是上一轮的残留。
+    fn fail_stale_running_records(conn: &Connection) -> Result<u32> {
+        let changed = conn.execute(
+            "UPDATE transfer_history SET status = 'failed' WHERE status = 'running'",
+            [],
+        )?;
+        Ok(changed as u32)
+    }
+
+    /// 按保留天数与条数上限裁剪历史。进行中的行**不参与条数裁剪**。
+    fn trim_history(conn: &Connection, now: i64, max_records: u32, retention_days: u32) {
         if retention_days > 0 {
             let expire_threshold = now - (retention_days as i64 * 86400);
-            let _ = conn.execute("DELETE FROM transfer_history WHERE created_at < ?1", params![expire_threshold]);
+            let _ = conn.execute(
+                "DELETE FROM transfer_history WHERE created_at < ?1 AND status <> 'running'",
+                params![expire_threshold],
+            );
         }
-
-        // 按最大记录条数上限清理，超出自动删除最老记录
         if max_records > 0 {
             let _ = conn.execute(
-                "DELETE FROM transfer_history WHERE id NOT IN (
+                "DELETE FROM transfer_history WHERE status <> 'running' AND id NOT IN (
                     SELECT id FROM transfer_history ORDER BY id DESC LIMIT ?1
                 )",
                 params![max_records],
             );
         }
-
-        Ok(())
     }
 
     pub fn list_transfer_records(&self, limit: u32) -> Result<Vec<TransferRecord>> {
@@ -1151,7 +1357,7 @@ impl TrustStore {
         let mut stmt = conn.prepare(
             "SELECT id, file_name, file_size, direction, peer_name, peer_ip, status, created_at,
                     declared_size, duration_active_ms, duration_wall_ms, duration_verify_ms,
-                    over_overlay, connect_ms, file_paths
+                    over_overlay, connect_ms, file_paths, transfer_id
              FROM transfer_history ORDER BY id DESC LIMIT ?1"
         )?;
         let rows = stmt.query_map(params![limit], |row| {
@@ -1172,6 +1378,7 @@ impl TrustStore {
             let connect_ms = row.get::<_, i64>(13)?.max(0) as u64;
             let paths_json = row.get::<_, Option<String>>(14)?.unwrap_or_else(|| "[]".to_string());
             let file_paths: Vec<String> = serde_json::from_str(&paths_json).unwrap_or_default();
+            let transfer_id = row.get::<_, Option<String>>(15)?.unwrap_or_default();
 
             let size_formatted = format_bytes(file_size);
             let dt = chrono::DateTime::from_timestamp(created_at, 0)
@@ -1182,6 +1389,7 @@ impl TrustStore {
             // 速度是派生值, 读取时算而不是落库（口径可能随实现演进, §9.6.6）
             let rec = TransferRecord {
                 id,
+                transfer_id,
                 file_name,
                 file_size,
                 file_size_formatted: size_formatted,

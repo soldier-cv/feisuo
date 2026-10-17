@@ -1692,6 +1692,32 @@ impl TransferServer {
             };
             write_json_frame(&mut stream, &ok).await?;
             diag.finish("completed", None);
+            // 「全部已存在」也是一次成功的传输结果，同样要能在记录页里对账。
+            // 早先这条分支直接 return，记录页里空着 —— 用户重发同一批文件
+            // 之后只会看到"上一次"的记录，以为自己这次没发出去。
+            let (max_records, retention_days) = {
+                let cfg = config.read().await;
+                (cfg.max_history_records, cfg.record_retention_days)
+            };
+            let _ = trust_store.add_transfer_record(
+                &Self::history_label_for(&manifest),
+                resume.send_bytes,
+                "recv",
+                &handshake.sender_name,
+                &peer_ip,
+                "completed",
+                max_records,
+                retention_days,
+                crate::security::TransferMetrics {
+                    declared_size: manifest.total_size,
+                    ..Default::default()
+                },
+                &manifest
+                    .files
+                    .iter()
+                    .map(|f| f.relative_path.clone())
+                    .collect::<Vec<_>>(),
+            );
             return Ok(());
         }
 
@@ -1710,6 +1736,42 @@ impl TransferServer {
         let history_limits = {
             let cfg = config.read().await;
             (cfg.max_history_records, cfg.record_retention_days)
+        };
+        // ---- 接收一开始就落一行「进行中」----
+        //
+        // 接收侧的传输可能持续几分钟，而失败收尾分散在十几处（分块错序、
+        // 写盘失败、提交失败、撤销……）。先建行、失败时按 `transfer_id`
+        // 收口，比让每一处各自补一条完整记录简单，也不会漏。
+        let history_label = Self::history_label_for(&manifest);
+        let declared_paths: Vec<String> = manifest
+            .files
+            .iter()
+            .map(|f| f.relative_path.clone())
+            .collect();
+        let _ = trust_store.begin_transfer_record(
+            &manifest.transfer_id,
+            &history_label,
+            "recv",
+            &handshake.sender_name,
+            &peer_ip,
+            manifest.total_size,
+            &declared_paths,
+            history_limits.0,
+            history_limits.1,
+        );
+        // 兜底收口：任何**没有走 `record_receive_outcome` 的提前返回**
+        // （路径校验失败、暂存目录解析失败、`?` 冒上来的 IO 错误……）
+        // 都会在离开本函数时由它把那一行改成「失败」。
+        //
+        // 为什么需要兜底：这十几个出口里只要漏一个，用户就会在记录页
+        // 看到一条**永远停在「传输中」**的记录 —— 那比"没有记录"更糟，
+        // 因为它看起来像程序卡住了。
+        //
+        // 它无条件在 Drop 里跑：收口只对 `status = 'running'` 的行生效，
+        // 所以成功路径、已经显式收过口的路径，这一下都是空操作。
+        let _history_guard = ReceiveHistoryGuard {
+            store: &trust_store,
+            transfer_id: manifest.transfer_id.clone(),
         };
         // 整文件校验累计耗时（不计入速度, §9.6.4）
         let mut verify_total_ms: u64 = 0;
@@ -2402,21 +2464,7 @@ impl TransferServer {
             s.remove(&manifest.transfer_id);
         }
 
-        // 10. 记录传输历史
-        let (max_records, retention_days) = {
-            let c = config.read().await;
-            (c.max_history_records, c.record_retention_days)
-        };
-        let first_name = manifest
-            .files
-            .first()
-            .map(|f| f.relative_path.clone())
-            .unwrap_or_else(|| "未知文件".into());
-        let history_label = if manifest.files.len() > 1 {
-            format!("{} 等 {} 个文件", first_name, manifest.files.len())
-        } else {
-            first_name
-        };
+        // 10. 收口传输历史（行在接收开始时已经建好）
         let file_paths: Vec<String> = if !staged_paths.is_empty() {
             staged_paths
                 .iter()
@@ -2429,18 +2477,30 @@ impl TransferServer {
                 .map(|f| receive_base_dir.join(&f.relative_path).to_string_lossy().to_string())
                 .collect()
         };
-        let _ = trust_store.add_transfer_record(
-            &history_label,
-            total_transferred,
-            "recv",
-            &handshake.sender_name,
-            &peer_ip,
-            "completed",
-            max_records,
-            retention_days,
-            crate::security::TransferMetrics::from_diagnostics(&diag),
-            &file_paths,
-        );
+        let settled = trust_store
+            .finish_transfer_record_by_transfer_id(
+                &manifest.transfer_id,
+                "completed",
+                total_transferred,
+                crate::security::TransferMetrics::from_diagnostics(&diag),
+                Some(&history_label),
+            )
+            .unwrap_or(0);
+        // 行没建成功（库忙）时的兜底：成功这件事绝不能因为记录写不进去而消失。
+        if settled == 0 {
+            let _ = trust_store.add_transfer_record(
+                &history_label,
+                total_transferred,
+                "recv",
+                &handshake.sender_name,
+                &peer_ip,
+                "completed",
+                history_limits.0,
+                history_limits.1,
+                crate::security::TransferMetrics::from_diagnostics(&diag),
+                &file_paths,
+            );
+        }
 
         info!(
             "Batch transfer completed and fully verified ({} bytes)",
@@ -2563,9 +2623,29 @@ impl TransferServer {
         err
     }
 
-    /// 接收未完成时写一条历史。`status` 只用 `failed` 或 `cancelled`。
+    /// 传输记录的展示标签：单文件用相对路径，多文件用「首个 等 N 个文件」。
     ///
-    /// 成功路径在提交之后另写「已完成」。这里不写成功，避免一次接收留下两条。
+    /// 抽成函数是因为它现在被**两个时机**需要：建「进行中」行时、
+    /// 收口时（文件名可能被断点续传改变）。两处各写一份的话，
+    /// 迟早会出现"进行中叫 A、完成后叫 B"的跳变。
+    fn history_label_for(manifest: &TransferManifest) -> String {
+        let first_name = manifest
+            .files
+            .first()
+            .map(|f| f.relative_path.clone())
+            .unwrap_or_else(|| "未知文件".into());
+        if manifest.files.len() > 1 {
+            format!("{} 等 {} 个文件", first_name, manifest.files.len())
+        } else {
+            first_name
+        }
+    }
+
+    /// 接收未完成时收口历史。`status` 只用 `failed` 或 `cancelled`。
+    ///
+    /// 行是接收开始时 [`TrustStore::begin_transfer_record`] 建的，
+    /// 这里按清单里的 `transfer_id` 认领它。查不到（极少数：建行时库忙）
+    /// 就补写一条完整记录 —— "失败这件事发生过"不能没有痕迹。
     #[allow(clippy::too_many_arguments)]
     fn record_receive_outcome(
         trust_store: &TrustStore,
@@ -2578,16 +2658,28 @@ impl TransferServer {
         status: &str,
     ) {
         let label = if current_file.is_empty() || current_file == "-" {
-            manifest
-                .files
-                .first()
-                .map(|f| f.relative_path.clone())
-                .unwrap_or_else(|| "未知文件".into())
+            Self::history_label_for(manifest)
         } else if manifest.files.len() > 1 {
             format!("{} 等 {} 个文件", current_file, manifest.files.len())
         } else {
             current_file.to_string()
         };
+        let metrics = crate::security::TransferMetrics {
+            declared_size: manifest.total_size,
+            ..Default::default()
+        };
+        let settled = trust_store
+            .finish_transfer_record_by_transfer_id(
+                &manifest.transfer_id,
+                status,
+                bytes,
+                metrics.clone(),
+                Some(&label),
+            )
+            .unwrap_or(0);
+        if settled > 0 {
+            return;
+        }
         let file_paths: Vec<String> = manifest
             .files
             .iter()
@@ -2602,10 +2694,7 @@ impl TransferServer {
             status,
             history_limits.0,
             history_limits.1,
-            crate::security::TransferMetrics {
-                declared_size: manifest.total_size,
-                ..Default::default()
-            },
+            metrics,
             &file_paths,
         ) {
             warn!("写入接收记录失败 ({}): {}", status, e);
@@ -4911,6 +5000,37 @@ struct StagingGuard {
     armed: bool,
     /// 是否因网络异常断开而保留半成品用于断点续传
     keep_for_resume: bool,
+}
+
+/// 接收侧「进行中」传输记录的兜底收口。
+///
+/// 传输函数里中途 `?` 返回的地方有十几处，逐一补一声收口必然漏。
+/// 这个守卫在**离开函数时**（无论是正常返回还是错误冒上来）查一次：
+/// 如果那一行还停在 `running`，说明没有任何收尾代码认领它 —— 改成 `failed`。
+///
+/// 之所以敢无条件执行：`finish_transfer_record_by_transfer_id` 只更新
+/// `status = 'running'` 的行。成功路径与显式失败的路径都已把状态改掉，
+/// 这里就是一次空操作。
+struct ReceiveHistoryGuard<'a> {
+    store: &'a TrustStore,
+    transfer_id: String,
+}
+
+impl Drop for ReceiveHistoryGuard<'_> {
+    fn drop(&mut self) {
+        if self.transfer_id.is_empty() {
+            return;
+        }
+        if let Err(e) = self.store.finish_transfer_record_by_transfer_id(
+            &self.transfer_id,
+            "failed",
+            0,
+            crate::security::TransferMetrics::default(),
+            None,
+        ) {
+            tracing::warn!("收口残留的进行中接收记录失败: {}", e);
+        }
+    }
 }
 
 impl Drop for StagingGuard {

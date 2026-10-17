@@ -479,6 +479,15 @@ button:active:disabled,
   .radar-pulse-ring {
     animation: none;
   }
+  /* 拖放时的"上浮 / 放大"同理：晃动的列表在前庭敏感的人群里
+   * 会直接引起眩晕，而它表达的信息（"这张能接"）完全可以由
+   * 描边与底色承担 —— 所以这里**只去掉位移**，高亮全部保留。 */
+  .device-card-row,
+  .device-card-row.drop-target,
+  .device-card-row.drag-armed {
+    transform: none;
+    transition: none;
+  }
   /* 骨架的呼吸同理：它一直在动，而加载可能持续好几秒（跨网络列目录）。
    * 停掉之后骨架变成一块静态灰条 —— 形状信息（"这里会出现一个文件行"）
    * 仍然保留，只是不再起伏。 */
