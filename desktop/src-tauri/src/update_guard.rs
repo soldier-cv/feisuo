@@ -866,6 +866,128 @@ fn installer_upgrade_must_request_elevation() {
     );
 }
 
+/// 守卫：安装器**不得提供程序本身不支持的语言**。
+///
+/// ## 这条守卫防的是什么
+///
+/// `Feisuo.iss` 的 `[Languages]` 里曾并列 `english` 一行，看起来像
+/// "安装器支持英文"。实际上只有**向导自己的按钮和提示**会变成英文，
+/// 而下面这些全都不会跟着变：
+///
+/// - `AppName` / `DefaultGroupName` / 桌面与开始菜单快捷方式都叫「飞梭」；
+/// - 防火墙那一步的 `StatusMsg` 是写死的中文；
+/// - 装完之后程序本体（界面、托盘菜单、错误提示）没有任何英文。
+///
+/// 结果比不提供英文更糟：用户以为选到了英文版，装出来仍是一个中文程序，
+/// 而且无从判断是自己选错了还是软件就这样。
+///
+/// ## 为什么是"只许中文"而不是"检查英文资源存不存在"
+///
+/// 英文版不是加一个 locale 文件就算完成的：前端约 470 条硬编码文案、
+/// 后端 31 个返回 `Result<_, String>` 的命令里的中文错误串、托盘菜单、
+/// 窗口标题、`<html lang>` 全都要双语，而且后端必须改成 `code + params`
+/// 才能让前端翻译错误。这些**没法**靠一条 `contains()` 断言证明 ——
+/// 硬凑一个"某个文件存在"的判据只会给出假绿灯，那比没有守卫更糟。
+///
+/// 所以这里只钉住**当前事实**：程序只有中文，安装器就只能提供中文。
+/// 真做完英文版时，请连同这条守卫一起改 —— 改之前先确认上面那几处
+/// 真的都双语了。
+#[test]
+fn installer_must_not_offer_languages_the_app_cannot_speak() {
+    let iss = read(&repo_root().join("desktop").join("setup").join("Feisuo.iss"));
+
+    // 取 [Languages] 段：到下一个 `[Section]` 为止（含行首缩进的情况）
+    let head = iss
+        .find("[Languages]")
+        .expect("Feisuo.iss 里找不到 [Languages] 段 —— 安装包脚本结构变了, 守卫需重写");
+    let tail = &iss[head + "[Languages]".len()..];
+    let end = tail.find("\n[").map(|i| head + "[Languages]".len() + i).unwrap_or(iss.len());
+    let block = &iss[head..end];
+
+    // `Name: "chinesesimp"; MessagesFile: ...` / 也允许不带引号
+    let declared: Vec<&str> = block
+        .lines()
+        .filter_map(|l| {
+            let t = l.trim();
+            // 注释行不算：本段的注释里就提到了 `english` 这个词
+            if t.starts_with(';') || t.starts_with('#') {
+                return None;
+            }
+            let v = t.strip_prefix("Name:")?.trim();
+            let name = match v.strip_prefix('"') {
+                Some(q) => q.split('"').next().unwrap_or(""),
+                None => v.split([';', ' ']).next().unwrap_or(""),
+            };
+            Some(name)
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    assert!(
+        !declared.is_empty(),
+        "[Languages] 段里解析不出任何语言 —— 解析可能已失效, 先修守卫"
+    );
+    assert_eq!(
+        declared,
+        vec!["chinesesimp"],
+        "安装器提供了程序本身不支持的语言: {declared:?}。\n\
+         程序目前只有中文文案（`ui/index.html` 写死 lang=\"zh-CN\"、\
+         托盘菜单与后端错误串全是中文），多出一个 language 行只会让用户\
+         以为选到了英文版, 装出来却是中文程序。\n\
+         要么删掉这一行, 要么先真的把程序做成双语（前端文案、托盘菜单、\
+         窗口标题、后端错误串 code 化）, 再连同这条守卫一起改。"
+    );
+
+    // 语言文件必须真的在仓库里 —— CI 只校验了这一个文件存在,
+    // 而安装包在本地手动编译时也要能编过。
+    let msg_file = block
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            !t.starts_with(';') && !t.starts_with('#')
+        })
+        .find_map(|l| {
+            let at = l.find("MessagesFile:")?;
+            let v = l[at + "MessagesFile:".len()..].trim();
+            let q = v.strip_prefix('"')?;
+            Some(q.split('"').next().unwrap_or("").to_string())
+        })
+        .expect("[Languages] 段里找不到 MessagesFile —— 解析可能已失效");
+    assert!(
+        !msg_file.starts_with("compiler:"),
+        "MessagesFile 指向编译器内置 {msg_file:?} —— 那是英文向导文案, \
+         与本项目只提供中文的事实不符"
+    );
+    let path = repo_root()
+        .join("desktop")
+        .join("setup")
+        .join(msg_file.replace('\\', "/"));
+    assert!(
+        path.is_file(),
+        "语言文件不存在: {} —— 本地手动编译安装包会直接失败",
+        path.display()
+    );
+
+    // `#define` 了一个名字却从不使用 = 当初只起了个头。
+    // `MyAppEnglishName` 就是这么留下的: 定义了 "Feisuo", 全文只此一处,
+    // 于是它在 .iss 里看起来像"已经支持英文", 实际什么也没做。
+    for line in iss.lines() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("#define ") else { continue };
+        let name = rest.split_whitespace().next().unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let uses = iss.matches(name).count();
+        assert!(
+            uses >= 2,
+            "`#define {name}` 定义了却从未被使用（全文只出现 {uses} 次）—— \
+             这类死定义会让脚本看起来支持某个能力, 实际什么也没做。\
+             要么用上它, 要么删掉"
+        );
+    }
+}
+
 /// 接力失败时, `.old` 是用户**唯一**的程序 —— 不得在没有替代品时删掉它。
 ///
 /// ## 这个场景怎么来的

@@ -2872,6 +2872,67 @@ fn sibling_controls_must_share_their_size_and_surface() {
     }
 }
 
+/// 变体类（`.x-y`）不许指望"定义在后面就能覆盖基础类" —— 顺序不是契约。
+///
+/// ## 这条守卫是怎么来的
+///
+/// 设置页「来源网段」那块要竖排（标题 / 网段胶囊 / 保存按钮），写法是
+///
+/// ```css
+/// .setting-item-block-col { flex-direction: column; align-items: stretch; }
+/// ```
+///
+/// 它定义在样式表 ~7735 行，而基础规则
+///
+/// ```css
+/// .setting-item-block { align-items: center; }
+/// ```
+///
+/// 定义在 ~9950 行。两者权重同为 (0,1,0)，**后定义的胜出** ——
+/// 于是 `align-items` 被悄悄覆盖回 `center`：`flex-direction` 生效了
+/// （竖排），`align-items` 没生效（子项按内容宽收缩并居中），
+/// 整块在 1075px 宽的面板里变成一片 362px 宽的**居中孤岛**。
+///
+/// 单看每一条规则都是对的，CSS 也不报错，只有量出实际宽度才看得出。
+/// 修法是把变体提到两个类名（`.a.a-variant`，权重 (0,2,0)），
+/// 从此与书写顺序无关。这条守卫就钉住"必须有两个类名"。
+#[test]
+fn variant_class_must_outweigh_the_base_rule_it_overrides() {
+    let app = strip_comments(
+        &std::fs::read_to_string(ui_src().join("App.vue")).expect("读取 App.vue 失败"),
+    );
+
+    // 实际踩过坑的那一对：`.setting-item-block` / `.setting-item-block-col`。
+    let base_needle = ".setting-item-block {";
+    let base_at = app
+        .find(base_needle)
+        .expect("App.vue 里找不到 .setting-item-block 基础规则");
+    let variant_at = app
+        .find(".setting-item-block-col")
+        .expect("App.vue 里找不到 .setting-item-block-col 变体规则");
+
+    // 变体必须写成 `.setting-item-block.setting-item-block-col`，
+    // 且必须在**基础规则之前**也能生效（这里只校验权重形态，不校验位置）。
+    let line_start = app[..variant_at].rfind('\n').map_or(0, |i| i + 1);
+    let selector: String = app[line_start..].chars().take_while(|c| *c != '{').collect();
+    assert!(
+        selector.contains(".setting-item-block.setting-item-block-col"),
+        "`.setting-item-block-col` 的选择器是 {selector:?} —— 单类名与基础规则\
+         `.setting-item-block` 同权重，会被**后定义**的基础规则覆盖 `align-items`，\
+         整块内容缩成一团居中的小岛。改成两个类名 `.setting-item-block.\
+         setting-item-block-col`，让权重升到 (0,2,0)"
+    );
+
+    // 反向断言：基础规则确实**在变体之后**，否则这条守卫防的坑已经不存在，
+    // 应该连同注释一起删掉，而不是留一条永远为真的测试。
+    assert!(
+        base_at > variant_at,
+        "`.setting-item-block` 现在定义在变体之前了 —— 这条守卫防的\
+         「后定义覆盖」已经不成立，请核实后删除它与对应注释，不要留一条\
+         永远为真的断言"
+    );
+}
+
 /// 假链接 `<a href="javascript:void(0)">` 不允许再出现。
 ///
 /// 它带着链接的全部视觉暗示 (可点、有 hover、屏幕阅读器念"链接"),

@@ -83,15 +83,20 @@
 
         <div class="devices-scroll-area">
           <!--
-            原生拖放期间的侧栏提示。
-            为什么需要一句话而不只是放大动画：卡片放大只能说明
-            "这里能接"，还差一步"接给谁"。这句文案把动作说全：
-            松手即发给光标下那台。
+            原生拖放期间的反馈**只有卡片动效**（`.drag-armed` 上浮 + 边框高亮）。
+
+            早先这里还有一条绿底提示「松手即发到光标下的设备」。删掉的原因：
+            「拖到目标上松手」是系统级约定，卡片已经整体上浮、指针下那张
+            还额外描了边 —— 动作本身说完了，再补一行字属于把约定俗成的
+            操作解释一遍，读者反而要停下来确认"是不是有什么特别的地方"。
+            提示条还占掉列表顶部一行，把设备卡片往下推，拖放时列表在动。
+
+            `role="status"` 保留，但只做**视觉隐藏**：屏幕阅读器拿不到
+            "卡片放大了"这个视觉信号，需要一句话替代；看得见的用户不需要。
           -->
-          <div v-if="isNativeFileDrag" class="drag-drop-sidebar-hint" role="status">
-            <i class="ph-bold ph-arrow-fat-lines-down"></i>
-            <span>松手即发到光标下的设备</span>
-          </div>
+          <span v-if="isNativeFileDrag" class="view-heading-sr" role="status">
+            松手即发到光标下的设备
+          </span>
           <!--
             分组而不是一锅端（§3.7）：「我的设备」= 信任库全量, **含离线**
             （灰显 + 上次在线时间）, 永不消失；「其他」= 仅在线的未配对设备, 可折叠。
@@ -1682,55 +1687,66 @@
               保持既有行为（不引入"升级后突然收不到文件"），
               但**必须一眼看出当前是未设置** —— 所以下面有醒目提示。
             -->
+            <!--
+              ## 为什么没有「保存」按钮
+
+              本节其余每一项（开关、下拉、设备名）都是**改完即生效**，只有这一块
+              要再点一次「保存」。同一页里两种提交模型，用户就得先判断"这次改的
+              东西会不会自己生效" —— 而这个页面上没有任何线索能回答它。
+              原来那个「保存」还被挤到了内容正中间（见 .setting-item-block-col
+              的注释：变体规则被基础规则反向覆盖），看起来像一条悬空的操作条。
+
+              现在改为**失焦 / 回车即落盘**，与同页其他控件一致；
+              落盘成功后就地显示「已保存」，不再有"未保存的改动"这种中间态。
+              空白行（点了「添加网段」却没填）不会被当成一条配置提交。
+            -->
             <div class="setting-item-block setting-item-block-col">
-              <div class="setting-desc-text">
-                <strong>允许的网段</strong>
-                <span>
-                  留空 = 接受任何来源。格式 <code class="path-mono">192.168.31.0/24</code>，省略 <code class="path-mono">/24</code> 时按 <code class="path-mono">/24</code> 处理。
+              <div class="subnet-head">
+                <div class="setting-desc-text">
+                  <strong>允许的网段</strong>
+                </div>
+                <span v-if="subnetsSaved" class="saved-hint">
+                  <i class="ph-fill ph-check"></i> 已保存
                 </span>
+                <button class="btn-fluent-secondary subnet-add" @click="addSubnetChip">
+                  <i class="ph ph-plus"></i> 添加网段
+                </button>
               </div>
-              <div class="subnet-editor">
+              <div v-if="allowedPeerSubnets.length > 0" class="subnet-editor">
                 <div
                   v-for="(cidr, i) in allowedPeerSubnets"
                   :key="i"
                   class="subnet-chip"
-                  :class="{ 'is-invalid': !isValidCidr(cidr) }"
+                  :class="{ 'is-invalid': !isValidCidr(cidr) && cidr.trim() !== '' }"
                 >
                   <i class="ph ph-globe"></i>
                   <input
                     class="subnet-chip-input font-mono"
                     v-model="allowedPeerSubnets[i]"
+                    placeholder="192.168.31.0/24 或 IP"
                     :title="isValidCidr(cidr) ? cidr : '格式无法识别'"
                     spellcheck="false"
+                    @blur="commitAllowedSubnets"
+                    @keyup.enter="commitAllowedSubnets"
                   />
                   <button
                     class="subnet-chip-del"
-                    title="移除这条"
-                    @click="allowedPeerSubnets.splice(i, 1)"
+                    :aria-label="`移除 ${cidr || '这一条'}`"
+                    title="移除"
+                    @click="removeSubnet(i)"
                   >
                     <i class="ph ph-x"></i>
                   </button>
                 </div>
-                <button class="btn-fluent-secondary subnet-add" @click="allowedPeerSubnets.push('')">
-                  <i class="ph ph-plus"></i> 添加网段
-                </button>
               </div>
-              <p v-if="allowedPeerSubnets.length === 0" class="subnet-warn-hint">
+              <p v-else class="subnet-state-hint">
                 <i class="ph ph-shield-warning"></i>
-                <span>
-                  <strong>当前未设置</strong> —— 同一网络内任何设备都可发起互联，可填精确 IP（如 <code class="path-mono">192.168.31.50</code>）或 CIDR 网段（如 <code class="path-mono">192.168.31.0/24</code>）。
-                </span>
+                <span>未设置 · 不限制来源</span>
               </p>
               <p v-for="(cidr, i) in badSubnets" :key="'bad' + i" class="subnet-warn-hint is-error">
                 <i class="ph-fill ph-warning-circle"></i>
-                <span><code class="path-mono">{{ cidr }}</code> 格式无法识别，会被拒绝（fail-closed）。</span>
+                <span><code class="path-mono">{{ cidr }}</code> 格式无法识别，会被拒绝</span>
               </p>
-              <div class="setting-action-group subnet-actions">
-                <button class="btn-fluent-primary" @click="saveAllowedSubnets" :disabled="!subnetsDirty">
-                  <i class="ph ph-floppy-disk"></i> 保存
-                </button>
-                <span v-if="subnetsDirty" class="subnet-dirty-hint">有未保存的改动</span>
-              </div>
             </div>
 
             <div class="panel-section-divider">
@@ -3207,14 +3223,16 @@ onBeforeUnmount(disarmFirewallHint);
 // 来源网段白名单（设置页）
 // =======================================================================
 //
-// 可编辑副本 + 原始快照，用 `subnetsDirty` 判断"有没有未保存的改动"。
-// 不直接 v-model 绑 localInfo —— 那会让"编辑到一半离开页面"也把配置改了。
-const savedSubnets = ref<string[]>([]);
+// 可编辑副本。**不直接 v-model 绑 localInfo** —— 输入框每敲一个字符都会
+// 触发一次保存的话，中间态（`192.168.` / `192.168.31.0/2`）也会落盘，
+// 而后端是 fail-closed 的：那些中间态意味着"此刻谁都连不上"。
+// 所以编辑留在本地副本，**失焦 / 回车**时才提交（与同页其他控件一致）。
 const allowedPeerSubnets = ref<string[]>([]);
-
-const subnetsDirty = computed(
-  () => JSON.stringify(allowedPeerSubnets.value) !== JSON.stringify(savedSubnets.value)
-);
+/** 提交成功后短暂显示「已保存」，2.2 秒后自行消失（与设备名同一套反馈） */
+const subnetsSaved = ref(false);
+let subnetsSavedTimer: any = null;
+/** 同一份内容重复提交（例如只改了空白）时的去抖，避免无意义的写盘 + toast */
+let lastSavedSubnetsKey = "";
 
 /** 局域网 IP 的**格式**校验（前端提示用）。
  *
@@ -3278,19 +3296,52 @@ function isValidCidr(raw: string): boolean {
   return true;
 }
 
-const badSubnets = computed(() => allowedPeerSubnets.value.filter((s) => !isValidCidr(s)));
+const badSubnets = computed(() =>
+  allowedPeerSubnets.value.filter((s) => s.trim() !== "" && !isValidCidr(s))
+);
 
-async function saveAllowedSubnets() {
+/** 新增一行空输入并聚焦。
+ *
+ *  空行**不会**被提交（`commitAllowedSubnets` 会过滤空串），
+ *  所以"点了添加又后悔"只需要把光标移开，不用再点一次删除。
+ *  聚焦放在下一个 tick：input 是 v-for 才渲染出来的，此刻还不在 DOM 里。
+ */
+async function addSubnetChip() {
+  allowedPeerSubnets.value.push("");
+  await nextTick();
+  const inputs = document.querySelectorAll<HTMLInputElement>(".subnet-chip-input");
+  inputs[inputs.length - 1]?.focus();
+}
+
+async function removeSubnet(index: number) {
+  allowedPeerSubnets.value.splice(index, 1);
+  await commitAllowedSubnets();
+}
+
+/** 把编辑副本落盘。失焦 / 回车 / 删除一条都会走到这里。
+ *
+ *  ## 为什么这里**不拦截**格式非法的条目
+ *
+ *  后端的 `update_app_config` 会对每一条做 `is_valid_subnet_entry` 校验，
+ *  一条非法就整批拒绝并返回具体是哪个值。前端先拦一道看似更友好，
+ *  实际会让"我删掉错的那条才能保存"变成一个死循环：错的那条存不进去，
+ *  而用户在改的就是它。让后端报错、把原文留在输入框里，用户才知道
+ *  到底哪一条不认 —— 下面的红条也在同步标出它。
+ */
+async function commitAllowedSubnets() {
   const clean = allowedPeerSubnets.value.map((s) => s.trim()).filter(Boolean);
+  // 内容没变就别重复写盘（失焦会连续触发，中文输入法回车也会）
+  const key = JSON.stringify(clean);
+  if (key === lastSavedSubnetsKey) return;
+  // 有非法条目时**先不提交**：后端整批拒绝会让这半条改动一起丢，
+  // 而用户此刻正在改的就是那一条。
+  if (clean.some((s) => !isValidCidr(s))) return;
   try {
     await FeisuoBridge.updateAppConfig({ allowed_peer_subnets: clean });
-    savedSubnets.value = [...clean];
-    allowedPeerSubnets.value = [...clean];
-    showToast(
-      clean.length
-        ? `已保存：只接受来自 ${clean.join("、")} 的连接`
-        : "已保存：不限制来源网段"
-    );
+    lastSavedSubnetsKey = key;
+    subnetsSaved.value = true;
+    if (subnetsSavedTimer) clearTimeout(subnetsSavedTimer);
+    subnetsSavedTimer = setTimeout(() => (subnetsSaved.value = false), 2200);
   } catch (e) {
     showToast(FeisuoBridge.describeError(e, "保存网段设置失败"), true);
   }
@@ -3874,11 +3925,20 @@ async function loadLocalInfo() {
   Object.assign(localInfo, info);
   // 网段白名单的编辑副本也要跟着刷新 —— 但**不能覆盖用户正在编辑的内容**，
   // 否则每 30 秒的静默刷新（`refreshDevices(true)` 那条链）会把输入框里
-  // 刚敲到一半的网段冲掉。
-  if (!subnetsDirty.value) {
-    savedSubnets.value = [...(info.allowed_peer_subnets ?? [])];
-    allowedPeerSubnets.value = [...savedSubnets.value];
+  // 刚敲到一半的网段冲掉。判断"正在编辑"用**焦点在哪**，而不是
+  // "和上次保存的值是否不同"：后者把"敲了一半"和"改完没提交"混为一谈，
+  // 而即时保存之后已经没有"改完没提交"这个状态了。
+  //
+  // 顺带：这里**不能**把 `allowedPeerSubnets` 无条件整个替换掉。
+  // 用户刚点了「添加网段」，那一行此刻还是空串，下一次静默刷新
+  // （或任何一次 loadLocalInfo）替换成已保存值就会让新行当场消失。
+  // 只有"当前全是空行"（= 用户还没输入任何东西）时才允许用后端值覆盖。
+  const editingSubnet = !!document.activeElement?.classList?.contains("subnet-chip-input");
+  const allBlank = allowedPeerSubnets.value.every((s) => s.trim() === "");
+  if (!editingSubnet && allBlank) {
+    allowedPeerSubnets.value = [...(info.allowed_peer_subnets ?? [])];
   }
+  lastSavedSubnetsKey = JSON.stringify(info.allowed_peer_subnets ?? []);
   // 用户正在编辑时不要覆盖输入框
   if (document.activeElement?.classList?.contains("name-input")) return;
   deviceNameInput.value = info.device_name;
@@ -7674,9 +7734,43 @@ function getFileIcon(name: string) {
 .mini-status-dot.active { background: var(--accent); }
 /* .btn-gear 已随齿轮按钮一起删除（与卡片点击重复，且页签里已有「系统设置」） */
 
-/* ---- 来源网段编辑器 ---- */
-.setting-item-block-col { flex-direction: column; align-items: stretch; gap: 10px; }
+/* ---- 来源网段编辑器 ----
+ *
+ * ## ⚠️ 选择器必须写两个类名
+ *
+ * 这个变体最早写的是单类 `.setting-item-block-col { align-items: stretch }`，
+ * 而基础规则 `.setting-item-block { align-items: center }` 定义在样式表**更靠后**
+ * 的位置（约 9950 行）。同权重下后者胜出 —— 于是实测这一块虽然
+ * `flex-direction` 变成了 column，`align-items` 却被悄悄覆盖回 `center`：
+ * 三行内容（标题 / 网段胶囊 / 保存按钮）全部被压成 362px 宽并水平居中，
+ * 在 1075px 宽的面板里看起来像一片**浮在中间的小岛**。
+ * 单看每条规则都对，只有量出来才知道是这条覆盖。
+ *
+ * 所以这里用两个类名把权重提到 (0,2,0)，顺序就再也影响不到它。
+ */
+.setting-item-block.setting-item-block-col {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
 .setting-desc-text code.path-mono { font-size: 11.5px; padding: 1px 4px; }
+
+/* 本节第一行：标题在左，动作（添加 / 已保存）靠右。
+ * 用 `.setting-desc-text` 自带的 `flex: 1` 把右侧动作推到底 —— 不额外写
+ * margin-left:auto，那样在窄窗口下会和标题抢空间。 */
+.subnet-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.subnet-head .setting-desc-text { flex: 1; }
+/* 这里的「添加网段」是**右侧动作**，与同页其他右列按钮同一个纵向节奏；
+ * 单独写死 padding 会让它在整列里显得矮一截，所以只压字号/高度。 */
+.subnet-add {
+  padding: 5px 12px;
+  font-size: 12px;
+  flex: 0 0 auto;
+}
 .subnet-editor {
   display: flex;
   flex-wrap: wrap;
@@ -7699,7 +7793,9 @@ function getFileIcon(name: string) {
 }
 .subnet-chip.is-invalid > i { color: var(--danger-text); }
 .subnet-chip-input {
-  width: 15ch;
+  /* 15ch 装不下 `192.168.31.0/24`（14 字符 + 光标），实测被截成
+   * `192.168.31.0/2`，用户会以为值本身是坏的。放宽到 18ch。 */
+  width: 18ch;
   padding: 2px 2px;
   font-size: 12px;
   color: var(--text-primary);
@@ -7707,6 +7803,7 @@ function getFileIcon(name: string) {
   border: 0;
   outline: none;
 }
+.subnet-chip-input::placeholder { color: var(--text-tertiary); }
 .subnet-chip-del {
   border: 0;
   background: none;
@@ -7717,7 +7814,20 @@ function getFileIcon(name: string) {
   border-radius: var(--radius-pill);
 }
 .subnet-chip-del:hover { color: var(--danger-text); background: var(--bg-hover-soft); }
-.subnet-add { padding: 5px 10px; font-size: 12px; }
+/* 「未设置」只需要一行字 + 一个图标：它描述的是**当前状态**，
+ * 不是需要用户读三行的警告。原来那段"可填精确 IP 或 CIDR 网段…"
+ * 属于格式说明，已经在输入框占位符里写着了。 */
+.subnet-state-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-tertiary);
+}
+.subnet-state-hint > i { font-size: 14px; flex: 0 0 auto; }
+
 /* 压在 **soft 底色** 上的文字必须用 `--*-on-soft`，不是 `--*-text`。
    项目已有既定写法（App.vue 里 .status-chip.untrusted 与 .btn-approval-block），
    这里照抄而不是自己配色 —— 两套主题下 `-on-soft` 都是为压 soft 底专门调深的，
@@ -7742,8 +7852,7 @@ function getFileIcon(name: string) {
   background: var(--danger-soft);
   border-color: var(--danger-border);
 }
-.subnet-actions { margin-top: 2px; align-items: center; gap: 10px; }
-.subnet-dirty-hint { font-size: 12px; color: var(--text-tertiary); }
+/* 「添加网段」已经挪到标题行右侧，不再有独立的操作条 */
 .sidebar-title-bar {
   padding: 10px 16px 6px;
   display: flex;
@@ -8217,20 +8326,13 @@ function getFileIcon(name: string) {
   cursor: not-allowed;
 }
 
-/* 拖放期间的侧栏提示条 */
-.drag-drop-sidebar-hint {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 10px;
-  border-radius: var(--radius-md);
-  border: 1px dashed var(--accent-border);
-  background: var(--accent-soft);
-  color: var(--accent-on-soft);
-  font-size: 12px;
-  font-weight: 600;
-  margin-bottom: 2px;
-}
+/* 拖放期间的侧栏提示**已删除**。
+ *
+ * 见模板里的注释：卡片上浮 + 边框高亮已经把"这里能接、松手就发"说完了，
+ * 再加一条绿底提示条既是把约定俗成的操作解释一遍，也把设备列表往下推
+ * 一行 —— 拖放时列表本身在动，那条提示反而成了干扰。
+ * 屏幕阅读器仍需要文字替代视觉信号，改用 `.view-heading-sr` 视觉隐藏。
+ */
 
 /* 直发撤销 toast（D4：5 秒窗口） */
 .undo-toast {
@@ -10018,12 +10120,32 @@ function getFileIcon(name: string) {
   color: var(--warn-text) !important;
 }
 
+/* 分节标题。
+ *
+ * ## 为什么这里要跟上一行的下边框"二选一"
+ *
+ * 上一行 `.setting-item-block` 自己带 `border-bottom`，而分节器又画一条
+ * `border-top`，两者之间只隔 `margin-top: 10px` —— 于是每个分节边界都会出现
+ * **两条平行横线**（截图里「清空记录 / 来源网段」「来源网段 / 更新」都是这样）。
+ * 单看每条规则都"有分隔线，正常"，只有并排放在一起才看得出是重复的。
+ *
+ * 修法不是删掉分节器的边框：像「日志」前面是 `.trust-table-wrap`，
+ * 它本来就没有下边框，删掉分节器的线这一段就彻底没有分隔了。
+ * 所以让**紧邻分节器的那一行**让出自己的下边框，每个边界恒为一条线。
+ */
 .panel-section-divider {
   padding: 18px 0 4px 0;
-  border-top: 1px solid var(--border-subtle);
   margin-top: 10px;
+  border-top: 1px solid var(--border-subtle);
 }
-.panel-section-divider.first { border-top: 0; padding-top: 10px; }
+.setting-item-block:has(+ .panel-section-divider) {
+  border-bottom-color: transparent;
+}
+.panel-section-divider.first {
+  border-top: 0;
+  padding-top: 10px;
+  margin-top: 0;
+}
 .panel-section-divider h3 { font-size: 13px; font-weight: 700; color: var(--text-secondary); margin: 0; }
 /* 视觉隐藏但保留在无障碍树里的视图页标题。
  *
