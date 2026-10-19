@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **CI 的测试步骤改为「失败自证」**：0.1.13 发版后 `main` 上 `Run test suite` 红过一次，而排查被卡死在"拿不到失败原因"——Actions 日志接口对未登录访问返回 403（`Must have admin rights`），网页上只显示 `Sign in to view logs`，公开的 check-run 注解里只有一句 `Process completed with exit code 1.`。也就是说除仓库管理员外，**没有任何人能知道是哪个用例挂了**，甚至分不清"断言失败"和"cargo 自己出错"。
+  - 现在测试输出经 `Tee-Object` 落到 `test-suite.log`，失败时把 libtest 的 `---- <用例名> stdout ----` 段落解析成 `::error title=` 注解——注解走 check-runs API，**匿名可读**；Step Summary 里同样列出失败用例。
+  - 同时加 `--no-fail-fast`：默认的 fail-fast 会让第一个二进制的失败掩盖后面所有失败，而 CI 只给一次机会。完整输出也随 artifact 上传（`if: always()`），日志接口不可用时仍有产物可查。
+  - 新增守卫 `update_guard::ci_test_failure_must_name_the_failing_test` 钉住上述三个行为标记（落盘 / 用例名注解 / `--no-fail-fast`），已用两次变异（摘掉 `--no-fail-fast`、把注解降级成普通输出）分别验证会变红。
+
 ## [0.1.13] — 2026-10-19
 
 ### 修复

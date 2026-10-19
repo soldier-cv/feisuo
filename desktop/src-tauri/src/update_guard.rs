@@ -568,6 +568,83 @@ fn pnpm_version_must_be_pinned_and_identical_across_workflows() {
     );
 }
 
+/// 守卫：测试失败必须**自证**是哪一条挂了。
+///
+/// ## 这条守卫对应的是一次真实卡壳（0.1.13 发版之后）
+///
+/// `main` 上 `Run test suite` 红过一次，而现场是这样的：
+///
+/// - Actions 日志接口对未登录访问返回 403（`Must have admin rights`）；
+/// - 网页上未登录只能看到 `Sign in to view logs`；
+/// - 公开的 check-run 注解里**只有** `Process completed with exit code 1.`。
+///
+/// 于是除了仓库管理员，**没有任何人能知道是哪个用例挂了**，甚至分不清
+/// "测试断言失败"和"cargo 自己出错"。本地全绿、LF 检出全绿、加压跑全绿，
+/// 结论只能停在"偶发"—— 而"偶发"这个词在日志里没有留下任何可追的线索。
+///
+/// 修法不是"以后记得看日志"，而是让 CI 把失败摘要写成 `::error::` 注解：
+/// 注解走 check-runs API，**匿名可读**。所以这里钉住三件事：
+///
+/// 1. 测试步骤必须把输出落到文件（`Tee-Object`）—— 否则没法在后处理里读；
+/// 2. 失败时必须产出 `::error title=` 注解，并且带上用例名；
+/// 3. 必须 `--no-fail-fast`，否则第一个二进制的失败会把后面的失败全部盖住。
+///
+/// 判据刻意只认这几个**行为标记**，不认具体缩进/YAML 结构：workflow 怎么排版
+/// 都行，但这些标记一旦消失，红了的 CI 就又变成"看不出原因"。
+#[test]
+fn ci_test_failure_must_name_the_failing_test() {
+    let ci = workflow_src("ci.yml");
+
+    let step_at = ci
+        .find("name: Run test suite")
+        .expect("ci.yml 里找不到 `Run test suite` 步骤 —— 守卫需重写");
+    // 只看这一步的窗口：从步骤名到文件末尾足够覆盖，但不越过 `check` job 的
+    // 下一个 job（`android:` 的顶格缩进）。
+    let tail = &ci[step_at..];
+    let end = tail
+        .find("\n  android:")
+        .unwrap_or_else(|| panic!("ci.yml 结构变了: `Run test suite` 之后找不到 android job"));
+    let block = &tail[..end];
+
+    assert!(
+        block.contains("cargo test --workspace --locked"),
+        "测试步骤必须仍然跑全量工作区测试（--locked 不可去掉）"
+    );
+    assert!(
+        block.contains("--no-fail-fast"),
+        "测试步骤必须带 --no-fail-fast —— 默认 fail-fast 会让第一个失败掩盖后面的失败，\
+         而 CI 只给一次机会"
+    );
+    assert!(
+        block.contains("Tee-Object"),
+        "测试输出必须落盘（Tee-Object）—— 否则失败后没有任何可后处理的文本"
+    );
+    assert!(
+        block.contains("::error title="),
+        "测试失败必须写成 `::error title=` 注解 —— 注解是**匿名可读**的唯一通道；\
+         只靠日志的话，非管理员看到的就只有 `exit code 1`"
+    );
+    assert!(
+        block.contains("stdout ----"),
+        "注解必须真的从 libtest 的 `---- <用例名> stdout ----` 段落里取用例名 —— \
+         没有用例名的注解和没有注解一样没用"
+    );
+
+    // 产物：日志 / 注解都失效时，至少还能把完整输出下载下来。
+    let upload_at = ci
+        .find("name: Upload test output")
+        .expect("缺少上传测试输出的步骤 —— 日志拿不到时就没有任何自证手段了");
+    let upload_block = &ci[upload_at..];
+    assert!(
+        upload_block.contains("if: always()"),
+        "测试输出必须 `if: always()` 上传 —— 只在成功时上传等于没上传"
+    );
+    assert!(
+        upload_block.contains("test-suite.log"),
+        "上传的必须是 `test-suite.log`（与 Tee-Object 的落点一致）"
+    );
+}
+
 /// 守卫：仓库标识在**三处**必须一致（AGENTS.md 规则 5）。
 ///
 /// ## 为什么这条必须自动化检查

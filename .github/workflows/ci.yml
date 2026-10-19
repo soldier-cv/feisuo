@@ -216,8 +216,61 @@ jobs:
       # 声明与 lock 不一致时，不加 `--locked` 会让 cargo **悄悄重新解析**
       # 并在 CI 里改写 lock —— 于是"忘了提交 lock"这件事永远不会暴露，
       # 而本地和 CI 用的依赖版本已经开始分叉。加了它，drift 直接失败。
+
+      # 失败必须**自证**。曾经的实际情况：这一步在 main 上红过一次，
+      # 而 Actions 日志对未登录访问返回 403（"Must have admin rights"），
+      # 公开的 check-run 注解里只有一句 "Process completed with exit code 1." ——
+      # 也就是说，除了仓库管理员，没有任何人能知道是哪个用例挂了，
+      # 连"是测试挂了还是 cargo 自己挂了"都分不出来。
+      #
+      # 这里把 libtest 的失败摘要转成 `::error::` 注解：
+      # 注解走 check-runs API，**匿名可读**，谁都能看到具体用例名。
+      # `--no-fail-fast` 让后面几个测试二进制照跑，避免一个失败掩盖其余失败。
       - name: Run test suite
-        run: cargo test --workspace --locked
+        shell: pwsh
+        env:
+          # panic 时打印栈，注解里才有定位线索
+          RUST_BACKTRACE: "1"
+        run: |
+          cargo test --workspace --locked --no-fail-fast 2>&1 |
+            Tee-Object -FilePath test-suite.log
+          $code = $LASTEXITCODE
+
+          if ($code -ne 0) {
+            # libtest 的失败用例长这样（每段以 `---- 名字 stdout ----` 开头）
+            $names = Select-String -Path test-suite.log -Pattern '^---- (.+) stdout ----$' |
+              ForEach-Object { $_.Matches[0].Groups[1].Value } |
+              Select-Object -Unique
+
+            if (-not $names) {
+              # 没有 libtest 失败段落 ⇒ 不是断言的锅，多半是编译/链接/进程崩溃，
+              # 那就把最后 40 行原样贴出来。
+              $tail = Get-Content test-suite.log -Tail 40 | Out-String
+              Write-Host "::error title=测试步骤失败（非断言）::$($tail -replace "`r?`n", '%0A')"
+            } else {
+              foreach ($n in $names) {
+                Write-Host "::error title=测试失败::$n"
+              }
+            }
+
+            # 顺带写进 Step Summary，打开页面第一屏就能看见
+            "## 失败的测试（$($names.Count) 个）" |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+            $names | ForEach-Object { "- ``$_``" } |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          }
+
+          exit $code
+
+      # 无论红绿都留一份完整输出，本地拉不下来日志时至少有产物可查。
+      - name: Upload test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-suite-log
+          path: test-suite.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   # ---------------------------------------------------------------------------
   # Android：把 arm64 目标真正编一遍
