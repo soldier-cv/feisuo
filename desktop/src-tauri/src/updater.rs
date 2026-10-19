@@ -1058,13 +1058,12 @@ impl UpdateService {
         // 用 `ping` 而不是 `timeout` 做延时：`timeout` 在没有控制台的
         // 会话里会直接报 "输入重定向不受支持" 而不等待，`ping -n` 恒可用。
         let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-        let relaunch_dir = dir.to_path_buf();
         let pid = std::process::id();
         spawn_relaunch_after_exit(&current_exe, &args, pid)?;
         tracing::info!(
             "已安排退出后拉起新版本 (pid={}), 目录: {}",
             pid,
-            relaunch_dir.display()
+            dir.display()
         );
 
         // 4) 退出旧实例 —— 互斥体随进程退出释放，中继随后拉起新版本。
@@ -1585,30 +1584,48 @@ fn pick_asset(assets: &[AssetDto]) -> Option<&AssetDto> {
 ///
 /// 这是**安全边界**: 下载 URL 完全来自远端 JSON, 若不校验主机名,
 /// 一个被劫持或伪造的 API 响应就能让客户端下载并执行任意程序。
+///
+/// ## 为什么必须用真正的 URL 解析, 而不是按 `://` 切字符串
+///
+/// 旧实现是手写的：先 `split("://")`，再按 `/ ? #` 切出 authority，
+/// 取最后一个 `@` 之后的部分当 host。这条路至少有四个可绕过点：
+///
+/// - `https://evil.com\\@gitee.com/` —— 反斜杠在 URL 里是**分隔符**，
+///   手写切分只看 `@`，会认为 host 是 `gitee.com`，而解析器眼里 host 是
+///   `evil.com`；
+/// - `https://gitee.com.evil.com` —— 这条侥幸被 `ends_with(".gitee.com")`
+///   挡住，但同一思路下 `https://evil.com/?x=.gitee.com` 之类的歧义
+///   全靠切分顺序正确，改一行就破；
+/// - `https://[::1]/` / 端口 / 百分号编码 / 尾部点（`gitee.com.`）——
+///   每种写法的 host 判定都各不相同；
+/// - **协议无关**：旧实现接受 `http://`，而更新包会被直接执行。
+///
+/// 现在直接交给 `reqwest::Url`（whatwg 规则）解析，只认 `https`，
+/// 并且要求 host **恰好**是白名单域名或其子域（尾部点先去掉，
+/// 因为 `gitee.com.` 在 DNS 上等价于 `gitee.com`，而 `ends_with` 判不出来）。
 pub fn is_trusted_download_url(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" {
         return false;
     }
-    let host = lower
-        .split("://")
-        .nth(1)
-        .and_then(|rest| rest.split(['/', '?', '#']).next())
-        .unwrap_or("")
-        .split('@')
-        .next_back()
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("");
-
-    host == "gitee.com"
-        || host.ends_with(".gitee.com")
-        || host == "github.com"
-        || host.ends_with(".github.com")
-        || host.ends_with(".githubusercontent.com")
-        || host == "release-assets.githubusercontent.com"
-        || host == "objects.githubusercontent.com"
+    // `host_str()` 对 IPv6 返回带方括号的形式, 直接比对域名即可。
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    // 子域必须真的以 `.` 分隔 —— `evilgitee.com` 不能因为
+    // `ends_with("gitee.com")` 就通过。
+    let is_domain = |base: &str| host == base || host.ends_with(&format!(".{base}"));
+    is_domain("gitee.com")
+        || is_domain("github.com")
+        || is_domain("githubusercontent.com")
+        || is_domain("release-assets.githubusercontent.com")
+        || is_domain("objects.githubusercontent.com")
 }
 
 /// 从 `/releases/tag/vX.Y.Z` 里取出 tag 与版本号。
@@ -1911,6 +1928,31 @@ mod tests {
         ] {
             assert!(!is_trusted_download_url(url), "站外地址必须被拒: {url}");
         }
+
+        // ---- 旧手写切分能被绕过的写法（每一条都是这次改成真 URL 解析的理由）----
+        for url in [
+            // 反斜杠在 URL 里是普通字符, 手写 `split('@').next_back()` 会
+            // 把 `gitee.com` 当成 host; 而 whatwg 解析把 `\` 当分隔符,
+            // 真实 host 是 `evil.com` —— 两者结论完全相反
+            "https://evil.com\\@gitee.com/x.exe",
+            // 明文 http: 更新包会被**直接执行**, 不能容忍协议降级
+            "http://gitee.com/x.exe",
+            // 子域拼接不算子域
+            "https://notgitee.com/x.exe",
+            // 空 host / 相对地址 / 非 URL
+            "https:///x.exe",
+            "/x.exe",
+            "gitee.com/x.exe",
+        ] {
+            assert!(!is_trusted_download_url(url), "这条必须被拒: {url}");
+        }
+
+        // 尾部点：DNS 上 `gitee.com.` 就是 `gitee.com`（同一个 FQDN 写法），
+        // 所以归一化后应当放行。单独断言，别藏在上面的循环里。
+        assert!(
+            is_trusted_download_url("https://gitee.com./x.exe"),
+            "尾部点应当归一化后放行（DNS 上等价于 gitee.com）"
+        );
     }
 
     /// **真实网络**端到端：Gitee 的 JSON 必须能被解析、挑出 exe、且地址通过白名单。

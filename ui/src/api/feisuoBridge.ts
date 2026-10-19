@@ -587,9 +587,21 @@ export function parseBrowseFailure(e: unknown, fallback: string): BrowseFailure 
     };
   }
   const message = toMessage(e, fallback);
+  // 没有结构化字段时**不再猜文案**。
+  //
+  // 早先这里是 `message.includes("匹配码") || message.includes("传输码")`,
+  // 而那是本项目**明确否定过**的反模式（见 core 的 `ApprovalError` 注释：
+  // "调用方只能去文案里判断，对端一改措辞就静默失效"）。协议现在已经给
+  // 浏览/取回应答配了结构化字段 `requires_grant_code`，后端会原样带上来
+  // （见 `BrowseDenied`）。
+  //
+  // 猜文案的后果是双向的：对端换个说法 ⇒ 该弹码时弹不出来，用户只能
+  // 反复看到同一个"被拒绝"；而对端文案里恰好出现那三个字（例如拒绝原因
+  // 在解释怎样配置匹配码）⇒ 明明是被硬拒绝，界面却弹出一个永远填不对的
+  // 码框。所以这里一律按"硬拒绝"处理，让用户看到真实原因。
   return {
     message,
-    grantCodeRequired: message.includes("传输码") || message.includes("匹配码"),
+    grantCodeRequired: false,
   };
 }
 

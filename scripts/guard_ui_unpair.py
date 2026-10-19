@@ -5,6 +5,26 @@
 它是"只改本地一半"，正是本轮要消灭的那个缺陷。
 """
 import io, sys, re
+# ---- stdout 加固（见 scripts/_ci_utf8.py）----
+#
+# 本脚本输出是中英混排 + `✓` / `✗` 这类符号。而 Python 在 Windows 上默认用
+# **控制台代码页**编码 stdout：中文 Windows 是 cp936，英文 Windows / GitHub
+# runner 是 cp1252 —— 两者都编不出 `✓`，`print` 直接抛 UnicodeEncodeError。
+#
+# ⚠️ 这个坑在本仓库真实发生过，而且方向很反直觉：需要 `✓` 的恰好是**成功**
+# 那条路径（"全部通过"的收尾行）。于是"守卫判定通过"在 GBK 控制台上表现为
+# **退出码 1** —— 看起来像发现了问题，实际是守卫自己崩了。假红和假绿一样
+# 危险：前者让人去改没坏的代码，后者让真问题溜过去。
+#
+# 必须在**任何** print 之前执行，所以位置固定在 import 之后。
+# （`check-ci-encoding.py` 会逐脚本检查这一点，注释掉的调用不算。）
+import os as _os
+import sys as _sys
+
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from _ci_utf8 import force_utf8_stdout  # noqa: E402
+
+force_utf8_stdout()
 
 UI = 'ui/src/App.vue'
 BRIDGE = 'ui/src/api/feisuoBridge.ts'

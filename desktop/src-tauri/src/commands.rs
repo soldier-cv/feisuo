@@ -1386,12 +1386,20 @@ pub fn cleanup_temp_payloads(
     paths: Option<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    let dir = state
-        .engine
-        .config
-        .try_read()
-        .map(|c| c.receive_dir.join(".feisuo-staging"))
-        .unwrap_or_default();
+    // 配置锁读不到时**不能**把目录退化成空路径。
+    //
+    // `unwrap_or_default()` 给出的是 `PathBuf::new()`，而
+    // `is_within(parent, "")` 对任何真实路径都会返回 false —— 于是
+    // "读配置失败"被静默表达成"每一个路径都在暂存目录之外"，
+    // 界面只会看到"清理成功但文件还在"（下面无条件 `Ok(true)`）。
+    // 这是把一次内部错误伪装成一次正常空操作。
+    let dir = match state.engine.config.try_read() {
+        Ok(c) => c.receive_dir.join(".feisuo-staging"),
+        Err(e) => {
+            tracing::warn!("读取配置失败, 无法确定暂存目录, 放弃本次清理: {}", e);
+            return Err("读取配置失败，暂时无法清理暂存文件".into());
+        }
+    };
 
     match paths {
         Some(list) => {
@@ -1423,9 +1431,27 @@ pub fn cleanup_temp_payloads(
         }
         None => {
             if dir.exists() {
-                if let Ok(entries) = std::fs::read_dir(&dir) {
-                    for entry in entries.flatten() {
-                        let _ = std::fs::remove_file(entry.path());
+                match std::fs::read_dir(&dir) {
+                    Ok(entries) => {
+                        for entry in entries.flatten() {
+                            // 目录里的条目**不该**有子目录（暂存是扁平的），
+                            // 但真的出现时 `remove_file` 会失败 ——
+                            // 原来的 `let _ =` 让那个失败无声无息，
+                            // 而调用方随后会以为"整个目录已清空"。
+                            let p = entry.path();
+                            if let Err(e) = std::fs::remove_file(&p) {
+                                if e.kind() != std::io::ErrorKind::NotFound {
+                                    tracing::warn!("清空暂存目录时无法删除 {}: {}", p.display(), e);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // 读不了目录 ≠ 目录是空的。返回 Ok(true) 会让前端
+                        // 以为清理成功，而那些文件其实一直躺在磁盘上
+                        // （暂存区里常有剪贴板里的密码/截图）。
+                        tracing::warn!("读取暂存目录 {} 失败: {}", dir.display(), e);
+                        return Err(format!("读取暂存目录失败: {}", e));
                     }
                 }
             }

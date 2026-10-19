@@ -41,6 +41,7 @@
 from __future__ import annotations
 
 import io
+import re
 import sys
 from pathlib import Path
 
@@ -65,19 +66,42 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 HELPER = SCRIPTS / "_ci_utf8.py"
 
-# 会在 ci.yml 里被调用的脚本。与 ci.yml 保持一致 ——
-# 这里多列几个无害（没被调用就不必加固），少列几个才是问题。
-CI_SCRIPTS = [
-    "check-css-stray-declarations.py",
-    "check-contrast.py",
-    "audit-ui-invariant.py",
-    "audit-invoke-args.py",
-    # 原先这里还有 check-ps1-encoding.py：它守的是 build.ps1 /
-    # build-native.ps1 的 BOM。那两个脚本已按用户要求删除，这个守卫
-    # 随之删除 —— 文件不在后它会**一路绿着**却什么也没检查，
-    # 是最坏的那种守卫：看着有防护，实际没有。
-    "check-ci-encoding.py",  # 本脚本自己
-]
+# 会在 ci.yml 里被调用的脚本。**必须从 ci.yml 解析，不能手写。**
+#
+# ## 这里曾经是手写清单，然后它漂了
+#
+# 手写版本只列了 4 个脚本，而 ci.yml 实际调用了 9 个 —— 漏掉的 5 个
+# （guard_ui_unpair / audit_trust_requirements / guard_blocked_dimension /
+# guard_no_local_only_unpair / guard_session_grant_ui）里，有 4 个在**通过时**
+# 打印 `✓`，在 GBK 控制台上直接抛 UnicodeEncodeError、退出码 1。
+#
+# 于是现场是：守卫判定"全部通过" → 打印成功标记 → 崩 → CI 变红。
+# 而这里的编码守卫因为清单里没有它们，一路绿着说"全部加固"。
+#
+# 手写清单的失败模式就是"新增脚本时没人记得回来加一行"，而漏掉的那一行
+# 恰好决定了它会不会在别人的机器上炸。所以改成**扫 ci.yml**：
+# 它引用了哪些 `scripts/*.py`，就检查哪些。漏一个都不可能。
+def discover_ci_scripts() -> list[str]:
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    # **必须跳过注释行**。ci.yml 里有一大段注释专门解释
+    # "check-ps1-encoding.py 已随那两个 .ps1 一起删除，因为它会一路绿着
+    #  却什么也没检查" —— 那段注释里就写着 `scripts/check-ps1-encoding.py`。
+    # 不跳注释的话，本守卫会去检查一个**故意删掉**的脚本，报"文件不存在"，
+    # 于是两个守卫对着同一条历史互相打架。
+    # （和 `pnpm_version_must_be_pinned...` 踩过的是同一类坑：注释里出现
+    #   被检查的字面量，就会污染检查。）
+    code = "\n".join(
+        line for line in ci.splitlines() if not line.lstrip().startswith("#")
+    )
+    found: list[str] = []
+    for m in re.finditer(r"scripts/([A-Za-z0-9_\-]+\.py)", code):
+        name = m.group(1)
+        if name not in found:
+            found.append(name)
+    return found
+
+
+CI_SCRIPTS = discover_ci_scripts()
 
 
 def main() -> int:
@@ -85,6 +109,17 @@ def main() -> int:
 
     if not HELPER.is_file():
         print(f"找不到 {HELPER}", file=sys.stderr)
+        return 2
+
+    # 清单必须**解析得到**。解析失败时 if 为空列表 ⇒ 下面一个脚本都不检查 ⇒
+    # 打印"全部加固"并退出 0。那是本项目最不能容忍的失效模式：
+    # 守卫自己坏了，却一路绿着。
+    if not CI_SCRIPTS:
+        print(
+            "无法从 .github/workflows/ci.yml 解析出任何 scripts/*.py —— "
+            "ci.yml 结构变了，本守卫现在什么都没检查，结论不可信",
+            file=sys.stderr,
+        )
         return 2
 
     # helper 必须真的做了事: 一个空壳 helper 会让所有脚本"已加固"却照样炸。
@@ -129,19 +164,45 @@ def main() -> int:
             )
             continue
 
-        call_at = src.find("force_utf8_stdout()")
+        # 调用点必须落在**非注释行**上。
+        #
+        # 早期这里只做 `src.find("force_utf8_stdout()")` —— 于是把调用
+        # 注释掉（`# force_utf8_stdout()`）依然能通过检查，而加固实际上
+        # 已经不在执行了。实测变异：注释掉调用后守卫仍是绿的。
+        # 判"有没有这串字符"和判"这串字符会不会被执行"是两件事。
+        call_at = -1
+        offset = 0
+        for line in src.splitlines(keepends=True):
+            stripped = line.strip()
+            if (
+                not stripped.startswith("#")
+                and "force_utf8_stdout()" in line
+            ):
+                call_at = offset + line.find("force_utf8_stdout()")
+                break
+            offset += len(line)
         if call_at < 0:
             problems.append(
                 f"{name}: import 了 _ci_utf8 但**没调用** force_utf8_stdout()"
+                "（注释里出现不算 —— 那不会执行）"
             )
             continue
 
-        # 必须早于 main() 定义 —— 否则 main 里的第一个 print 就已经炸了。
-        main_at = src.find("def main(")
-        if main_at >= 0 and call_at > main_at:
+        # 必须早于**任何** print —— 否则第一个 print 就已经用旧编码炸掉了。
+        #
+        # 早期这里只比 `def main(` 的位置，那对"没有 main、脚本体直接跑"
+        # 的守卫（guard_ui_unpair 就是）等于没检查：它的 print 全在顶层，
+        # 而 `def main(` 根本不存在（`main_at < 0` 时整段断言被跳过）。
+        # 真正的判据是"第一次输出之前"，与代码组织方式无关。
+        first_print = None
+        for line in src.splitlines():
+            if line.strip().startswith("print("):
+                first_print = src.find(line)
+                break
+        if first_print is not None and call_at > first_print:
             problems.append(
-                f"{name}: force_utf8_stdout() 出现在 def main( 之后 —— "
-                "main 里的第一个 print 早就已经用旧编码炸掉了，等于没加固"
+                f"{name}: force_utf8_stdout() 出现在第一次 print 之后 —— "
+                "那一次 print 早就已经用旧编码炸掉了，等于没加固"
             )
 
     print("=" * 72)

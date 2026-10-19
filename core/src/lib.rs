@@ -1250,6 +1250,20 @@ impl FeisuoEngine {
     /// 保留期与传输历史一致。**主要动机是隐私**：`committed_path`
     /// 记录了用户收件文件的完整路径，无限期留着等于把一份
     /// "用户收过什么文件、放在哪"的清单长期存盘。
+    ///
+    /// ## 同时清理**分块级**进度
+    ///
+    /// 这里原本只清 `transfer_parts`，而 `transfer_chunk_progress` 的清理函数
+    /// `purge_expired_chunk_progress` **从来没有被调用过** —— 它一直是个
+    /// 永远不执行的 `pub fn`。后果是那张表只增不减：
+    ///
+    /// - 每次传输的每个文件都会往里写一行（含 `staged_path`，一条用户
+    ///   文件系统的绝对路径），而断点续传的暂存目录在失败时是**被删掉**的
+    ///   （见 `StagingGuard`），于是这些行指向的文件早就不存在了；
+    /// - 表越长，`plan_resume` 里的 `get_chunk_progress` 与整库体积越难看，
+    ///   而它们没有一行还能被用上。
+    ///
+    /// 两张表用同一个保留期：它们的语义是同一个"这次传输的中间状态"。
     pub fn purge_completed_parts(&self) {
         let days = {
             let cfg = self.config.try_read();
@@ -1263,6 +1277,18 @@ impl FeisuoEngine {
             }
             Ok(_) => {}
             Err(e) => tracing::warn!("清理断点续传记录失败: {}", e),
+        }
+        // 分块进度：同样的保留期。超过保留期的行对应的暂存文件
+        // 早已不在（或已被 StagingGuard 删掉），留着只是占体积与留痕。
+        match self
+            .trust_store
+            .purge_expired_chunk_progress(days.saturating_mul(86400))
+        {
+            Ok(n) if n > 0 => {
+                tracing::info!("已清理 {} 条过期分块续传进度（保留 {} 天）", n, days);
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("清理分块续传进度失败: {}", e),
         }
     }
 }

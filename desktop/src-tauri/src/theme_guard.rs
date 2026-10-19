@@ -150,22 +150,29 @@ fn strip_comments(src: &str) -> String {
 
 /// 找出 `needle` 的所有**字符边界**起始偏移。
 /// `str::match_indices` 给的是字节偏移, 直接拿去切含中文的字符串会 panic。
+///
+/// ## 为什么不是"每次 find 之后从下一个字符重新 find"
+///
+/// 那个写法是 O(n²)：每一轮都把剩下的尾巴重扫一遍。而这个函数的调用方
+/// ([`every_referenced_token_must_be_defined`]) 对**每个** `var(` 都调用一次，
+/// 于是整条守卫变成 O(n³)。实测单条就要 21s，占掉整个桌面测试二进制
+/// (33–39s) 的大半 —— 而它只是把源码扫一遍。
+///
+/// 一次 `char_indices()` 走完即可：`starts_with` 只在首字节匹配时才逐字节比较，
+/// 不存在重复扫描。
 fn find_all(haystack: &str, needle: &str) -> Vec<usize> {
-    let mut out = Vec::new();
-    let mut from = 0usize;
-    while from <= haystack.len() {
-        let Some(p) = haystack[from..].find(needle) else {
-            break;
-        };
-        out.push(from + p);
-        // 步进 1 个字符而不是 1 个字节, 保证下一次切分仍落在边界上
-        from += haystack[from..]
-            .chars()
-            .next()
-            .map(|c| c.len_utf8())
-            .unwrap_or(1);
+    if needle.is_empty() {
+        return Vec::new();
     }
-    out
+    // 先按首字符筛一道：绝大多数位置在第一个字节就不匹配，
+    // 这样整体是 O(n)，而不是对每个位置都做一次完整的 `starts_with`。
+    let first = needle.as_bytes()[0];
+    haystack
+        .char_indices()
+        .filter(|&(i, _)| haystack.as_bytes()[i] == first)
+        .map(|(i, _)| i)
+        .filter(|&i| haystack[i..].starts_with(needle))
+        .collect()
 }
 
 #[test]

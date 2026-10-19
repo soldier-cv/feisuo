@@ -4,12 +4,28 @@
 
 ## [Unreleased]
 
+## [0.1.14] — 2026-10-20
+
+### 修复
+
+- **「允许的网段」白名单可能整卷放行（`core/src/storage/volumes.rs`）**：卷的可读性判据是 `allow_paths` 里的字符串 `starts_with(卷 id)`，于是白名单里任意一条以 `c` 开头的字符串（例如误存的 `c:whatever`）都会让 `C:` 整卷变成可读 —— 而白名单的语义是"只开放这些目录"。现在必须**带分隔符**比路径前缀，同时保留"只写卷根（`D:` / `D:\`）也要算数"的直觉用法。新增用例 `allowlist_volume_prefix_must_be_path_aware`，已用变异（退回旧的前缀比较）验证会变红。
+- **分块续传进度表只增不减（`core/src/lib.rs` + `trust_store.rs`）**：`purge_expired_chunk_progress` 从来没有调用点，是一段永远不执行的死代码。这张表每传一个文件就多一行（含 `staged_path`，一条用户文件系统的绝对路径），而其指向的暂存目录在失败时已被 `StagingGuard` 删掉 —— 行留着但永远用不上，既是体积问题也是留痕问题。现在与 `transfer_parts` 共用同一个保留期统一清理。
+- **畸形帧可打掉接收端（`core/src/transport/server.rs`）**：`format_grant_challenge_for_display` 里 `&t[..3]` 是**字节**切片。当前前置条件（6 字节且全为 ASCII 数字）恰好挡住了它，但只要那条判据被放宽（例如以后想支持字母），一个形如两个汉字的 6 字节字符串就会切在字符中间 panic —— 而这段代码在传输路径上，一次畸形帧即可触发。改为按字符定位切点，安全性不再依赖前置判据的严格程度。
+- **界面用中文文案猜「需要匹配码」（`ui/src/api/feisuoBridge.ts`）**：`parseBrowseFailure` 在拿不到结构化字段时用 `includes("匹配码")` 兜底，而这正是 core 里 `ApprovalError` 注释明确否定过的反模式。猜错是双向的：对端换措辞 ⇒ 该弹码时弹不出来；对端文案里恰好含那三个字 ⇒ 明明是硬拒绝却弹出一个永远填不对的码框。现在一律按硬拒绝处理，把真实原因交给用户。
+- **暂存清理会把内部错误伪装成"清理成功"（`desktop/src-tauri/src/commands.rs`）**：`cleanup_temp_payloads` 用 `try_read().map(..).unwrap_or_default()` 取目录，读锁失败时得到空路径 ⇒ `is_within` 对每个路径都判 false ⇒ 一个文件都不删，而命令仍返回 `Ok(true)`。清空模式下 `read_dir` 失败同样被 `if let Ok` 吞掉。现在两种情况都返回错误，让界面能说真话（暂存区里常有剪贴板里的密码与截图）。
+
 ### 变更
 
+- **五个 CI 守卫脚本补齐 stdout 加固，并把加固清单改成从 `ci.yml` 解析**（`scripts/`）：`guard_ui_unpair` / `audit_trust_requirements` / `guard_blocked_dimension` / `guard_no_local_only_unpair` / `guard_session_grant_ui` 在**通过时**打印 `✓`，而 GBK 控制台编不出这个字符 ⇒ `UnicodeEncodeError` ⇒ 退出码 1。也就是说"守卫判定全部通过"在中文 Windows 上表现为**失败**。`check-ci-encoding.py` 没拦住它们，是因为它的受检清单是**手写**的、已经和 `ci.yml` 漂了（4 vs 9）。
+  - 现在清单由 `ci.yml` 解析得出（并跳过注释行，否则会去检查一段注释里提到的、早已删除的 `check-ps1-encoding.py`），解析为空直接以退出码 2 失败 —— 手写清单的失效模式就是"新增脚本时没人记得回来加一行"。
+  - 顺带修掉两处判据漏洞：`force_utf8_stdout()` 出现在**注释里**也算通过（注释掉的调用不会执行）；只比 `def main(` 位置，对"没有 main、脚本体直接跑"的守卫等于没检查。现在按"第一次 print 之前"判定。
+- **`theme_guard::find_all` 从 O(n³) 降到 O(n)**（`desktop/src-tauri/src/theme_guard.rs`）：旧实现每轮只前进一个字符并重扫剩余部分，而调用方对每个 `var(` 都调它一次。单条守卫实测 21s、占掉整个桌面测试二进制的 33–39s 里的大半 —— 而那只是把源码扫一遍。现在一次 `char_indices()` 走完；桌面测试二进制 **33s → 3s**。
+- **更新下载的白名单改用真正的 URL 解析（`desktop/src-tauri/src/updater.rs`）**：旧实现按 `://`、`@`、`:` 手写切分再比 host，`https://evil.com\@gitee.com/` 这类写法下与真实解析的结论相反；而且它接受 `http://`，而更新包会被**直接执行**。现在交给 `reqwest::Url`（whatwg 规则）解析，只认 `https`，host 必须恰好等于白名单域名或其子域名（尾部点先归一化，`notgitee.com` 因缺分隔符仍被拒）。用例补了六种绕过写法，并用两次变异（放开 http / 改回裸 `ends_with`）验证会变红。
 - **CI 的测试步骤改为「失败自证」**：0.1.13 发版后 `main` 上 `Run test suite` 红过一次，而排查被卡死在"拿不到失败原因"——Actions 日志接口对未登录访问返回 403（`Must have admin rights`），网页上只显示 `Sign in to view logs`，公开的 check-run 注解里只有一句 `Process completed with exit code 1.`。也就是说除仓库管理员外，**没有任何人能知道是哪个用例挂了**，甚至分不清"断言失败"和"cargo 自己出错"。
   - 现在测试输出经 `Tee-Object` 落到 `test-suite.log`，失败时把 libtest 的 `---- <用例名> stdout ----` 段落解析成 `::error title=` 注解——注解走 check-runs API，**匿名可读**；Step Summary 里同样列出失败用例。
   - 同时加 `--no-fail-fast`：默认的 fail-fast 会让第一个二进制的失败掩盖后面所有失败，而 CI 只给一次机会。完整输出也随 artifact 上传（`if: always()`），日志接口不可用时仍有产物可查。
   - 新增守卫 `update_guard::ci_test_failure_must_name_the_failing_test` 钉住上述三个行为标记（落盘 / 用例名注解 / `--no-fail-fast`），已用两次变异（摘掉 `--no-fail-fast`、把注解降级成普通输出）分别验证会变红。
+- **几处重复粘贴的文档注释合并**（`core/src/transport/server.rs`）：`handle_browse` 与 `handle_unpair` 各有一段逐字重复的 `///` 段落（后者还把两段互不相干的内容拼在同一个函数头上），会让 `cargo doc` 与 grep 都出现两份互相矛盾的描述。
 
 ## [0.1.13] — 2026-10-19
 

@@ -1478,6 +1478,89 @@ fn test_relative_subpath_validation() {
     assert!(PathManager::validate_relative_subpath(&long).is_err());
 }
 
+/// `filter_volumes_by_scope` 的白名单路径判定必须**按卷根前缀**比。
+///
+/// ## 这条在防什么
+///
+/// 早先的实现是 `p.to_ascii_lowercase().starts_with(&v.id.to_ascii_lowercase())`
+/// —— 只要白名单里任何一个字符串以 `d` 开头（甚至只是 `d:` 后面没有分隔符），
+/// `D:` 整卷就被判成可读。白名单的语义是"只开放这些目录"，一条写错的
+/// 条目不该顺带把整块盘交出去。
+///
+/// 反过来，用户只填了卷根（`D:` / `D:\`）时必须真的可读 —— 否则
+/// "我只开放 D 盘"这个最自然的配置会一个卷都列不出来。
+#[test]
+fn allowlist_volume_prefix_must_be_path_aware() {
+    use feisuo_core::security::{AccessMode, AccessScope};
+
+    let scope = |paths: &[&str]| AccessScope {
+        mode: AccessMode::Allowlist,
+        deny_paths: Vec::new(),
+        allow_paths: paths.iter().map(|s| s.to_string()).collect(),
+        allow_volumes: Vec::new(),
+        can_pull: true,
+        can_push: true,
+        updated_at: 0,
+    };
+
+    // 只开放 D 盘下的一个目录 ⇒ 只有 D: 可读
+    let mut vols = vec![
+        feisuo_core::VolumeInfo {
+            id: "C:".into(),
+            label: "C".into(),
+            total_bytes: 0,
+            free_bytes: 0,
+            readable: true,
+        },
+        feisuo_core::VolumeInfo {
+            id: "D:".into(),
+            label: "D".into(),
+            total_bytes: 0,
+            free_bytes: 0,
+            readable: true,
+        },
+    ];
+    feisuo_core::storage::filter_volumes_by_scope(&mut vols, &scope(&["D:\\项目"]));
+    let ids: Vec<&str> = vols.iter().map(|v| v.id.as_str()).collect();
+    assert_eq!(ids, vec!["D:"], "只开放 D 盘下一个目录时, 只有 D: 可读: {ids:?}");
+
+    // 卷根本身（两种写法）都要算数
+    for root in ["D:", "D:\\"] {
+        let mut vols = vec![feisuo_core::VolumeInfo {
+            id: "D:".into(),
+            label: "D".into(),
+            total_bytes: 0,
+            free_bytes: 0,
+            readable: true,
+        }];
+        feisuo_core::storage::filter_volumes_by_scope(&mut vols, &scope(&[root]));
+        assert_eq!(vols.len(), 1, "白名单写卷根 {root:?} 时该卷必须可读");
+    }
+
+    // 不含分隔符、也不是卷根的其他写法**不得**放行整卷
+    let mut vols = vec![feisuo_core::VolumeInfo {
+        id: "D:".into(),
+        label: "D".into(),
+        total_bytes: 0,
+        free_bytes: 0,
+        readable: true,
+    }];
+    feisuo_core::storage::filter_volumes_by_scope(&mut vols, &scope(&["D:\\x", "desktop"]));
+    assert_eq!(vols.len(), 1);
+    let mut vols = vec![feisuo_core::VolumeInfo {
+        id: "C:".into(),
+        label: "C".into(),
+        total_bytes: 0,
+        free_bytes: 0,
+        readable: true,
+    }];
+    feisuo_core::storage::filter_volumes_by_scope(&mut vols, &scope(&["c:whatever"]));
+    assert!(
+        vols.is_empty(),
+        "`c:whatever` 不是 C 盘内的路径, 不能因此把整个 C: 交出去"
+    );
+}
+
 /// `resolve_unique_subpath` 必须**默认安全**, 而不是靠调用方记得先校验。
 ///
 /// 它是 `pub` 的, 内部直接 `parent.push(seg)` + `create_dir_all` ——

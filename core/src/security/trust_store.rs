@@ -1967,6 +1967,10 @@ impl TrustStore {
     }
 
     /// 清理过期的暂存分块进度（超过 max_age_secs，例如 24 小时）。
+    ///
+    /// 调用点在 [`FeisuoEngine::purge_completed_parts`](crate::FeisuoEngine)，
+    /// 与 `transfer_parts` 用同一个保留期 —— 曾经**一个调用点都没有**，
+    /// 于是这张表只增不减（见那里的注释）。
     pub fn purge_expired_chunk_progress(&self, max_age_secs: i64) -> Result<u32> {
         let conn = self.conn();
         let cutoff = chrono::Utc::now().timestamp() - max_age_secs;

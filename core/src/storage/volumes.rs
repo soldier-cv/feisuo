@@ -389,8 +389,23 @@ pub fn filter_volumes_by_scope(volumes: &mut Vec<VolumeInfo>, scope: &crate::sec
                     .allow_volumes
                     .iter()
                     .any(|a| a.eq_ignore_ascii_case(&v.id));
+                // 必须带**分隔符**再比前缀。
+                //
+                // 早先这里是 `p.to_ascii_lowercase().starts_with(&v.id…)`，
+                // 于是白名单里一条 `D:\项目`（`v.id` 是 `d:`）会让 `D:` 这个卷
+                // 可读 —— 这本身没问题，但反过来的写法也成立：只要配置里
+                // 任何一个字符串以 `c:` 开头（例如别处误存的 `c:xxxx`），
+                // C 盘就整卷可读。判据应当是"路径落在该卷**根**之下"，
+                // 也就是卷根 + 分隔符。
+                let root = format!("{}\\", v.id.to_ascii_lowercase());
+                let root_fwd = format!("{}/", v.id.to_ascii_lowercase());
                 let in_path = scope.allow_paths.iter().any(|p| {
-                    p.to_ascii_lowercase().starts_with(&v.id.to_ascii_lowercase())
+                    let lp = p.trim().to_ascii_lowercase();
+                    lp.starts_with(&root)
+                        || lp.starts_with(&root_fwd)
+                        // 白名单里只写了卷根本身（`D:` / `D:\`）也要算数
+                        || lp == v.id.to_ascii_lowercase()
+                        || lp == v.id.to_ascii_lowercase() + "\\"
                 });
                 v.readable = in_vol || in_path;
             }
