@@ -9,7 +9,7 @@
 ### 修复
 
 - **「允许的网段」白名单可能整卷放行（`core/src/storage/volumes.rs`）**：卷的可读性判据是 `allow_paths` 里的字符串 `starts_with(卷 id)`，于是白名单里任意一条以 `c` 开头的字符串（例如误存的 `c:whatever`）都会让 `C:` 整卷变成可读 —— 而白名单的语义是"只开放这些目录"。现在必须**带分隔符**比路径前缀，同时保留"只写卷根（`D:` / `D:\`）也要算数"的直觉用法。新增用例 `allowlist_volume_prefix_must_be_path_aware`，已用变异（退回旧的前缀比较）验证会变红。
-- **分块续传进度表只增不减（`core/src/lib.rs` + `trust_store.rs`）**：`purge_expired_chunk_progress` 从来没有调用点，是一段永远不执行的死代码。这张表每传一个文件就多一行（含 `staged_path`，一条用户文件系统的绝对路径），而其指向的暂存目录在失败时已被 `StagingGuard` 删掉 —— 行留着但永远用不上，既是体积问题也是留痕问题。现在与 `transfer_parts` 共用同一个保留期统一清理。
+- **分块续传进度表只增不减（`core/src/lib.rs` + `trust_store.rs`）**：`purge_expired_chunk_progress` 从来没有调用点，是一段永远不执行的死代码。这张表每传一个文件就多一行（含 `staged_path`，一条用户文件系统的绝对路径），而它存在的意义是**进程崩溃后的续传**（正常失败路径由 `StagingGuard` 清掉暂存目录）—— 那个窗口只有一次重试那么长，留满 30 天保留期之后，`staged_path` 指向的文件早已被用户或磁盘清理工具删掉，行却永久留着。现在与 `transfer_parts` 共用同一个保留期统一清理。
 - **畸形帧可打掉接收端（`core/src/transport/server.rs`）**：`format_grant_challenge_for_display` 里 `&t[..3]` 是**字节**切片。当前前置条件（6 字节且全为 ASCII 数字）恰好挡住了它，但只要那条判据被放宽（例如以后想支持字母），一个形如两个汉字的 6 字节字符串就会切在字符中间 panic —— 而这段代码在传输路径上，一次畸形帧即可触发。改为按字符定位切点，安全性不再依赖前置判据的严格程度。
 - **界面用中文文案猜「需要匹配码」（`ui/src/api/feisuoBridge.ts`）**：`parseBrowseFailure` 在拿不到结构化字段时用 `includes("匹配码")` 兜底，而这正是 core 里 `ApprovalError` 注释明确否定过的反模式。猜错是双向的：对端换措辞 ⇒ 该弹码时弹不出来；对端文案里恰好含那三个字 ⇒ 明明是硬拒绝却弹出一个永远填不对的码框。现在一律按硬拒绝处理，把真实原因交给用户。
 - **暂存清理会把内部错误伪装成"清理成功"（`desktop/src-tauri/src/commands.rs`）**：`cleanup_temp_payloads` 用 `try_read().map(..).unwrap_or_default()` 取目录，读锁失败时得到空路径 ⇒ `is_within` 对每个路径都判 false ⇒ 一个文件都不删，而命令仍返回 `Ok(true)`。清空模式下 `read_dir` 失败同样被 `if let Ok` 吞掉。现在两种情况都返回错误，让界面能说真话（暂存区里常有剪贴板里的密码与截图）。
