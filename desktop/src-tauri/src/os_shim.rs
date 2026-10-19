@@ -106,18 +106,33 @@ pub fn spawn_detached(program: &Path, args: &[OsString]) -> Result<(), String> {
 /// （实测：非管理员下静默安装返回后 Program Files 里的文件时间戳纹丝不动，
 /// 连一条安装日志都不产生）。用户看到的是"更新成功"，程序还是旧版。
 ///
-/// 走 `ShellExecuteW` + `runas` 才会触发 UAC。这是 Windows 上唯一
+/// 走 `ShellExecuteExW` + `runas` 才会触发 UAC。这是 Windows 上唯一
 /// 正确的"以管理员身份运行"入口。
 ///
-/// 返回值：成功拿到 Shell 句柄即 `Ok(())`。用户在 UAC 上点"取消"时
+/// 返回值：成功时给出**被拉起的那个进程的 PID**。用户在 UAC 上点"取消"时
 /// 返回 `Err`（错误码 1223 = `ERROR_CANCELLED`），调用方应当把它当成
 /// "用户拒绝提权"而不是"更新失败"。
-pub fn spawn_elevated(program: &Path, args: &[OsString]) -> Result<(), String> {
+///
+/// ## 为什么要 PID 而不是 `Ok(())`
+///
+/// 应用内更新启动安装包之后，本进程马上就会被安装包杀掉（`Feisuo.iss` 的
+/// `PrepareToInstall` 里有 `taskkill /IM feisuo-desktop.exe /F`，RestartManager
+/// 也会强制关闭占用目标文件的程序）。"装完把程序拉起来"只能由**另一个**
+/// 进程完成，而那个中继必须先知道"安装包什么时候结束"—— PID 就是它唯一的
+/// 线索。
+///
+/// 拿 PID 必须用 `ShellExecuteExW` + `SEE_MASK_NOCLOSEPROCESS`：
+/// `ShellExecuteW` 只返回一个"大于 32 的伪句柄"，拿不到进程句柄，也就没有 PID。
+pub fn spawn_elevated(program: &Path, args: &[OsString]) -> Result<u32, String> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::ffi::OsStrExt;
         use windows::core::PCWSTR;
-        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::Foundation::{CloseHandle, GetLastError};
+        use windows::Win32::System::Threading::GetProcessId;
+        use windows::Win32::UI::Shell::{
+            ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+        };
         use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
         let wide = |s: &std::ffi::OsStr| -> Vec<u16> {
@@ -139,34 +154,49 @@ pub fn spawn_elevated(program: &Path, args: &[OsString]) -> Result<(), String> {
         let file = wide(program.as_os_str());
         let params_w = wide(std::ffi::OsStr::new(&params));
 
-        // ShellExecuteW 的返回值是"大于 32 表示成功"的伪句柄，不是错误码。
-        let ret = unsafe {
-            ShellExecuteW(
-                None,
-                PCWSTR(verb.as_ptr()),
-                PCWSTR(file.as_ptr()),
-                PCWSTR(params_w.as_ptr()),
-                PCWSTR::null(),
-                SW_SHOWNORMAL,
-            )
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            // 只有 NOCLOSEPROCESS 才会回填 hProcess，否则拿到的是伪句柄。
+            fMask: SEE_MASK_NOCLOSEPROCESS,
+            hwnd: Default::default(),
+            lpVerb: PCWSTR(verb.as_ptr()),
+            lpFile: PCWSTR(file.as_ptr()),
+            lpParameters: PCWSTR(params_w.as_ptr()),
+            lpDirectory: PCWSTR::null(),
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
         };
-        let code = ret.0 as isize;
-        if code > 32 {
-            return Ok(());
+
+        if unsafe { ShellExecuteExW(&mut info) }.is_err() {
+            // 1223 = 用户在 UAC 对话框上点了"否"。
+            let code = unsafe { GetLastError().0 } as isize;
+            let msg = if code == 1223 {
+                "用户取消了管理员授权".to_string()
+            } else {
+                format!("请求管理员权限失败 (ShellExecuteEx 错误码 {code})")
+            };
+            return Err(msg);
         }
-        // 1223 = 用户在 UAC 对话框上点了"否"。
-        let msg = if code == 1223 {
-            "用户取消了管理员授权".to_string()
-        } else {
-            format!("请求管理员权限失败 (ShellExecute 返回 {code})")
-        };
-        Err(msg)
+
+        // hProcess 必须关掉，否则每更新一次漏一个内核句柄。
+        let pid = unsafe { GetProcessId(info.hProcess) };
+        let _ = unsafe { CloseHandle(info.hProcess) };
+        if pid == 0 {
+            return Err("安装程序已启动，但拿不到它的进程号，无法安排安装完成后自动打开飞梭".into());
+        }
+        Ok(pid)
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        // 非 Windows 没有 UAC 这一套，直接启动。
-        spawn_detached(program, args)
+        // 非 Windows 没有 UAC 这一套，直接启动；PID 用 spawn 的返回值。
+        let child = hidden(Command::new(program))
+            .args(args)
+            .spawn()
+            .map_err(|e| format!("启动 {} 失败: {}", program.display(), e))?;
+        let pid = child.id();
+        drop(child);
+        Ok(pid)
     }
 }
 

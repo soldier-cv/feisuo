@@ -4,6 +4,23 @@
 
 ## [Unreleased]
 
+## [0.1.13] — 2026-10-19
+
+### 修复
+
+- **安装版应用内升级后程序不再打开（0.1.12 的致命故障）**：点「立即更新」后安装程序一闪而过，`Program Files` 里的 exe 确实换成了新版本，但**屏幕上什么都没有**，任务管理器里也找不到 `feisuo-desktop`。
+  - 现场取证：安装日志停在 `Installation process succeeded` 与 `-- Run entry -- netsh.exe`，全程没有任何进程被创建。安装本身完全成功，缺的只是"装完把程序拉起来"这一步。
+  - 三处各自合理的行为叠加成了这个结果：`Feisuo.iss` 的 `[Run]` 启动条目带 `skipifsilent`（而应用内更新正是 `/SILENT`）⇒ 安装包不会拉起；客户端 `spawn_elevated` 之后直接 `app.exit(0)` ⇒ 旧进程也不会拉起；安装包还会先 `taskkill /IM feisuo-desktop.exe /F`（否则覆盖不了 `Program Files` 里的 exe）。
+  - 现在由客户端新增的 `spawn_installer_relay` 负责收尾：在 `app.exit(0)` **之前**起一条隐藏的 PowerShell 中继，等**安装包 PID** 与**本进程 PID** 双双消失后再拉起新版本，并转发启动参数（`--daemon` 不会丢）。中继带 10 分钟硬上界、拉起失败重试 20×400ms，结果写入 `%LOCALAPPDATA%\feisuo\installer-relay.log`。
+  - 中继起不来时**不再退出**：安装包已经把程序杀掉了，照样退出等于"更新完没有程序"。改为返回错误留在界面上，让用户知道该从开始菜单打开飞梭。
+- **`spawn_elevated` 改用 `ShellExecuteExW` + `SEE_MASK_NOCLOSEPROCESS`**：`ShellExecuteW` 只回一个"大于 32 的伪句柄"，拿不到进程句柄，也就拿不到安装包 PID —— 而 PID 是中继判断"安装什么时候结束"的唯一线索。取完 PID 立即 `CloseHandle`，避免每次更新漏一个内核句柄。
+
+### 变更
+
+- **安装包的静默启动逻辑**：`Feisuo.iss` 只保留手动安装用的完成页勾选项（`postinstall skipifsilent`），并写明为什么**刻意**不在这里做静默拉起 —— 应用是非提权进程，用 `runas` 启动安装包意味着 SetupLdr 一出生就是管理员，Inno 拿不到原始用户令牌，`runasoriginaluser` 会静默退化成"以管理员身份启动"（源码 `Setup.SpawnClient.InstExecEx`）。管理员常驻的飞梭收不到资源管理器拖来的文件（UIPI 会拦掉低完整性进程发给高完整性窗口的拖放），而拖放正是本程序的主要入口。
+- 新增守卫 `update_guard::installer_upgrade_must_relaunch_after_silent_install`：`[Run]` 段不得出现给静默安装用的启动条目、中继必须在 `app.exit(0)` 之前注册且失败时不得退出、中继必须等**两个** PID、转发参数、有硬上界。已用两次变异（加回 `runasoriginaluser` 启动条目 / 摘掉中继调用）分别验证它会变红。
+  - 中继刻意不用 `Wait-Process`：实测中完整性会话对提权进程调用它直接抛 `ProcessCommandException`，中继会当场死掉、什么都不拉起；`Get-Process -Id` 轮询只需要查询权限，恰好能看见管理员进程。
+
 ## [0.1.12] — 2026-10-18
 
 ### 优化

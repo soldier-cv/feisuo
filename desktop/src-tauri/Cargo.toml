@@ -41,6 +41,11 @@ windows = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
     # ShellExecuteW（提权安装：runas 动词，触发 UAC）
     "Win32_UI_Shell",
+    # ShellExecuteExW 的 SEE_MASK_NOCLOSEPROCESS 会回填 hProcess，用它取安装包 PID；
+    # 而 SHELLEXECUTEINFOW 这个结构体在 windows crate 里被 gated 在
+    # Win32_System_Registry 之下（它含 hkeyClass 字段）。
+    "Win32_System_Registry",
+    "Win32_System_Threading",
     # GetLogicalDrives / GetDriveTypeW / GetVolumeInformationW / GetDiskFreeSpaceExW
     "Win32_Storage_FileSystem",
     # CF_HDROP / CF_DIB / CF_UNICODETEXT 常量在 Ole 模块

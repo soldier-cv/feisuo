@@ -71,7 +71,23 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 [Run]
 ; 放行 Windows 防火墙入站规则（UDP 42101 发现 + TCP 42100 传输），免除用户弹出安全警报
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Feisuo"" dir=in action=allow program=""{app}\{#MyAppExeName}"" enable=yes"; Flags: runhidden; StatusMsg: "正在配置局域网防火墙规则..."
-; 安装完成启动程序
+; 安装完成启动程序（仅手动安装：完成页的勾选项，用户可取消）。
+;
+; ⚠️ 这里**刻意**没有第二条给静默安装用的启动条目。
+;
+; 应用内「立即更新」走的是 `/SILENT`，它需要的"装完把程序拉起来"由客户端
+; 自己的中继完成（`updater.rs` 的 `spawn_installer_relay`），不放在这里：
+;
+;   * 应用是**非提权**进程，用 `runas` 启动安装包 ⇒ SetupLdr 一出生就是
+;     管理员，Inno 没有"原始用户令牌"可用，`runasoriginaluser` 会**静默
+;     退化成以管理员身份启动**（源码 `Setup.SpawnClient.InstExecEx`：
+;     `if not RunAsOriginalUser or not SpawnServerPresent then InstExec(...)`）；
+;   * 以管理员身份常驻的飞梭收不到资源管理器拖来的文件（UIPI 会拦掉
+;     低完整性进程发给高完整性窗口的拖放），而拖放正是本程序的主要入口。
+;
+; 所以静默安装这条路径上，安装包只负责装，启动由中继按**原完整性级别**
+; 完成。守卫 `installer_upgrade_must_relaunch_after_silent_install` 会拦住
+; 有人把启动逻辑搬回这里。
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]

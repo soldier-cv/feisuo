@@ -845,15 +845,30 @@ fn installer_upgrade_must_request_elevation() {
         "安装包不能再走 spawn_detached（不触发提权）"
     );
 
-    // os_shim 里必须真的用 ShellExecuteW + runas。
+    // os_shim 里必须真的用 ShellExecuteExW + runas。
+    //
+    // 为什么是 `ShellExecuteExW` 而不是 `ShellExecuteW`：后者只回一个
+    // "大于 32 的伪句柄"，拿不到进程句柄 ⇒ 拿不到安装包 PID ⇒ 中继
+    // 不知道"安装什么时候结束"。守卫在这里钉住 `SEE_MASK_NOCLOSEPROCESS`，
+    // 因为少了这个 fMask，`ShellExecuteExW` 一样不回填 `hProcess`。
     let shim = read(&desktop_src().join("os_shim.rs"));
     let elev = shim
         .find("pub fn spawn_elevated(")
         .expect("缺少 spawn_elevated");
-    let elev_body: String = shim[elev..].chars().take(2400).collect();
+    let elev_body: String = shim[elev..].chars().take(3200).collect();
     assert!(
-        elev_body.contains("ShellExecuteW"),
-        "spawn_elevated 必须用 ShellExecuteW —— CreateProcess 无法提权"
+        elev_body.contains("ShellExecuteExW"),
+        "spawn_elevated 必须用 ShellExecuteExW —— CreateProcess 无法提权, \
+         而 ShellExecuteW 拿不到安装包 PID"
+    );
+    assert!(
+        elev_body.contains("SEE_MASK_NOCLOSEPROCESS") && elev_body.contains("GetProcessId"),
+        "spawn_elevated 必须用 SEE_MASK_NOCLOSEPROCESS + GetProcessId 取安装包 PID —— \
+         没有 PID, 装完之后没人知道该在什么时候拉起新版本"
+    );
+    assert!(
+        elev_body.contains("CloseHandle"),
+        "取完 PID 必须 CloseHandle(hProcess) —— 每更新一次漏一个内核句柄"
     );
     assert!(
         elev_body.contains("runas"),
@@ -863,6 +878,157 @@ fn installer_upgrade_must_request_elevation() {
     assert!(
         elev_body.contains("1223"),
         "spawn_elevated 必须识别 UAC 取消（ERROR_CANCELLED = 1223）"
+    );
+}
+
+/// 静默安装结束之后**必须**有人把程序重新打开。
+///
+/// ## 这条守卫对应的是一次真实发出去的故障（0.1.12）
+///
+/// 用户点「立即更新」，安装程序闪一下，然后**屏幕上什么都没有** ——
+/// 任务管理器里连一个 `feisuo-desktop` 都没有。现场取证：
+///
+/// ```text
+/// Installation process succeeded.
+/// -- Run entry --
+/// netsh.exe ...
+/// ```
+///
+/// 安装本身完全成功，exe 也换成了新版本，只是**没有任何进程负责启动它**：
+///
+/// - `Feisuo.iss` 的 `[Run]` 启动条目带 `skipifsilent`，而应用内更新用的
+///   正是 `/SILENT` ⇒ 安装包自己不会拉起；
+/// - 客户端在 `spawn_elevated` 之后直接 `app.exit(0)` ⇒ 旧进程也不拉起；
+/// - 安装包还会先 `taskkill /IM feisuo-desktop.exe /F`（否则覆盖不了
+///   `Program Files` 里的 exe）。
+///
+/// 三件事单独看都合理，合起来就是"更新成功，然后没有程序"。
+///
+/// ## 为什么启动动作不能搬回安装包的 `[Run]` 段
+///
+/// 这是**刻意**的，不是遗漏。应用是**非提权**进程，用 `runas` 启动安装包
+/// 意味着 SetupLdr 一出生就是管理员，Inno 拿不到"原始用户令牌"，
+/// `runasoriginaluser` 会静默退化成"以管理员身份启动"（源码
+/// `Setup.SpawnClient.InstExecEx`：`if not RunAsOriginalUser or not
+/// SpawnServerPresent then InstExec(...)`）。
+///
+/// 以管理员身份常驻的飞梭收不到资源管理器拖来的文件 —— UIPI 会拦掉
+/// 低完整性进程发给高完整性窗口的拖放，而拖放正是本程序的主要入口。
+/// 用户看到的是"拖上去没反应"，且完全无从判断原因。
+///
+/// 所以：安装包只负责装，启动由客户端自己的中继按**原完整性级别**完成。
+#[test]
+fn installer_upgrade_must_relaunch_after_silent_install() {
+    let src = updater_src();
+
+    // ---- 1) 安装包脚本里**不得**出现给静默安装用的启动条目 ----
+    //
+    // 允许的唯一启动条目是完成页的勾选项（`postinstall skipifsilent`）。
+    // 若有人"顺手"加一条 `runasoriginaluser` 的静默启动条目，装出来的
+    // 程序就会带着管理员令牌常驻 —— 见上面 UIPI 那段。
+    let iss = read(&repo_root().join("desktop").join("setup").join("Feisuo.iss"));
+    let head = iss
+        .find("[Run]")
+        .expect("Feisuo.iss 里找不到 [Run] 段 —— 安装包脚本结构变了, 守卫需重写");
+    let tail = &iss[head + "[Run]".len()..];
+    let end = tail.find("\n[").map(|i| head + "[Run]".len() + i).unwrap_or(iss.len());
+    let run_block = &iss[head..end];
+
+    for line in run_block.lines() {
+        let t = line.trim();
+        // 注释行不算：本段注释里就写着 `skipifsilent` / `runasoriginaluser`
+        if t.is_empty() || t.starts_with(';') || t.starts_with('#') {
+            continue;
+        }
+        // 只看"启动程序本体"的条目（防火墙那条是 netsh，Filename 不是程序本体）
+        if !t.starts_with("Filename:") {
+            continue;
+        }
+        let target = t["Filename:".len()..].trim_start();
+        if !target.starts_with("\"{app}\\{#MyAppExeName}\"") {
+            continue;
+        }
+        assert!(
+            t.contains("skipifsilent"),
+            "Feisuo.iss 的 [Run] 段出现了一条会给静默安装启动程序的条目: {t}\n\
+             应用内更新走 /SILENT, 这条一旦生效, 装完的程序就会以**管理员身份**\
+             常驻（runas 启动的安装包拿不到原始用户令牌, `runasoriginaluser` \
+             会静默退化）—— 而管理员进程收不到资源管理器拖来的文件（UIPI）。\n\
+             启动必须留在客户端的中继里（updater.rs 的 spawn_installer_relay）。"
+        );
+    }
+
+    // ---- 2) 客户端：中继必须在 app.exit(0) 之前注册 ----
+    let at = src
+        .find("let is_setup_pkg =")
+        .expect("找不到安装包分支");
+    let branch: String = src[at..].chars().take(6000).collect();
+
+    let relay_at = branch.find("spawn_installer_relay(").expect(
+        "安装包分支没有调用 spawn_installer_relay —— \
+         静默安装不会启动程序（[Run] 带 skipifsilent）, 本进程随后退出, \
+         用户看到的就是『更新成功, 然后什么都没有』",
+    );
+    let exit_at = branch.find("app.exit(0)").expect("安装包分支缺少 app.exit");
+    assert!(
+        relay_at < exit_at,
+        "中继必须在 app.exit(0) 之前注册 —— 退出之后就执行不到任何代码了"
+    );
+    // 中继失败时**不得**照样退出：安装包已经把程序杀了, 一退就是"没有程序"。
+    let between = &branch[relay_at..exit_at];
+    assert!(
+        between.contains("return Err("),
+        "中继起不来时必须 return Err 留在界面上 —— \
+         照样 app.exit(0) 的话, 用户既没有程序也没有提示"
+    );
+
+    // ---- 3) 中继实现：等两个 PID、转发参数、有硬上界 ----
+    let fn_at = src
+        .find("fn spawn_installer_relay(")
+        .expect("缺少 spawn_installer_relay 实现");
+    // 切到**下一个顶层函数**为止 —— 否则窗口会吃到绿色版中继
+    // （它用的正是 `Wait-Process`，会误判本守卫失败）。
+    let relay_body = {
+        let head = &src[fn_at..];
+        let end = head.find("\nfn ").map(|i| fn_at + i).unwrap_or(src.len());
+        &src[fn_at..end]
+    };
+
+    // 剥掉文档注释再判 —— 函数自己的注释里就写着「为什么不用 Wait-Process」，
+    // 不剥的话守卫会对着自己的说明报警。
+    let relay_code: String = relay_body
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("///"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        relay_code.contains("Get-Process -Id {installer_pid}"),
+        "中继必须等**安装包**退出 —— 装完之前 Program Files 里的 exe 正被写, \
+         提前拉起会失败或被单实例插件判成第二实例"
+    );
+    assert!(
+        relay_code.contains("Get-Process -Id {self_pid}"),
+        "中继必须等**本进程**退出 —— app.exit(0) 到内核回收互斥体之间还有一段, \
+         不等就会撞上单实例互斥体, 新进程刚启动就自杀"
+    );
+    assert!(
+        !relay_code.contains("Wait-Process"),
+        "中继不要用 Wait-Process —— 实测中完整性会话对提权进程调用它直接抛 \
+         ProcessCommandException, 中继会当场死掉、什么都不拉起"
+    );
+    assert!(
+        relay_code.contains("launch_args"),
+        "中继没有转发启动参数 —— 开机自启的 --daemon 会丢, 更新后窗口凭空弹出"
+    );
+    assert!(
+        relay_code.contains("AddMinutes(10)"),
+        "中继必须有硬上界 —— 安装包卡住时它会变成用户机器上一个谁也不认识的\
+         常驻进程"
+    );
+    assert!(
+        relay_code.contains("powershell.exe"),
+        "中继应使用 PowerShell（Get-Process 轮询 + Start-Process 重试）"
     );
 }
 

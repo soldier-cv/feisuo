@@ -966,14 +966,49 @@ impl UpdateService {
             //
             // 走 `runas` 才会弹 UAC。用户在 UAC 上点"取消"是**预期行为**，
             // 此时明确告诉他并保留更新包，让他随时能重试。
-            match crate::os_shim::spawn_elevated(&pending.local_path, &silent_args) {
-                Ok(()) => {}
+            let installer_pid =
+                match crate::os_shim::spawn_elevated(&pending.local_path, &silent_args) {
+                    Ok(pid) => pid,
+                    Err(e) => {
+                        // 不要退出：退出会让用户既没升级、也没了界面。
+                        return Err(format!(
+                            "{e}。已保留安装包，可在准备好后点「立即更新」重试，\
+                             或到「前往下载页」手动安装：{}",
+                            pending.local_path.display()
+                        ));
+                    }
+                };
+
+            // 装完之后必须有人把程序拉起来 —— 否则就是"更新成功，然后屏幕上
+            // 什么都没有"。
+            //
+            // ## 为什么这件事不能交给安装包自己的 [Run] 段
+            //
+            // Inno 的 `runasoriginaluser` 只有在它能拿到"提权前那个用户令牌"
+            // 时才成立（`Setup.SpawnClient.InstExecEx`：拿不到 spawn server 就
+            // 直接 `InstExec`）。而这里正是拿不到的情况 —— 飞梭本身是**非提权**
+            // 进程，用 `runas` 启动安装包意味着 SetupLdr 一出生就是管理员，
+            // 于是 `runasoriginaluser` 静默退化成"以管理员身份启动"。
+            //
+            // 那样装完的程序会带着管理员令牌常驻：资源管理器（中完整性）往
+            // 高完整性窗口拖文件会被 UIPI 拦掉，而拖放正是飞梭的主要入口 ——
+            // 用户看到的是"拖上去没反应"，且完全无从判断原因。
+            //
+            // 所以启动动作留在**本进程这一侧**：中继由非提权进程创建，拉起的
+            // 新版本也是非提权，与绿色版换名接力完全同构。
+            let relaunch_args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+            match spawn_installer_relay(installer_pid, &current_exe, &relaunch_args) {
+                Ok(()) => {
+                    tracing::info!("已安排安装完成后拉起新版本: {}", current_exe.display());
+                }
                 Err(e) => {
-                    // 不要退出：退出会让用户既没升级、也没了界面。
+                    // 中继起不来时**不能**照样退出：安装包已经把程序杀掉了，
+                    // 这一退就是"更新完没有程序"。宁可留在界面上把原因说清楚，
+                    // 让用户自己点开始菜单里的飞梭。
+                    tracing::error!("安排安装后拉起失败: {e}");
                     return Err(format!(
-                        "{e}。已保留安装包，可在准备好后点「立即更新」重试，\
-                         或到「前往下载页」手动安装：{}",
-                        pending.local_path.display()
+                        "安装程序已启动，但无法安排安装完成后自动打开飞梭（{e}）。\
+                         安装完成后请从开始菜单打开飞梭。"
                     ));
                 }
             }
@@ -1316,6 +1351,115 @@ pub fn apply_rollover_if_needed() {
         return;
     }
     let _ = std::fs::remove_file(backup);
+}
+
+/// 安排"安装包静默装完之后，把新版本重新打开"。
+///
+/// ## 这一步为什么非做不可
+///
+/// 应用内「立即更新」走的是 `/SILENT`，而 `Feisuo.iss` 里唯一那条启动
+/// 条目带 `skipifsilent` —— 静默安装**不会**启动程序。同时安装包会先
+/// `taskkill /IM feisuo-desktop.exe /F`（否则覆盖不了 exe），本进程随后
+/// 退出。两头都不拉，用户看到的就是"点完立即更新，安装界面闪一下，
+/// 然后什么都没有" —— 0.1.12 的真实故障。
+///
+/// ## 为什么中继是"非提权"的 PowerShell，而不是安装包的 `[Run]` 段
+///
+/// 见 [`UpdateService::apply_pending`] 里那段长注释：`runas` 启动的安装包
+/// 拿不到原始用户令牌，`runasoriginaluser` 会静默退化成"以管理员身份启动"，
+/// 那样常驻的飞梭收不到资源管理器拖来的文件（UIPI）。所以中继必须由
+/// **本进程**（中完整性）创建，拉起来的新版本也就回到中完整性。
+///
+/// ## 等待谁
+///
+/// 等**两个** PID：安装包（`installer_pid`，由
+/// [`crate::os_shim::spawn_elevated`] 返回）和本进程。
+///
+/// - 等安装包：装完之前 `Program Files` 里的 exe 正被写，提前拉起会失败
+///   或被单实例插件判成第二实例；
+/// - 等本进程：`app.exit(0)` 到内核真正回收进程/互斥体之间还有一小段，
+///   不等就会撞上 `tauri-plugin-single-instance` 那把按 identifier 命名的
+///   互斥体，新进程刚启动就自杀（绿色版分支踩过这个坑，实测 12/12 失败）。
+///
+/// ## 为什么不用 `Wait-Process`
+///
+/// 实测：对**提权**进程，中完整性会话里 `Get-Process -Id` 能成功，但
+/// `Wait-Process -Id` 直接抛 `ProcessCommandException`（它要的访问权比
+/// 查询进程信息更高）。所以这里用 `Get-Process` 轮询存在性 —— 它只需要
+/// 查询权限，恰好能看见管理员进程。
+fn spawn_installer_relay(
+    installer_pid: u32,
+    target: &Path,
+    args: &[std::ffi::OsString],
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let self_pid = std::process::id();
+        let ps_quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
+
+        // 参数逐个引起来：`--daemon` 这种开机自启参数丢了，更新后就会
+        // 凭空弹出一个窗口（用户以为程序自己打开了）。
+        let mut launch_args = String::new();
+        for a in args {
+            launch_args.push(' ');
+            launch_args.push_str(&ps_quote(&a.to_string_lossy()));
+        }
+
+        let target_ps = ps_quote(&target.to_string_lossy());
+        let log_path = dirs::data_local_dir()
+            .map(|d| d.join("feisuo").join("installer-relay.log"))
+            .unwrap_or_else(|| std::env::temp_dir().join("feisuo-installer-relay.log"));
+        let log_ps = ps_quote(&log_path.to_string_lossy());
+        let log_dir_ps = ps_quote(
+            &log_path
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        );
+
+        // 10 分钟硬上界：安装包卡住时中继不能永远挂着（那是用户机器上
+        // 一个谁也不认识的常驻进程）。到点仍然尝试拉起。
+        //
+        // 拉起失败要重试 20 次 × 400ms：安装刚结束时 `Program Files` 里的
+        // exe 可能还被卸载器/杀软扫描占用，一次 `Start-Process` 失败就放弃
+        // 等于把用户扔在"装好了但打不开"。
+        let script = format!(
+            "$ErrorActionPreference = 'SilentlyContinue'; \
+             $deadline = (Get-Date).AddMinutes(10); \
+             while ((Get-Process -Id {installer_pid} -ErrorAction SilentlyContinue) -and \
+                    ((Get-Date) -lt $deadline)) {{ Start-Sleep -Milliseconds 200 }}; \
+             while ((Get-Process -Id {self_pid} -ErrorAction SilentlyContinue) -and \
+                    ((Get-Date) -lt $deadline)) {{ Start-Sleep -Milliseconds 200 }}; \
+             Start-Sleep -Milliseconds 600; \
+             $ok = $false; \
+             for ($i = 0; $i -lt 20 -and -not $ok; $i++) {{ \
+               try {{ Start-Process -FilePath {target_ps}{launch_args} -ErrorAction Stop; $ok = $true }} \
+               catch {{ Start-Sleep -Milliseconds 400 }} \
+             }}; \
+             New-Item -ItemType Directory -Force -Path {log_dir_ps} | Out-Null; \
+             Add-Content -Path {log_ps} -Value ((Get-Date -Format 'o') + ' relaunch=' + $ok); \
+             exit"
+        );
+
+        crate::os_shim::spawn_detached(
+            Path::new("powershell.exe"),
+            &[
+                std::ffi::OsString::from("-NoProfile"),
+                std::ffi::OsString::from("-NonInteractive"),
+                std::ffi::OsString::from("-WindowStyle"),
+                std::ffi::OsString::from("Hidden"),
+                std::ffi::OsString::from("-Command"),
+                std::ffi::OsString::from(script),
+            ],
+        )
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // 非 Windows 的安装包分支用不到（只有 Windows 有 Setup 安装版）。
+        let _ = (installer_pid, target, args);
+        Err("当前平台不支持安装包静默升级".into())
+    }
 }
 
 /// 安排"当前进程退出之后再拉起新版本"。
