@@ -151,6 +151,12 @@ pub enum UpdatePhase {
     /// 已是最新
     UpToDate,
     Failed,
+    /// 另一轮检查或下载正拿着锁。**不是失败**：调用方拿到的是别人的
+    /// 进行中快照，那一轮自己会收尾。调度器若把这个当成失败，就会在
+    /// 用户手动检查的同时打出「自动检查更新失败」并 180 秒后重试。
+    ///
+    /// 不进前端文案。`as_str` 与 `Checking` 相同，界面只看到「进行中」。
+    InProgress,
 }
 
 impl UpdatePhase {
@@ -162,6 +168,8 @@ impl UpdatePhase {
             UpdatePhase::Ready => "ready",
             UpdatePhase::UpToDate => "uptodate",
             UpdatePhase::Failed => "failed",
+            // 与 Checking 同字：前端按字符串分支，多一个值会落到「未知阶段」。
+            UpdatePhase::InProgress => "checking",
         }
     }
 }
@@ -404,7 +412,17 @@ impl UpdateService {
             Ok(g) => g,
             Err(_) => {
                 tracing::info!("更新检查或下载已在进行中，复用当前任务");
-                return self.status().await;
+                let mut st = self.status().await;
+                // 别人正拿着这把锁（通常是用户刚点的那次检查）。把进行中的
+                // 快照交回去，调度器会把它读成「失败」—— 阶段既不是
+                // UpToDate 也不是 Ready，于是「别人正在下」被记成
+                // 「自动检查更新失败 (0/7)」，180 秒后再白跑一轮。
+                //
+                // 计数还是 0，是因为这条短路没调用 `bump_failure`。日志在
+                // 撒谎，重试也是多余的：进行中的那次成功与否，由它自己
+                // 收尾，跟这次撞锁无关。
+                st.phase = UpdatePhase::InProgress;
+                return st;
             }
         };
 
@@ -1260,7 +1278,11 @@ impl UpdateService {
                 }
 
                 let status = service.check_and_download(false).await;
-                let ok = matches!(status.phase, UpdatePhase::UpToDate | UpdatePhase::Ready);
+                // InProgress 不是失败：锁在别人手里，那一轮自己会变成
+                // 已是最新 / 就绪 / 失败。这里再记一次失败，日志就变成
+                // 「正在下载」紧挨着「自动检查更新失败 (0/7)」。
+                // 判定抽成 `scheduler_treats_as_ok`，测试钉的是同一个函数。
+                let ok = scheduler_treats_as_ok(status.phase);
 
                 if ok {
                     service.reset_failures().await;
@@ -1704,6 +1726,24 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// 调度器眼里什么算「这轮不用重试」。
+///
+/// 抽出来是因为这条规则曾经是反的，而且反在日志里：用户手动检查正
+/// 在下载时，后台调度撞上同一把锁，拿到的是进行中的快照（既不是
+/// UpToDate 也不是 Ready），于是打出「自动检查更新失败 (0/7)」，
+/// 180 秒后再跑一轮。计数还是 0 —— 撞锁那条路没调用 `bump_failure`，
+/// 所以日志连失败次数都是假的。
+///
+/// `InProgress` 必须算成功侧：锁在别人手里，那一轮自己会收尾。
+/// `Checking` / `Downloading` 仍然算失败 —— 那是本轮自己跑完却没落到
+/// 终态，不重试就会永远停在「正在检查」。
+fn scheduler_treats_as_ok(phase: UpdatePhase) -> bool {
+    matches!(
+        phase,
+        UpdatePhase::UpToDate | UpdatePhase::Ready | UpdatePhase::InProgress
+    )
+}
+
 /// 在系统浏览器打开下载页(自动下载失败时的兜底)。
 pub fn open_release_page(url: &str) -> Result<(), String> {
     let target = if url.is_empty() { GITEE_RELEASES_PAGE } else { url };
@@ -1732,6 +1772,24 @@ mod tests {
         // 解析失败一律当作"不更新", 绝不能因为脏 tag 就触发下载
         assert!(!is_newer("not-a-version", "0.1.0"));
         assert!(!is_newer("", "0.1.0"));
+    }
+
+    #[test]
+    fn overlapping_check_is_not_a_failure() {
+        assert!(scheduler_treats_as_ok(UpdatePhase::UpToDate));
+        assert!(scheduler_treats_as_ok(UpdatePhase::Ready));
+        assert!(
+            scheduler_treats_as_ok(UpdatePhase::InProgress),
+            "撞上别人正在进行的检查必须算成功侧 —— 否则用户一点「检查更新」，\
+             后台就记一次失败并在 180 秒后重试"
+        );
+        assert!(!scheduler_treats_as_ok(UpdatePhase::Failed));
+        assert!(!scheduler_treats_as_ok(UpdatePhase::Checking));
+        assert!(!scheduler_treats_as_ok(UpdatePhase::Downloading));
+        assert!(!scheduler_treats_as_ok(UpdatePhase::Idle));
+        // 前端按字符串分支。多一个枚举值若序列化成别的字，设置页会显示
+        // 「尚未检查」—— 而此时其实正在查。
+        assert_eq!(UpdatePhase::InProgress.as_str(), "checking");
     }
 
     /// 「上次检查时间」的解析: 合法值往返, 手改坏的配置安静退回"从未检查"。

@@ -540,14 +540,65 @@ impl DiscoveryService {
         let multi_ip: Ipv4Addr = DISCOVERY_MULTICAST_ADDR
             .parse()
             .map_err(|e| FeisuoError::Network(format!("组播地址非法: {}", e)))?;
-        if let Err(e) = socket.join_multicast_v4(multi_ip, Ipv4Addr::UNSPECIFIED) {
-            warn!("加入组播组失败 (仅依赖广播发现): {}", e);
+        // 逐接口加入必须和「往哪发」用同一份白名单。
+        //
+        // 早先这里对 `local_ip_address` 列出的每张非回环网卡都
+        // `join_multicast_v4`，不看 `allowed_peer_subnets`。配了来源网段
+        // 的机器上，没插线的 169.254（APIPA）和别的局域网照样去试，失败
+        // 就各打一行 warn —— 而从这些网卡进来的包，接收侧马上又会按
+        // 白名单丢掉。去没配的网段上听，既发现不了要找的设备，也没有
+        // 第二条通路。
+        //
+        // 空名单保持「每张启用的非链路本地网卡都加入」：那是「不限制」
+        // 的既有行为，不能因为收窄白名单路径把默认发现面砍掉。
+        //
+        // 不按接口的那一次加入（INADDR_ANY）等于「默认路由那张网卡也听」。
+        // 配了来源网段之后默认路由未必在名单里，这一次和「往组播地址发包」
+        // 是同一件事的两面，两面都只在未限制时做。名单只读一次：两次读取
+        // 之间用户若改了设置，加入和下面的逐接口过滤会对不上。
+        let join_allow = self.config.read().await.allowed_peer_subnets.clone();
+        if join_allow.is_empty() {
+            if let Err(e) = socket.join_multicast_v4(multi_ip, Ipv4Addr::UNSPECIFIED) {
+                warn!("加入组播组失败 (仅依赖广播发现): {}", e);
+            }
         }
-        if let Ok(ifaces) = local_ip_address::list_afinet_netifas() {
-            for (_name, ip) in ifaces {
-                if let IpAddr::V4(v4) = ip {
-                    if !v4.is_loopback() && socket.join_multicast_v4(multi_ip, v4).is_err() {
-                        warn!("在接口 {} 上加入组播组失败", v4);
+        match if_addrs::get_if_addrs() {
+            Ok(ifaces) => {
+                for iface in &ifaces {
+                    let IfAddr::V4(v4) = &iface.addr else {
+                        continue;
+                    };
+                    if v4.ip.is_loopback() || v4.ip.is_link_local() || !iface.is_oper_up() {
+                        continue;
+                    }
+                    if !crate::security::iface_overlaps_allowed_subnets(
+                        v4.ip,
+                        v4.prefixlen,
+                        &join_allow,
+                    ) {
+                        tracing::debug!(
+                            "接口 {} 不在允许的来源网段内，不加入组播组",
+                            v4.ip
+                        );
+                        continue;
+                    }
+                    if socket.join_multicast_v4(multi_ip, v4.ip).is_err() {
+                        warn!("在接口 {} 上加入组播组失败", v4.ip);
+                    }
+                }
+            }
+            Err(e) => {
+                // 问不到网卡就退回「全部非回环都试」。少加入 = 某些网上
+                // 彻底听不到组播，比多打几行失败日志严重。
+                warn!("查询网卡信息失败（{}），组播改为在全部非回环接口上加入", e);
+                if let Ok(ifaces) = local_ip_address::list_afinet_netifas() {
+                    for (_name, ip) in ifaces {
+                        if let IpAddr::V4(v4) = ip {
+                            if !v4.is_loopback() && socket.join_multicast_v4(multi_ip, v4).is_err()
+                            {
+                                warn!("在接口 {} 上加入组播组失败", v4);
+                            }
+                        }
                     }
                 }
             }
@@ -1315,9 +1366,16 @@ impl DiscoveryService {
             disc_port,
         ));
 
-        // 1. 组播地址
-        if let Ok(addr) = format!("{}:{}", DISCOVERY_MULTICAST_ADDR, disc_port).parse() {
-            targets.insert(addr);
+        // 1. 组播地址 —— **只在未限制来源网段时发**。
+        //
+        // 套接字绑在 `0.0.0.0`，往 `239.255.42.100` 发一包，操作系统会从
+        // 默认路由那张网卡送出去，而那张网卡未必在白名单里。定向广播已经
+        // 按网卡收窄了；组播不收窄，等于配了网段之后仍往没配的网上喊一声。
+        // 同网段的对端靠下面的定向广播就能听到，不依赖这一包。
+        if allowed_subnets.is_empty() {
+            if let Ok(addr) = format!("{}:{}", DISCOVERY_MULTICAST_ADDR, disc_port).parse() {
+                targets.insert(addr);
+            }
         }
 
         // 2. 受限全局广播 (仅在未限制来源网段且组播被路由器拦截时作为兜底)
@@ -1355,6 +1413,19 @@ impl DiscoveryService {
                         if v4.is_loopback() || v4.is_link_local() {
                             continue;
                         }
+                        // 这条退路没有前缀长度，按 /16 /20 /24 猜。白名单
+                        // 非空时用三者里**最宽的 /16** 判断「这张网卡有没有
+                        // 可能落在白名单里」：判错的方向是多发两个包（/16
+                        // 与白名单有交集、真实前缀没有），而不是往一个
+                        // 完全无关的网上发。`iface_overlaps` 对空名单恒为
+                        // 真，所以不限制时行为不变。
+                        if !crate::security::iface_overlaps_allowed_subnets(
+                            v4,
+                            16,
+                            allowed_subnets,
+                        ) {
+                            continue;
+                        }
                         let o = v4.octets();
                         for prefix in SUBNET_PREFIXES {
                             let mask: u32 = u32::MAX << (32 - prefix as u32);
@@ -1371,8 +1442,24 @@ impl DiscoveryService {
         }
 
         // 4. 历史受信设备 IP 单播 (DHCP 换 IP 后靠这条自动找回)
+        //
+        // 调用方已经按白名单滤过一遍。这里再滤一次：这个函数是发送计划的
+        // 唯一出口，漏滤的列表一旦传进来，就会往没配的网段单播。
         for ip_str in known_ips {
-            if let Ok(ip) = ip_str.trim().parse::<IpAddr>() {
+            let ip_only = ip_str
+                .trim()
+                .rsplit_once(':')
+                .map(|(a, _)| a)
+                .unwrap_or(ip_str.trim());
+            if !allowed_subnets.is_empty()
+                && !matches!(
+                    crate::security::subnet_verdict(allowed_subnets, ip_only),
+                    crate::security::SubnetVerdict::Allowed
+                )
+            {
+                continue;
+            }
+            if let Ok(ip) = ip_only.parse::<IpAddr>() {
                 targets.insert(SocketAddr::new(ip, disc_port));
             }
         }
@@ -1664,5 +1751,66 @@ mod tests {
             keep.iter().collect::<std::collections::HashSet<_>>().len(),
             "同一张网卡不应产生多个广播目标"
         );
+    }
+
+    /// 配了来源网段之后，发现面必须收进这些网段。
+    ///
+    /// 空名单保持「不限制」：回环两条、组播、全局广播都在。
+    /// 非空时这三样里只留回环 —— 组播从默认路由那张网卡出去，全局广播
+    /// 会被系统按网卡各发一份，两样都可能落到没配的网上。定向广播只留
+    /// 与白名单有交集的网卡。
+    #[test]
+    fn allowlist_drops_multicast_and_global_broadcast() {
+        let any = DiscoveryService::compute_broadcast_targets(42101, Vec::new(), &[]);
+        let ips: Vec<IpAddr> = any.targets.iter().map(|s| s.ip()).collect();
+        assert!(
+            ips.contains(&IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            "空名单必须仍发回环，否则同机两实例互相看不见"
+        );
+        assert!(
+            ips.iter().any(|ip| ip.to_string() == DISCOVERY_MULTICAST_ADDR),
+            "空名单必须仍发组播 —— 收窄只发生在配了网段之后"
+        );
+        assert!(
+            ips.contains(&IpAddr::V4(Ipv4Addr::BROADCAST)),
+            "空名单必须仍发 255.255.255.255"
+        );
+
+        let only = DiscoveryService::compute_broadcast_targets(
+            42101,
+            vec!["192.168.8.9".into(), "100.64.0.8".into()],
+            &["100.64.0.0/24".into()],
+        );
+        let ips: Vec<IpAddr> = only.targets.iter().map(|s| s.ip()).collect();
+        assert!(
+            ips.contains(&IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            "回环不是别的网段，配了白名单也要留（同机联调）"
+        );
+        assert!(
+            !ips.iter().any(|ip| ip.to_string() == DISCOVERY_MULTICAST_ADDR),
+            "配了网段仍往 239.255.42.100 发：那一包从默认网卡出去，\
+             默认网卡未必在白名单里"
+        );
+        assert!(
+            !ips.contains(&IpAddr::V4(Ipv4Addr::BROADCAST)),
+            "配了网段仍发 255.255.255.255：系统会把它泛洪到每张网卡"
+        );
+        assert!(
+            !ips.iter().any(|ip| ip.to_string() == "192.168.8.9"),
+            "已知端点 192.168.8.9 不在 100.64.0.0/24 内，不该进发送计划。\
+             单播兜底在调用前已经滤过；这里再滤一次，避免以后有人把\
+             未过滤的列表传进来"
+        );
+        assert!(
+            ips.iter().any(|ip| ip.to_string() == "100.64.0.8"),
+            "白名单内的已知端点必须保留"
+        );
+        for (name, addr, _) in &only.per_iface {
+            let ip: Ipv4Addr = addr.split('/').next().unwrap().parse().unwrap();
+            assert!(
+                crate::security::iface_overlaps_allowed_subnets(ip, 24, &["100.64.0.0/24".into()]),
+                "定向广播落到了白名单外的网卡: {name} {addr}"
+            );
+        }
     }
 }
