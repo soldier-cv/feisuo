@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [0.1.16] — 2026-10-30
+
+### 修复
+
+- **Android 端装上后点开即闪退（`mobile/android/app/src/main/java/net/findfine/feisuo/MainActivity.kt`）**：`section()` / `addRow()` 这些界面 helper 内部就是 `.also { root.addView(it) }`，调用处再写 `root.addView(section("运行状态"))` 等于把同一个 View 挂第二次，`ViewGroup.addView` 立刻抛 `IllegalStateException: The specified child already has a parent`，而这段代码在 `buildUi()` 里、由 `onCreate` 直接调用 —— 应用启动即退出。v0.1.15 的 APK 因此**对所有机型都打不开**。现在一律直接调用 helper，不再外层再包一次。
+  - 这个错误编译期完全无感（类型对得上、语法合法），`gradlew assembleRelease` 照样 BUILD SUCCESSFUL，workspace 里的 Rust 测试也全绿；CI 没有 Android 运行环境，于是它是被"真的启动一次"这件事漏掉的。
+  - 新增守卫 `android_guard::self_attaching_helper_must_not_be_added_again`：动态识别"自己会挂到 root 上"的 helper（看声明段里有没有 `root.addView(`，不写死名单），再检查每处 `root.addView(...)` 的实参是不是又在调用它们。用它回放 v0.1.15 的源码精确报出 5 处，当前源码 0 处；守卫自身还有"识别不到 helper 就该红灯"的断言，避免识别逻辑失效后整条守卫静默变绿。
+- **Android 端设备指纹、配置、受信设备永远读不出来（`core/src/mobile.rs` + `core/src/engine_host.rs`）**：JNI 读取接口把引擎句柄写死成 `0`，而 `0` 就是 `INVALID_HANDLE`，`engine_for_handle(0)` 直接返回 `None` —— 于是「设备指纹」永远是 `—`、「配置」永远是 `—`、「受信设备」永远「尚未配对」，哪怕引擎确实在跑、配对也确实成功了。新增 `host::current_handle()` 取真实句柄，`deviceId` / `configJson` / `trustedDevicesJson` / `probeDevice` / `pairWithDevice` / `sendFiles` 六个入口全部改用它。
+
+### 变更
+
+- **Android 本地调试额外打包 x86_64（`mobile/android/app/build.gradle.kts`）**：整机模拟器是 x86_64，只打 arm64 就只能靠 libhoudini 翻译原生库，JNI 行为不一定可信。正式发版仍只有 arm64 的 `.so`（CI 也只交叉编译 arm64），安装包里的实际库文件不受影响。
+
 ## [0.1.15] — 2026-10-20
 
 ### 修复

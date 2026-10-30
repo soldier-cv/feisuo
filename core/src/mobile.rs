@@ -92,12 +92,18 @@ pub extern "system" fn Java_net_findfine_feisuo_NativeBridge_nativeIsEngineRunni
 ///
 /// 直接返回 `jstring` 而不是 C 字符串指针: 那样就不需要 `nativeFreeString`
 /// 与"谁负责释放"这层约定, 也不可能泄漏。
+///
+/// ## 为什么不能传 0
+///
+/// `0` 是 `INVALID_HANDLE`，`engine_for_handle(0)` 会**立即返回 None**，
+/// 于是这里永久返回空串 —— 界面上的「设备指纹」永远是「—」。
+/// 句柄必须从 [`host::current_handle`] 取真实值。
 #[no_mangle]
 pub extern "system" fn Java_net_findfine_feisuo_NativeBridge_nativeGetDeviceId<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jstring {
-    let value = catch_unwind(AssertUnwindSafe(|| host::device_id(0)))
+    let value = catch_unwind(AssertUnwindSafe(|| host::device_id(host::current_handle())))
         .unwrap_or_default();
     new_jstring(&mut env, &value)
 }
@@ -110,7 +116,10 @@ pub extern "system" fn Java_net_findfine_feisuo_NativeBridge_nativeGetConfigJson
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jstring {
-    let value = catch_unwind(AssertUnwindSafe(|| host::config_json(0))).unwrap_or_default();
+    let value = catch_unwind(AssertUnwindSafe(|| {
+        host::config_json(host::current_handle())
+    }))
+    .unwrap_or_default();
     new_jstring(&mut env, &value)
 }
 
@@ -192,7 +201,10 @@ pub extern "system" fn Java_net_findfine_feisuo_NativeBridge_nativeGetTrustedDev
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jstring {
-    let value = catch_unwind(AssertUnwindSafe(|| host::trusted_devices_json(0))).unwrap_or_default();
+    let value = catch_unwind(AssertUnwindSafe(|| {
+        host::trusted_devices_json(host::current_handle())
+    }))
+    .unwrap_or_default();
     new_jstring(&mut env, &value)
 }
 
@@ -229,7 +241,7 @@ pub extern "system" fn Java_net_findfine_feisuo_NativeBridge_nativePairWithDevic
         if target_port <= 0 || target_port > 65535 {
             return Err("目标端口非法".to_string());
         }
-        host::pair_with_device(0, &ip, target_port as u16, &pin)
+        host::pair_with_device(host::current_handle(), &ip, target_port as u16, &pin)
     }));
 
     let payload = match result {
@@ -265,7 +277,7 @@ pub extern "system" fn Java_net_findfine_feisuo_NativeBridge_nativeProbeDevice<'
                 return String::new();
             }
         };
-        match host::probe(0, &ip) {
+        match host::probe(host::current_handle(), &ip) {
             Ok(dev) => serde_json::to_string(&dev).unwrap_or_default(),
             Err(e) => {
                 host::log_error(&format!("探测 {} 失败: {}", ip, e));
@@ -337,7 +349,7 @@ pub extern "system" fn Java_net_findfine_feisuo_NativeBridge_nativeSendFiles<'lo
             return Err("目标端口非法".to_string());
         }
         host::send_files(
-            0,
+            host::current_handle(),
             &ip,
             target_port as u16,
             &device_id,

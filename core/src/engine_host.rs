@@ -174,6 +174,19 @@ pub fn shutdown(handle: i64) {
     }));
 }
 
+/// 取当前引擎的真实句柄；未启动时返回 [`INVALID_HANDLE`]。
+///
+/// 给 JNI 层用。JNI 方法签名里没有句柄参数（Kotlin 侧的 external 声明
+/// 只有业务参数），所以必须由核心自己把当前句柄取出来 —— 传字面量 0
+/// 会被 [`engine_for_handle`] 判为无效句柄，所有读取接口静默返回空值。
+pub fn current_handle() -> i64 {
+    let guard = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_ref() {
+        Some(slot) => Arc::as_ptr(&slot.engine) as i64,
+        None => INVALID_HANDLE,
+    }
+}
+
 /// 引擎是否已启动。
 pub fn is_running() -> bool {
     let guard = ENGINE.lock().unwrap_or_else(|e| e.into_inner());

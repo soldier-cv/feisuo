@@ -138,7 +138,11 @@ android {
         ndk {
             // 只保留真机需要的 ABI: 每个 ABI 的 .so 约 4.4 MB,
             // 三个都打进去会让 APK 直接翻三倍。
-            abiFilters += listOf("arm64-v8a")
+            //
+            // x86_64 仅为**模拟器调试**需要: 模拟器是 x86_64, 没有这个 ABI
+            // 就得靠 libhoudini 做 arm64 二进制翻译, 原生 JNI 调用在翻译层下
+            // 行为不一定可信。正式发版仍只发 arm64。
+            abiFilters += listOf("arm64-v8a", "x86_64")
         }
     }
 

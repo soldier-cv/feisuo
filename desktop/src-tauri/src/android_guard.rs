@@ -667,3 +667,92 @@ fn matching_brace(src: &str, open: usize) -> Option<usize> {
     }
     None
 }
+
+/// 已经自己挂到 `root` 上的界面 helper, 不许被 `root.addView(...)` 再挂一次。
+///
+/// 这是 v0.1.15 的真实事故: `section()` / `addRow()` / `addParagraph()` 这些
+/// helper 内部就是 `....also { root.addView(it) }` —— 它们**自己已经挂上去了**。
+/// 调用处再写 `root.addView(section("运行状态"))` 就是把同一个 View 挂第二次,
+/// `ViewGroup.addView` 立刻抛
+/// `IllegalStateException: The specified child already has a parent`,
+/// 而这段代码在 `buildUi()` 里、被 `onCreate` 直接调用 —— 应用启动即闪退,
+/// 用户点开图标只看到一下白屏就没了。
+///
+/// 为什么必须靠守卫: 这个错误编译期完全无感(类型对得上、语法合法),
+/// `gradlew assembleRelease` 照样 BUILD SUCCESSFUL, 甚至 workspace 里
+/// 所有 Rust 测试也照绿。唯一能发现它的地方是**在真机/模拟器上启动一次**,
+/// 而本项目的 CI 没有 Android 运行环境 —— 于是它被当成正式版发了出去。
+#[test]
+fn self_attaching_helper_must_not_be_added_again() {
+    let path = kotlin_dir().join("MainActivity.kt");
+    let src = std::fs::read_to_string(&path).expect("读取 MainActivity.kt 失败");
+    // 注释里会成段引用这些调用(本文件的守卫说明就是这么写的),
+    // 不剥掉就会把注释误当成代码判定。
+    let code = strip_line_comments(&src);
+
+    // 1) 先找出"自己会挂到 root 上"的 helper。
+    //    判定看这段声明里有没有 `root.addView(`, 而不是写死一份名单 ——
+    //    写死的名单在 helper 改名/新增后会静默失效, 那正是守卫最危险的失败方式。
+    //
+    //    必须以"声明到下一个声明"为单元, 不能用花括号截函数体:
+    //    这些 helper 是表达式体(`= TextView(this).apply { ... }
+    //    .also { root.addView(it) }`), 花括号截出来的只是 `.apply` 那一段,
+    //    真正的挂载调用落在外面 —— 按函数体判定会把它们全部漏掉。
+    let mut starts: Vec<usize> = code.match_indices("private fun ").map(|(at, _)| at).collect();
+    starts.push(code.len());
+    let mut self_attaching: BTreeSet<String> = BTreeSet::new();
+    for pair in starts.windows(2) {
+        let (from, to) = (pair[0], pair[1]);
+        let rest = &code[from + "private fun ".len()..];
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        if code[from..to].contains("root.addView(") {
+            self_attaching.insert(name);
+        }
+    }
+
+    // 2) 守卫自己不能空转: 上面这种动态识别一旦失灵(换写法、改结构),
+    //    self_attaching 会变空, 下面的检查就永远"通过"。这里钉死几个
+    //    当前真实存在的 helper, 让失灵变成红灯而不是静默成绿。
+    assert!(
+        self_attaching.contains("section") && self_attaching.contains("addRow"),
+        "没能识别出自挂载的界面 helper (当前识别到: {:?}) —— \
+         守卫已失效, 请修识别逻辑, 而不是删掉这条断言",
+        self_attaching
+    );
+
+    // 3) 逐处检查 `root.addView(...)` 的实参。
+    let mut violations: Vec<String> = Vec::new();
+    for (at, _) in code.match_indices("root.addView(") {
+        let after = &code[at + "root.addView(".len()..];
+        let trimmed = after.trim_start();
+        let name: String = trimmed
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if !self_attaching.contains(&name) {
+            continue;
+        }
+        // 只有紧跟 '(' 才算调用; `root.addView(row)` 这类纯变量传参是合法的。
+        if !trimmed[name.len()..].trim_start().starts_with('(') {
+            continue;
+        }
+        let line = code[..at].matches('\n').count() + 1;
+        violations.push(format!(
+            "MainActivity.kt:{}  root.addView({}(...)) —— {}() 内部已经 root.addView 过,\
+             再包一层会抛 IllegalStateException, 应用启动即闪退",
+            line, name, name
+        ));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "有自挂载的界面 helper 被重复挂载, 应用会在 onCreate 里闪退:\n  {}",
+        violations.join("\n  ")
+    );
+}

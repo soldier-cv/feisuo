@@ -97,19 +97,22 @@ class MainActivity : Activity() {
         addTitle("飞梭", 22f)
         addSubtitle("局域网互传 · 无人值守待命")
 
-        root.addView(section("运行状态"))
+        // section() 内部已经 root.addView(it)，外面再包一层会把同一个 View
+        // 添加两次，onCreate 直接抛 IllegalStateException（"specified child
+        // already has a parent"）——应用一启动就闪退。
+        section("运行状态")
         engineStatusView = addRow("引擎", "正在启动…")
         deviceIdView = addRow("设备指纹", "读取中…")
         configView = addRow("配置", "读取中…")
 
-        root.addView(section("通知权限与锁屏可用"))
+        section("通知权限与锁屏可用")
         addParagraph(
             "飞梭在打开期间通过前台通知维持局域网待命与 Wi-Fi 组播监听，" +
                 "确保手机在锁屏、切 Wi-Fi 之后仍能被电脑秒搜并投递文件。" +
                 "Android 13+ 需要你授权通知，否则锁屏后系统可能冻结网络连接。"
         )
 
-        root.addView(section("如何配对"))
+        section("如何配对")
         addParagraph(
             "1. 在 Windows 桌面端打开「双栏穿梭」或「系统设置」, 点击「查看本机配对码」。\n" +
                 "2. 在下方填入电脑的局域网 IP 与那 6 位配对码, 点击「配对」。\n" +
@@ -133,7 +136,7 @@ class MainActivity : Activity() {
         pairButtonRef = pairButton
         root.addView(pairButton, lp(top = dp(16)))
 
-        root.addView(section("已配对设备"))
+        section("已配对设备")
         trustedView = addRow("受信设备", "读取中…")
 
         val refresh = Button(this).apply {
@@ -142,7 +145,7 @@ class MainActivity : Activity() {
         }
         root.addView(refresh, lp(top = dp(8)))
 
-        root.addView(section("随用随走 · 零后台"))
+        section("随用随走 · 零后台")
         addParagraph(
             "• 锁屏可用：只要本应用仍在任务列表中，锁屏状态下依然可秒速接收局域网文件。\n" +
                 "• 退出即关：使用完毕后，按返回键退出或在多任务列表中划掉卡片即可彻底停止，不占用后台与电量。"
