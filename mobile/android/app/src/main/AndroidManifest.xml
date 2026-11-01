@@ -28,6 +28,20 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!--
+      ## 应用内在线升级
+
+      飞梭不走应用商店，新版本由 GitHub / Gitee Release 直接分发，
+      所以**必须**能自己拉起系统安装器。
+
+      - `REQUEST_INSTALL_PACKAGES`：Android 8.0 起，应用内安装 APK 要求
+        发起方持有它，否则系统安装器根本不会出现（表现为"点了没反应"）。
+        用户仍要单独为本应用打开「安装未知应用」开关 —— 见
+        `ApkInstaller.openUnknownSourcesSettings`。
+      - `INTERNET` 已在上面声明，下载走的就是它。
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!--
       ## 为什么这里只需要 MAIN/LAUNCHER
 
       Android 11+ 的包可见性（package visibility）会过滤掉查询结果。官方
@@ -123,6 +137,28 @@
                 <data android:mimeType="application/*" />
             </intent-filter>
         </activity>
+
+        <!--
+          在线升级：把 cache/updates 下的 APK 交给系统安装器。
+
+          为什么必须走 FileProvider：Android 7.0 起 `file://` 的 APK 会直接抛
+          `FileUriExposedException`，而 content:// 需要显式声明一个 provider。
+          authority 必须是 `${applicationId}.fileprovider` —— 与
+          `ApkInstaller.AUTHORITY_SUFFIX` 严格对应，改一处不改另一处会在
+          `FileProvider.getUriForFile()` 里抛 IllegalArgumentException（安装按钮
+          点了就崩），编译期完全无感。
+
+          `exported=false` + 只在 Intent 上授临时读权限：别的应用读不到这个 URI。
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/update_paths" />
+        </provider>
 
     </application>
 </manifest>

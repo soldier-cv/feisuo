@@ -337,9 +337,11 @@ $env:FEISUO_KEY_PASSWORD = "..."
 | --- | --- | --- |
 | 分享到飞梭 → 发送 | ✅ | ✅ |
 | 拖拽直发 / 穿梭双栏 | ✅ | ❌ 未做界面 |
+| 粘贴路径直接发送 | ✅ | ❌ 未做界面 |
 | 指定落点子目录 | ✅ | ❌ 恒为对方收件根 |
 | 人工审批窗口 | ✅ | 仅通知栏（显示匹配码） |
 | 配对入口 | ✅ | ✅ |
+| 应用内在线升级 | ✅ | ✅ 下载 → 装前校验 → 系统安装器 |
 | 前台保活 / 开机自启 | 托盘常驻 | ✅ |
 
 「指定落点」在 Android 上是**能力缺失**而不是 bug：Android 端的发送入口
@@ -364,6 +366,11 @@ $env:FEISUO_KEY_PASSWORD = "..."
   有守卫强制这一点。
 - 绿色版是**单文件、免安装**。升级 = 下载新 `Feisuo-win-x64.exe` 覆盖旧文件。
   信任库、配对记录、设置都在 `%LOCALAPPDATA%\feisuo\`，**升级不会丢**。
+- **Android 端同样是应用内升级**：主界面「版本与更新」→「检查更新」，
+  发现新版后一次点击走完"下载 → 校验 → 拉起系统安装器"。启动时还会静默检查
+  一次（失败不打扰）。首次使用需要在系统的「安装未知应用」里给飞梭开一次权限，
+  之后才能拉起安装器；签名与已装版本不一致时（例如本地自己用 debug 密钥打包过）
+  会明确提示"先卸载当前版本"，而不是丢一句系统英文报错。
 - 升级前建议先用「系统设置 → 导出诊断报告」留一份基线，
   升级后如果传输行为有变化，可以拿两份报告对比。
 
@@ -379,9 +386,11 @@ $env:FEISUO_KEY_PASSWORD = "..."
   会让所有在线用户永远解析不到附件 —— 表现是"永远提示已是最新"。
   `update_guard::current_version_must_come_from_cargo_pkg` 会拦本地漂移，
   但**拦不住远端改名**，那只能靠发版流程守。
-- 仓库地址硬编码在三处：`.github/workflows/sync-gitee.yml`（分支/Tag 镜像）、
+- 仓库地址硬编码在四处：`.github/workflows/sync-gitee.yml`（分支/Tag 镜像）、
   `.github/workflows/release.yml`（Release 与附件）、
-  `desktop/src-tauri/src/updater.rs`（客户端检查更新）。**改仓库名要同时改这三处。**
+  `desktop/src-tauri/src/updater.rs`（桌面端检查更新）、
+  `mobile/android/app/src/main/java/net/findfine/feisuo/UpdateChecker.kt`（安卓端检查更新）。
+  **改仓库名要同时改这四处。**
 - `GITEE_TOKEN` 必须在 GitHub 仓库 Secrets 里配好，否则镜像同步会**硬失败**。
   这是有意的：静默跳过会让"镜像没生效"变成几个月后才发现的事。
   （`release.yml` 里的 Release 同步是 `continue-on-error` 降级，只发 warning。）

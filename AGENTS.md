@@ -121,16 +121,19 @@ feisuo/
 
 ### 🔴 规则 5：Gitee 镜像（强制）
 
-- 仓库地址**硬编码**在 workflow 与客户端代码里，改仓库名必须同步改这三处：
+- 仓库地址**硬编码**在 workflow 与客户端代码里，改仓库名必须同步改这四处：
   - `.github/workflows/sync-gitee.yml`（分支/Tag 镜像）
   - `.github/workflows/release.yml`（Release 与附件）
-  - `desktop/src-tauri/src/updater.rs`（客户端检查更新的三条通道）
-- **这三处的一致性已有守卫**：
-  `update_guard::repo_identifiers_must_be_consistent_across_the_three_places`
-  会核对仓库标识在三个文件里同时出现、附件名在 `release.yml` 里一致、
-  以及 Gitee 推送目标与客户端的 Gitee 通道同源。
+  - `desktop/src-tauri/src/updater.rs`（桌面端检查更新的三条通道）
+  - `mobile/android/app/src/main/java/net/findfine/feisuo/UpdateChecker.kt`（安卓端检查更新的三条通道）
+- **这四处的一致性已有守卫**：
+  `update_guard::repo_identifiers_must_be_consistent_across_the_four_places`
+  会核对仓库标识在四个文件里同时出现、附件名在 `release.yml` 里一致、
+  以及 Gitee 推送目标与两端客户端的 Gitee 通道同源。
   写在这里的"必须同步改"曾经只是文档——**改漏的后果全是静默的**
   （镜像推到别处 / 发版传到别处 / 客户端永远停在旧版本且界面上看不出异常）。
+  安卓端是最容易漏的那一处：它是后加的，桌面端自测"更新正常"之后，
+  手机端会一直显示"已是最新"，日志里也没有一行报错。
 - **`GITEE_TOKEN` 必须配置在 GitHub 仓库 Secrets**，否则同步会**硬失败**
   （`sync-gitee.yml` 有意不做静默跳过：静默跳过会让"镜像没生效"变成一件
   几个月后才发现的事）。未配置时 `release.yml` 里的 Release 同步是

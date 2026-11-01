@@ -42,6 +42,31 @@ fn workflow_src(name: &str) -> String {
     read(&repo_root().join(".github").join("workflows").join(name))
 }
 
+fn android_main_dir() -> PathBuf {
+    repo_root()
+        .join("mobile")
+        .join("android")
+        .join("app")
+        .join("src")
+        .join("main")
+}
+
+fn android_kotlin_dir() -> PathBuf {
+    android_main_dir().join("java").join("net").join("findfine").join("feisuo")
+}
+
+fn update_checker_src() -> String {
+    read(&android_kotlin_dir().join("UpdateChecker.kt"))
+}
+
+fn apk_installer_src() -> String {
+    read(&android_kotlin_dir().join("ApkInstaller.kt"))
+}
+
+fn main_activity_src() -> String {
+    read(&android_kotlin_dir().join("MainActivity.kt"))
+}
+
 #[test]
 fn guarded_files_must_exist() {
     assert!(
@@ -645,19 +670,22 @@ fn ci_test_failure_must_name_the_failing_test() {
     );
 }
 
-/// 守卫：仓库标识在**三处**必须一致（AGENTS.md 规则 5）。
+/// 守卫：仓库标识在**四处**必须一致（AGENTS.md 规则 5）。
 ///
 /// ## 为什么这条必须自动化检查
 ///
-/// AGENTS.md 规则 5 明文要求"改仓库名必须同步改这三处"，但三处散落在
-/// 两个 workflow 和一个 Rust 常量区里，靠人记不住：
+/// AGENTS.md 规则 5 明文要求"改仓库名必须同步改这四处"，但四处散落在
+/// 两个 workflow、一个 Rust 常量区和一个 Kotlin 常量区里，靠人记不住：
 ///
 /// - `.github/workflows/sync-gitee.yml` —— 分支/Tag 镜像的**目标**
 /// - `.github/workflows/release.yml` —— Release 与附件的**目标**
-/// - `desktop/src-tauri/src/updater.rs` —— 客户端**检查更新的三条通道**
+/// - `desktop/src-tauri/src/updater.rs` —— 桌面端**检查更新的三条通道**
+/// - `mobile/.../UpdateChecker.kt` —— 安卓端检查更新的三条通道
 ///
 /// 改漏任何一处的后果都是**静默**的：镜像推到别处、发版传到别处、
 /// 客户端永远停在旧版本且界面上看不出任何异常。没有一条会报错。
+/// 安卓那一处尤其容易漏：它是后加的，桌面端改完自测"更新正常"，
+/// 手机端却会一直显示"已是最新"。没有一条会报错。
 ///
 /// 所以规则 5 写在文档里不够，得有测试。
 ///
@@ -666,10 +694,11 @@ fn ci_test_failure_must_name_the_failing_test() {
 /// `Feisuo-win-x64.exe` 被客户端 `pick_asset` 精确匹配（找不到就不更新，
 /// 而不是下错文件）。改附件名 = 所有在线用户永远解析不到附件。
 #[test]
-fn repo_identifiers_must_be_consistent_across_the_three_places() {
+fn repo_identifiers_must_be_consistent_across_the_four_places() {
     let updater = updater_src();
     let sync = workflow_src("sync-gitee.yml");
     let release = workflow_src("release.yml");
+    let checker = update_checker_src();
 
     // ---- 1) 附件名：updater 是权威（客户端按它匹配）----
     let asset = updater
@@ -719,13 +748,29 @@ fn repo_identifiers_must_be_consistent_across_the_three_places() {
         })
         .unwrap_or_else(|| panic!("updater.rs 里找不到 REPO_NAME"));
 
-    // 三处都应出现 owner/repo 这一对
-    for (label, src) in [("updater.rs", &updater), ("sync-gitee.yml", &sync), ("release.yml", &release)] {
+    // 四处都应出现 owner/repo 这一对
+    for (label, src) in [
+        ("updater.rs", &updater),
+        ("sync-gitee.yml", &sync),
+        ("release.yml", &release),
+        ("UpdateChecker.kt", &checker),
+    ] {
         assert!(
             src.contains(&format!("{owner}/{repo}")),
             "{label} 里找不到仓库标识 {owner}/{repo} —— \
-             与 updater.rs 不一致。改仓库名必须三处同步（AGENTS.md 规则 5）, \
+             与 updater.rs 不一致。改仓库名必须四处同步（AGENTS.md 规则 5）, \
              漏改的后果是**静默**的：镜像/发版传到别处, 或客户端永远查不到更新"
+        );
+    }
+
+    // 安卓端的 owner/repo 是**另一个字面量**（Kotlin 里没有 const 复用），
+    // 所以必须逐个比对值：只查"出现过 owner/repo"会被其中一个写对就过关。
+    for (label, kotlin_name) in [("REPO_OWNER", owner), ("REPO_NAME", repo)] {
+        let expected = format!("private const val {label} = \"{kotlin_name}\"");
+        assert!(
+            checker.contains(&expected),
+            "UpdateChecker.kt 里应写成 {expected} —— 安卓端查的是另一个仓库时, \
+             手机端会永远\"已是最新\"（Gitee 查 A、桌面端查 B 时最典型）"
         );
     }
 
@@ -755,6 +800,337 @@ fn repo_identifiers_must_be_consistent_across_the_three_places() {
         sync.contains(&format!("gitee.com/{gitee_repo}")),
         "sync-gitee.yml 的推送目标与 updater.rs 的 Gitee 通道不一致 —— \
          客户端查 gitee.com/{gitee_repo}, 而镜像推到别处"
+    );
+    // 安卓端的 Gitee 通道是**手写的完整 URL**, 最容易在换仓库时被忘掉:
+    // 桌面端更新正常、手机端永远停在旧版, 且日志里只有一句"已是最新"。
+    assert!(
+        checker.contains(&format!("gitee.com/api/v5/repos/{gitee_repo}/releases/latest")),
+        "UpdateChecker.kt 的 Gitee 通道与 updater.rs 不一致 —— \
+         手机端会查另一个仓库, 表现为「明明发了新版, 手机却永远已是最新」"
+    );
+    assert!(
+        checker.contains(&format!("gitee.com/{gitee_repo}/releases")),
+        "UpdateChecker.kt 的手动下载页与 Gitee 通道不同源, 兜底出口会 404"
+    );
+}
+
+/// 取出 `sig` 对应的 Kotlin 函数体（花括号配平），找不到就 panic。
+///
+/// 为什么需要它: 安卓端的升级链路横跨"下载 → 校验 → 拉起安装器"三个函数,
+/// 只断言"文件里出现了某个调用"完全挡不住**调用顺序反了**——先装后校验的
+/// 代码看起来同样"到处都有 verify"，而且它偏偏能跑通（装完才报签名不一致）。
+fn kotlin_fn_body(src: &str, sig: &str) -> String {
+    let start = src
+        .find(sig)
+        .unwrap_or_else(|| panic!("Kotlin 源码里找不到 {sig}"));
+    let open = src[start..]
+        .find('{')
+        .map(|i| start + i)
+        .unwrap_or_else(|| panic!("{sig} 不是函数体（找不到 '{{'）"));
+    let mut depth = 0usize;
+    for (i, ch) in src[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return src[open + 1..open + i].to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("{sig} 的函数体花括号不配平");
+}
+
+/// 安卓端「应用内升级」的每一环都必须真的接上。
+///
+/// 为什么单独守: 桌面端有 `wiring_guard` 盯着命令注册, 安卓端是纯手工的
+/// Activity 代码 —— 少一句 `UpdateChecker.check(...)` 或少了 manifest 里的
+/// `REQUEST_INSTALL_PACKAGES`, 编译期、静态检查全都不报错, 用户看到的是
+/// "检查更新按钮点了没反应" / "下载好了但装不上", 而这两种症状在日志里
+/// 都没有一行错误。
+#[test]
+fn android_update_pipeline_must_be_fully_wired() {
+    for f in ["UpdateChecker.kt", "ApkInstaller.kt", "MainActivity.kt"] {
+        assert!(
+            android_kotlin_dir().join(f).is_file(),
+            "缺少 {}, 守卫会静默空跑",
+            f
+        );
+    }
+
+    let checker = update_checker_src();
+    let installer = apk_installer_src();
+    let activity = main_activity_src();
+    let manifest = read(&android_main_dir().join("AndroidManifest.xml"));
+    let paths = read(&android_main_dir().join("res").join("xml").join("update_paths.xml"));
+
+    // 1) 检查 / 下载 / 校验 / 安装 四个动作在 MainActivity 里都被调用
+    assert!(
+        activity.contains("UpdateChecker.check(BuildConfig.VERSION_NAME)"),
+        "MainActivity 没有用 BuildConfig.VERSION_NAME 调 UpdateChecker.check —— \
+         版本号来源一旦分叉, 手机端会永远\"已是最新\"或永远提示有新版"
+    );
+    assert!(
+        activity.contains("UpdateChecker.download(this, release)"),
+        "MainActivity 没有调用 UpdateChecker.download —— 发现新版本后无路可走"
+    );
+    assert!(
+        activity.contains("ApkInstaller.verify(this, dl.file)"),
+        "下载完没有做装前校验就直接安装 —— 包名/签名不对时用户只会看到一串系统英文报错"
+    );
+    assert!(
+        activity.contains("ApkInstaller.startInstall(this, apk)"),
+        "MainActivity 没有拉起系统安装器 —— 下完了也装不上"
+    );
+
+    // 2) 启动时自动检查一次, 且是**静默**的（失败不打扰）
+    assert!(
+        activity.contains("checkForUpdate(silent = true)"),
+        "启动时没有静默检查更新 —— 用户不会为了\"看看有没有新版\"主动点按钮, \
+         功能等于不存在"
+    );
+
+    // 3) 缺「安装未知应用」权限时必须引导, 并在 onResume 续上那次安装
+    assert!(
+        activity.contains("awaitingUnknownSources"),
+        "没有记住\"被打断的安装\" —— 用户从授权页回来时什么都不会发生"
+    );
+    let on_resume = kotlin_fn_body(&activity, "override fun onResume()");
+    assert!(
+        on_resume.contains("awaitingUnknownSources"),
+        "onResume 没有续上被打断的安装 —— 授权回来后界面停在\"授权后会自动继续\""
+    );
+    assert!(
+        installer.contains("Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES"),
+        "没有引导到「安装未知应用」授权页 —— 系统安装器根本不出现, 点了就像坏了"
+    );
+    assert!(
+        installer.contains("canRequestPackageInstalls()"),
+        "没有用 canRequestPackageInstalls() 判断权限 —— 那是系统上唯一权威的开关状态"
+    );
+
+    // 4) manifest: 权限 + FileProvider（authority 必须与 Kotlin 里的后缀一致）
+    assert!(
+        manifest.contains("android.permission.REQUEST_INSTALL_PACKAGES"),
+        "AndroidManifest 缺 REQUEST_INSTALL_PACKAGES —— Android 8.0+ 应用内安装直接不生效"
+    );
+    assert!(
+        manifest.contains("androidx.core.content.FileProvider"),
+        "AndroidManifest 没有声明 FileProvider —— 传 file:// 会抛 FileUriExposedException"
+    );
+    assert!(
+        manifest.contains("android:authorities=\"${applicationId}.fileprovider\""),
+        "FileProvider 的 authority 应写成 ${{applicationId}}.fileprovider"
+    );
+    assert!(
+        installer.contains("AUTHORITY_SUFFIX = \".fileprovider\""),
+        "ApkInstaller 的 authority 后缀与 manifest 不一致 —— \
+         FileProvider.getUriForFile() 会抛 IllegalArgumentException, 点\"安装\"就崩"
+    );
+    assert!(
+        manifest.contains("@xml/update_paths"),
+        "FileProvider 没有指向 @xml/update_paths —— 它不知道能暴露哪个目录"
+    );
+
+    // 5) 暴露目录必须与下载落点一致
+    assert!(
+        paths.contains("<cache-path") && paths.contains("path=\"updates/\""),
+        "update_paths.xml 只应放出 cache 下的 updates/ 一个目录"
+    );
+    assert!(
+        checker.contains("File(context.cacheDir, \"updates\")"),
+        "更新包的落点与 update_paths.xml 不一致 —— getUriForFile 会报 \
+         \"Failed to find configured root\""
+    );
+}
+
+/// 装之前必须校验：包名、版本更高、签名与已安装版本**完全一致**。
+///
+/// 这三条是"镜像被换成同名恶意 APK"的唯一防线: 攻击者换得掉 Release 附件,
+/// 换不掉私钥。少了签名比对, 一个被替换的 APK 就能覆盖安装并拿到已有的
+/// 设备指纹与信任库 —— 那是"一次配对终生免密"的全部前提。
+#[test]
+fn android_upgrade_must_verify_apk_before_installing() {
+    let installer = apk_installer_src();
+    let activity = main_activity_src();
+    let verify_body = kotlin_fn_body(&installer, "fun verify(context: Context, apk: File)");
+
+    assert!(
+        verify_body.contains("incoming.packageName != context.packageName"),
+        "装前校验没有比对包名 —— 被替换的 Release 可以让用户装上别的应用"
+    );
+    assert!(
+        verify_body.contains("longVersionCode"),
+        "装前校验没有比对版本号 —— 降级安装必被系统拒绝, 而用户看到的是系统英文报错"
+    );
+    assert!(
+        verify_body.contains("signerDigests("),
+        "装前校验没有比对签名 —— 这是唯一挡得住\"同名恶意 APK\"的一步"
+    );
+    assert!(
+        installer.contains("MessageDigest.getInstance(\"SHA-256\")"),
+        "签名指纹应取 SHA-256 而不是别的摘要"
+    );
+
+    // 唯一的安装入口必须在校验之后才被调用
+    let download_body = kotlin_fn_body(&activity, "private fun downloadAndInstall()");
+    assert!(
+        download_body.contains("ApkInstaller.verify("),
+        "downloadAndInstall 没有做装前校验 —— 校验写在别处等于没写"
+    );
+    assert!(
+        !download_body.contains("ApkInstaller.startInstall("),
+        "downloadAndInstall 应经 installPendingApk 再安装: 那里才检查「安装未知应用」权限"
+    );
+    let install_body = kotlin_fn_body(&activity, "private fun installPendingApk(");
+    assert!(
+        install_body.contains("ApkInstaller.startInstall("),
+        "installPendingApk 没有真正拉起安装器"
+    );
+
+    // 校验失败必须清掉这份包, 否则"重试"会一直复用一个坏文件
+    assert!(
+        activity.contains("UpdateChecker.clearDownloads(this)"),
+        "校验失败没有清理缓存 —— 用户点重试时会反复装同一个错误文件"
+    );
+}
+
+/// 下载地址白名单必须**逐跳**生效。
+///
+/// Gitee 的下载会连跳两次（gitee.com → attach_files → foruda.gitee.com）,
+/// 只校验初始 URL 等于没校验: 一个被劫持的 API 响应完全可以先给一个
+/// gitee.com 的地址、再用 302 把客户端引到任意主机, 那个主机上的 APK
+/// 会被原样下载并在签名比对之前就被当成"更新包"。
+#[test]
+fn android_download_url_must_be_allowlisted_on_every_hop() {
+    let checker = update_checker_src();
+
+    let allow = kotlin_fn_body(&checker, "fun isTrustedDownloadUrl(url: String): Boolean");
+    assert!(
+        allow.contains("equals(\"https\""),
+        "白名单没有强制 https —— 明文下载可被中间人整包替换"
+    );
+    for host in ["gitee.com", "github.com", "githubusercontent.com"] {
+        assert!(
+            allow.contains(host),
+            "白名单里没有 {host}"
+        );
+    }
+    assert!(
+        allow.contains("endsWith(\".$base\")"),
+        "子域判定必须是 \".\" 分隔: 否则 evilgitee.com 会被当成 gitee.com"
+    );
+
+    // 逐跳检查发生在 for 循环体内（每一跳都查），而不是循环之前查一次
+    let follow = kotlin_fn_body(&checker, "private fun openFollowing(");
+    let loop_at = follow.find("for (hop in").expect("openFollowing 没有重定向循环");
+    let guard_at = follow
+        .find("isTrustedDownloadUrl(current)")
+        .expect("openFollowing 没有在每一跳前检查白名单");
+    assert!(
+        guard_at > loop_at,
+        "白名单检查在重定向循环之外 —— 只查了初始地址, 中间跳可以指向任意主机"
+    );
+    assert!(
+        follow.contains("instanceFollowRedirects = false"),
+        "必须关掉自动跟随, 否则拿不到中间跳的目标地址"
+    );
+
+    // 下载走的是带白名单的那条路径
+    let download = kotlin_fn_body(&checker, "fun download(");
+    assert!(
+        download.contains("enforceAllowlist = true"),
+        "download 没有开启白名单校验 —— 远端 JSON 里的任意 URL 都会被下载"
+    );
+    assert!(
+        checker.contains("if (!isTrustedDownloadUrl(release.downloadUrl))"),
+        "download 开头没有先拒掉不受信任的地址"
+    );
+}
+
+/// APK 附件名必须与 `release.yml` 的产出对上。
+///
+/// 客户端按"前缀 + 版本 + 后缀"拼出文件名并**精确匹配**附件: 名字差一个
+/// 字符, 症状是"发现新版本但没有 APK 附件"—— 用户完全无从自查, 而
+/// release.yml 那边看起来一切正常。
+#[test]
+fn android_apk_asset_name_must_match_release_workflow() {
+    let checker = update_checker_src();
+    let release = workflow_src("release.yml");
+
+    let prefix = checker
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("private const val APK_NAME_PREFIX = "))
+        .map(|v| v.trim().trim_matches('"'))
+        .unwrap_or_else(|| panic!("UpdateChecker.kt 里找不到 APK_NAME_PREFIX"));
+    let suffix = checker
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("private const val APK_NAME_SUFFIX = "))
+        .map(|v| v.trim().trim_matches('"'))
+        .unwrap_or_else(|| panic!("UpdateChecker.kt 里找不到 APK_NAME_SUFFIX"));
+    assert_eq!(prefix, "Feisuo-v", "APK 附件名前缀与 release.yml 不一致");
+    assert_eq!(suffix, "-arm64.apk", "APK 附件名后缀与 release.yml 不一致");
+
+    // release.yml 里产物名是 PowerShell 插值: Feisuo-v${ver}-arm64.apk
+    assert!(
+        release.contains(&format!("{prefix}${{ver}}{suffix}")),
+        "release.yml 的产物名与客户端拼出的 {prefix}<ver>{suffix} 不一致 —— \
+         手机端会永远说\"没有 APK 附件\""
+    );
+    // 只认 arm64 一个架构: 挑错包 = 装上就用不了
+    assert!(
+        checker.contains("name.endsWith(APK_NAME_SUFFIX"),
+        "附件挑选没有按后缀过滤 —— 会挑到别的架构或非 APK 文件"
+    );
+}
+
+/// 安卓端的版本号只能来自 `BuildConfig.VERSION_NAME`（源头是仓库根 Cargo.toml）。
+///
+/// 界面里写死版本字符串的后果不是"显示旧版本号"这么简单: 检查更新会拿
+/// 这个常量跟 tag 比, 于是**永远**判定"已是最新", 而开发者改的是 Cargo.toml,
+/// 本地一切正常。
+#[test]
+fn android_version_must_come_from_buildconfig() {
+    let activity = main_activity_src();
+    let gradle = read(
+        &repo_root()
+            .join("mobile")
+            .join("android")
+            .join("app")
+            .join("build.gradle.kts"),
+    );
+
+    assert!(
+        activity.contains("BuildConfig.VERSION_NAME"),
+        "界面没有用 BuildConfig.VERSION_NAME 显示/比较版本"
+    );
+    assert!(
+        gradle.contains("versionName = appVersionName"),
+        "build.gradle.kts 的 versionName 不是从 Cargo.toml 解析出来的"
+    );
+    assert!(
+        gradle.contains("buildConfig = true"),
+        "没有开启 buildConfig —— BuildConfig.VERSION_NAME 根本不存在, 编译期就会失败"
+    );
+
+    // 界面上不许出现写死的版本号（形如 "0.1.17"）
+    let hardcoded = activity
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .find(|s| {
+            let parts: Vec<&str> = s.trim().split('.').collect();
+            parts.len() == 3
+                && parts
+                    .iter()
+                    .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        });
+    assert!(
+        hardcoded.is_none(),
+        "MainActivity 里写死了版本号 {:?} —— 必须取 BuildConfig.VERSION_NAME",
+        hardcoded.unwrap_or_default()
     );
 }
 

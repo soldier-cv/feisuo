@@ -9,6 +9,7 @@ mod os_shim;
 #[cfg(test)]
 mod android_guard;
 mod clipboard;
+mod input_paths;
 #[cfg(test)]
 mod jni_guard;
 #[cfg(test)]
@@ -266,6 +267,7 @@ async fn main() {
             commands::request_pull,
             commands::probe_file_sizes,
             commands::preview_send_paths,
+            commands::resolve_input_paths,
             commands::list_device_endpoints,
             commands::get_preferred_endpoint,
             commands::minimize_window,

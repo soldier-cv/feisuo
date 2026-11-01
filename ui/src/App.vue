@@ -869,6 +869,57 @@
             </div>
           </div>
 
+          <!--
+            路径直达：粘贴一串路径直接发送。
+            「拖放」要求文件就在手边，而用户想发的文件经常只在**文本里**被引用
+            （资源管理器「复制为路径」、终端输出、脚本日志、聊天记录）。
+            没有这一栏，他唯一的办法是用文件对话框把那个目录再点回去找一遍。
+          -->
+          <div class="path-input-card" :class="{ 'has-error': pathInputErrors.length > 0 }">
+            <div class="path-input-head">
+              <i class="ph-bold ph-keyboard"></i>
+              <span class="path-input-title">直接输入文件路径</span>
+              <span class="path-input-hint" title="每行一个路径；支持带引号的「复制为路径」、file:///、%USERPROFILE%、~、\\?\ 长路径前缀">
+                每行一个，支持带引号的「复制为路径」、<code>file:///</code>、<code>%USERPROFILE%</code>、<code>~</code>
+              </span>
+            </div>
+            <textarea
+              v-model="pathInput"
+              class="path-input-area"
+              rows="3"
+              spellcheck="false"
+              placeholder="C:\Users\你\Desktop\报告.docx"
+              :disabled="pathInputBusy"
+              aria-label="要发送的文件路径，每行一个"
+              :aria-invalid="pathInputErrors.length > 0"
+              :aria-describedby="pathInputErrors.length > 0 ? 'path-input-errors' : undefined"
+              @keydown.enter.exact="onPathInputEnter"
+            ></textarea>
+            <div class="path-input-foot">
+              <!--
+                失败行按**行号**写出来。粘贴进来的一片路径里混着几条失效的很正常，
+                只说"有几个路径不可用"会让用户连改哪一行都不知道。
+              -->
+              <ul v-if="pathInputErrors.length > 0" id="path-input-errors" class="path-input-errors" role="alert">
+                <li v-for="(err, i) in pathInputErrors" :key="i">
+                  <i class="ph-bold ph-warning-circle"></i>
+                  <span>{{ err }}</span>
+                </li>
+              </ul>
+              <span v-else class="path-input-tip">
+                <i class="ph ph-corner-down-left"></i> Enter 直接添加并发送 · Shift+Enter 换行
+              </span>
+              <button
+                class="btn-fluent-primary path-input-submit"
+                :disabled="pathInputBusy || !pathInput.trim()"
+                @click="submitPathInput"
+              >
+                <i class="ph-bold" :class="pathInputBusy ? 'ph-arrows-clockwise spinning' : 'ph-paper-plane-tilt'"></i>
+                <span>{{ pathInputBusy ? "解析中…" : "添加并发送" }}</span>
+              </button>
+            </div>
+          </div>
+
           <div v-if="stagedFiles.length > 0" class="staged-file-tray">
             <div class="tray-title-bar">
               <!--
@@ -2688,6 +2739,14 @@ interface StagedFile {
 
 type TabName = "send" | "shuttle" | "log" | "settings";
 
+/**
+ * 一批路径是**怎么进来的**：拖放，还是粘贴了一段路径文本。
+ *
+ * 只影响提示文案。分派规则必须完全一致 —— 用户感知的是"我把文件给这个程序"，
+ * 而不是"我用了哪个入口"。
+ */
+type PathOrigin = "drop" | "input";
+
 const currentTab = ref<TabName>("send");
 const isRefreshing = ref(false);
 const isDragOver = ref(false);
@@ -2724,6 +2783,24 @@ const localInfo = reactive<LocalDeviceInfo>({
 });
 
 const stagedFiles = ref<StagedFile[]>([]);
+/**
+ * 「直接输入文件路径」那一栏的输入内容。
+ *
+ * 为什么要有这条通路：用户手里的路径常常**已经在别处**了 —— 从资源管理器
+ * 复制为路径、从终端/脚本输出里复制、从聊天记录里粘过来。让他再打开文件
+ * 对话框一层层点回去，等于要求他"把已经知道的东西重新找一遍"。
+ */
+const pathInput = ref("");
+/** 正在解析（Rust 侧要逐行 stat，几十行就是几十次磁盘往返） */
+const pathInputBusy = ref(false);
+/**
+ * 解析失败的行（**就地显示在输入框下方**，不用 toast）。
+ *
+ * `showToast` 是单条覆盖式的：连续两次调用只有最后一条可见。而"第 3 行
+ * 不存在、第 7 行不是完整路径"这类问题天然是多条，用 toast 会丢信息 ——
+ * 用户只看到最后一个，改完回车又撞上下一个。
+ */
+const pathInputErrors = ref<string[]>([]);
 const localDiskFiles = ref<DiskFileInfo[]>([]);
 const remoteDiskFiles = ref<RemoteFileEntry[]>([]);
 const isLoadingLocal = ref(false);
@@ -6340,6 +6417,80 @@ async function routeDroppedPathsToDevice(paths: string[], dev: DeviceRosterEntry
 
 
 /**
+ * 「直接输入文件路径」→ 解析 → 走与拖放**完全同一条**分派。
+ *
+ * ## 为什么不自己实现一套"直发"
+ *
+ * 用户的原话是"支持输入文件路径直接上传"，但"直接发"的判定条件已经存在
+ * （`routeDroppedPaths`：纯文件 + 选中在线设备 → 直发；含目录 → 展开进清单；
+ * 无设备 → 进清单等选设备）。在这里复制一份，两份迟早分叉 —— 而分叉的表现是
+ * "拖进去会直发，粘路径却进了清单，还要我再点一次"。
+ *
+ * 唯一的区别是**文案**：这里不是"拖入的内容"，得由 `origin` 告诉下游。
+ *
+ * ## 为什么失败行要留在输入框里
+ *
+ * 用户的文本是一整片粘贴来的。整批清空等于让他重新粘一遍；而只把成功的
+ * 那几行删掉、失败的原样留着，他改完回车就能收尾。行号会因此变化，
+ * 所以错误提示里写「原第 N 行」——那是他**粘贴时**看到的那一行。
+ */
+/** 回车提交（Shift+Enter 由 `exact` 修饰符放过 = 换行）。
+ *
+ *  `preventDefault` 特意**不**写在模板里：输入法用回车确认候选词时，
+ *  在模板上无条件 `prevent` 会把那次确认一起按死。改为在这里先看
+ *  `isComposing`，组合状态下干脆什么都不做。目录名里带中文很常见。
+ */
+function onPathInputEnter(ev: KeyboardEvent) {
+  if (ev.isComposing) return;
+  ev.preventDefault();
+  void submitPathInput();
+}
+
+async function submitPathInput() {
+  if (pathInputBusy.value) return;
+  const text = pathInput.value;
+  if (!text.trim()) return;
+
+  // 并发满了**不动输入框**：文本是用户粘进来的，清掉等于让他重新粘一遍。
+  // 这里只是暂时发不出去，等一个任务结束再按一次回车即可。
+  if (isConcurrencyFull.value) {
+    pathInputErrors.value = [
+      `当前已有 ${runningCount.value} 个传输任务在运行，请等部分完成后再按回车`,
+    ];
+    return;
+  }
+
+  pathInputBusy.value = true;
+  pathInputErrors.value = [];
+  try {
+    const resolved = await FeisuoBridge.resolveInputPaths(text);
+
+    if (resolved.problems.length > 0) {
+      pathInput.value = resolved.problems.map((p) => p.text).join("\n");
+      pathInputErrors.value = resolved.problems.map(
+        (p) => `原第 ${p.line} 行：${p.reason}${p.text ? `（${p.text}）` : ""}`
+      );
+    } else {
+      pathInput.value = "";
+    }
+
+    if (resolved.paths.length === 0) {
+      if (resolved.problems.length === 0) {
+        pathInputErrors.value = ["没有解析出任何路径"];
+      }
+      return;
+    }
+
+    await routeDroppedPaths(resolved.paths, "input");
+  } catch (e) {
+    // 后端整条命令失败（不是某一行的问题），这一批就得原样留在框里。
+    pathInputErrors.value = [FeisuoBridge.describeError(e, "无法解析输入的路径")];
+  } finally {
+    pathInputBusy.value = false;
+  }
+}
+
+/**
  * 拖入窗口后的分派：**文件直发，文件夹才要确认**（§5.1）
  *
  * ## 为什么要分派，而不是一律进待发清单
@@ -6361,17 +6512,18 @@ async function routeDroppedPathsToDevice(paths: string[], dev: DeviceRosterEntry
  * 用户抱怨的是"凭什么还要确认"，所以**每一次**要停下来都必须有理由，
  * 而且理由要写进提示里 —— 不能只是静默地多了一步。
  */
-async function routeDroppedPaths(paths: string[]) {
+async function routeDroppedPaths(paths: string[], origin: PathOrigin = "drop") {
+  const what = origin === "input" ? "输入的路径" : "拖入的内容";
   let preview: Awaited<ReturnType<typeof FeisuoBridge.previewSendPaths>>;
   try {
     preview = await FeisuoBridge.previewSendPaths(paths);
   } catch (e) {
-    showToast(FeisuoBridge.describeError(e, "无法读取拖入的内容"), true);
+    showToast(FeisuoBridge.describeError(e, `无法读取${what}`), true);
     return;
   }
   if (preview.fileCount === 0) {
     showToast(
-      "拖入的内容里没有可发送的文件" +
+      `${what}里没有可发送的文件` +
         (preview.skipped > 0 ? `（跳过了 ${preview.skipped} 项）` : ""),
       true
     );
@@ -6380,7 +6532,7 @@ async function routeDroppedPaths(paths: string[]) {
 
   // ---- 有目录：展开预览后入待发清单（要确认的那一类）----
   if (preview.hasDirectory) {
-    await previewAndStage(paths, preview);
+    await previewAndStage(paths, preview, origin);
     return;
   }
 
@@ -6410,7 +6562,8 @@ async function routeDroppedPaths(paths: string[]) {
  */
 async function previewAndStage(
   paths: string[],
-  preview: Awaited<ReturnType<typeof FeisuoBridge.previewSendPaths>>
+  preview: Awaited<ReturnType<typeof FeisuoBridge.previewSendPaths>>,
+  origin: PathOrigin = "drop"
 ) {
   // 把跳过的项**说出来**。这是"用户拖了 3000 个文件只收到 20 个"的
   // 唯一解释来源 —— 静默跳过会让人以为是传输丢数据。
@@ -6434,7 +6587,7 @@ async function previewAndStage(
   // 用户刚拖完一个正常文件夹就被告知出错了，而实际上什么都没坏。
   // 红色的含义必须是"有事发生了"，而这件事恰恰是预期内的。
   showToast(
-    `拖入的内容含目录，已展开为 ${preview.fileCount} 个文件` +
+    `${origin === "input" ? "输入的路径含目录" : "拖入的内容含目录"}，已展开为 ${preview.fileCount} 个文件` +
       `（${formatBytes(preview.totalBytes)}）${skippedNote}。` +
       `确认后在待发清单点「发送」`
   );
@@ -9528,6 +9681,116 @@ function getFileIcon(name: string) {
   margin: 10px 0 18px;
 }
 .drop-cta-buttons { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+
+/* 6.1 路径直达（粘贴路径直接发送）
+ *
+ * 与上面的大拖放框**不能长得一样**：两者的关系是"或者"，而并列的两个
+ * 同样大的虚线框会让人以为要分别操作。所以这里是一张实底的小卡片，
+ * 视觉上明确从属于发送页。
+ */
+.path-input-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  transition: border-color 0.15s;
+}
+/* 有错误行时把整个卡片描红：错误提示在卡片内部，而用户的视线在输入框上，
+ * 只染红那一行小字，他会以为"没什么大事"。 */
+.path-input-card.has-error { border-color: var(--danger-border); }
+
+.path-input-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.path-input-head > i { color: var(--text-tertiary); }
+.path-input-title { font-weight: 650; color: var(--text-primary); }
+.path-input-hint {
+  color: var(--text-tertiary);
+  /* 说明是给"想知道能粘什么"的人看的，占满剩余宽度即可换行 */
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11.5px;
+}
+.path-input-hint code {
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+}
+
+.path-input-area {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 62px;
+  padding: 8px 10px;
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  /* 命令一样的东西用等宽字：路径里的 l / I / 1 在比例字体里分不开，
+   * 而用户是拿眼睛逐字核对路径的。 */
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.path-input-area::placeholder { color: var(--text-tertiary); }
+.path-input-area:focus { border-color: var(--accent-border); }
+.path-input-area:disabled { color: var(--text-tertiary); }
+
+.path-input-foot {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  /* 错误多的时候按钮必须还在原位，不能被列表挤走 */
+  justify-content: space-between;
+}
+.path-input-tip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  /* 与按钮第一行文字对齐（按钮 padding 9px + 13px 字） */
+  padding-top: 8px;
+}
+.path-input-errors {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 auto;
+  max-height: 96px;
+  overflow-y: auto;
+}
+.path-input-errors li {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--danger-text);
+  /* 长路径要能折行，而不是把卡片撑出横向滚动 */
+  overflow-wrap: anywhere;
+}
+.path-input-errors li > i { flex: 0 0 auto; margin-top: 2px; }
+.path-input-submit { flex: 0 0 auto; }
+
 
 .btn-fluent-primary {
   background: var(--accent);

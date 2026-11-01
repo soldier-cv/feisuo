@@ -1277,6 +1277,67 @@ pub struct SendPreviewDto {
     pub expanded: Vec<feisuo_core::storage::folder_scan::RootExpansion>,
 }
 
+/// 把用户**粘贴的一段路径文本**解析成可发送的路径清单。
+///
+/// ## 为什么这条命令存在
+///
+/// 从别处复制来的路径（资源管理器「复制为路径」、终端、脚本输出、文档）
+/// 目前只能靠"再打开文件对话框一层层点回去"才能发出去。这条命令让"粘贴
+/// 一串路径直接发"成为可能，而解析规则（引号、`file:///`、`%VAR%`、`~`、
+/// `\\?\`）与"路径是否存在"全部由 Rust 判定 —— 前端各写一套必然与
+/// `preview_send_paths` 的判断分叉，表现为"清单里好好的，一发就报不存在"。
+///
+/// ## 为什么逐行返回问题，而不是整批失败
+///
+/// `preview_send_paths` 遇到一个不存在的路径就返回 Err（它面向"拖进来的一批"，
+/// 那批来自一次拖放，要么都在要么都不在）。而粘贴的文本里混着几条失效路径
+/// 是常态 —— 一行笔误不该让其余几十行都发不出去。所以这里逐行给结论：
+/// 能用的进 `paths`，不能用的进 `problems`（带行号），前端把出错的几行
+/// 留在输入框里让用户改。
+#[tauri::command]
+pub async fn resolve_input_paths(text: String) -> Result<ResolvedInputPathsDto, String> {
+    // `Path::exists()` 是同步 stat：一次粘贴几十行就是几十次磁盘往返，
+    // 放进异步线程池，别占住 Tauri 的主线程。
+    let resolved = tauri::async_runtime::spawn_blocking(move || crate::input_paths::resolve(&text))
+        .await
+        .map_err(|e| format!("解析路径任务异常: {}", e))?;
+
+    Ok(ResolvedInputPathsDto {
+        paths: resolved.paths,
+        problems: resolved
+            .problems
+            .into_iter()
+            .map(|p| InputPathProblemDto {
+                line: p.line,
+                text: p.text,
+                reason: p.reason,
+            })
+            .collect(),
+    })
+}
+
+/// [`resolve_input_paths`] 的结果。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedInputPathsDto {
+    /// 解析成功且确实存在的路径（已按 Windows 语义去重）
+    pub paths: Vec<String>,
+    /// 没能解析成可用路径的行，**按行号**给用户
+    pub problems: Vec<InputPathProblemDto>,
+}
+
+/// 一行输入为什么不能用。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputPathProblemDto {
+    /// 1-based 行号
+    pub line: usize,
+    /// 归一化后的文本（用户能看到自己粘贴了什么）
+    pub text: String,
+    /// 给用户看的中文原因
+    pub reason: String,
+}
+
 /// 某台设备的全部已知端点（按"覆盖网优先"排序，§3.9 / P4 ⑧）。
 #[tauri::command]
 pub fn list_device_endpoints(

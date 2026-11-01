@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider 的可见范围：**只**放出 cache/updates 一个目录。
+
+  为什么是 cache 而不是外部存储：
+    1. 安装包是临时的，装完就该被系统回收，不需要用户一直留着几百 MB；
+    2. 外部存储目录要额外的读写权限，而这里一个都不需要；
+    3. 只暴露一个子目录，安装器之外的组件即使拿到 URI 也出不了这个圈。
+
+  路径必须与 `UpdateChecker.download` 的落点一致
+  （`File(context.cacheDir, "updates")`）——不一致时
+  `FileProvider.getUriForFile()` 会抛 `IllegalArgumentException: Failed to find configured root`。
+-->
+<paths>
+    <cache-path name="updates" path="updates/" />
+</paths>

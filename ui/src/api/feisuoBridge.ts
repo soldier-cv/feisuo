@@ -480,6 +480,24 @@ export interface RootExpansion {
   symlinksSkipped: number;
 }
 
+/** 粘贴一段路径文本后 Rust 侧的解析结果（`resolve_input_paths`）。 */
+export interface ResolvedInputPaths {
+  /** 解析成功且确实存在的路径（Rust 侧已按 Windows 语义去重） */
+  paths: string[];
+  /** 没能解析成可用路径的行，按行号给出原因 */
+  problems: InputPathProblem[];
+}
+
+/** 一行输入为什么不能用。 */
+export interface InputPathProblem {
+  /** 1-based 行号 —— 要在输入框里定位到那一行，所以给行号而不是路径 */
+  line: number;
+  /** 归一化之后的文本（用户能看到自己到底粘贴了什么） */
+  text: string;
+  /** 中文原因 */
+  reason: string;
+}
+
 /** 设备端点（多地址发现 / 路径选择，§3.9 / P4 ⑧） */
 export interface DeviceEndpoint {
   device_id: string;
@@ -1190,6 +1208,40 @@ export class FeisuoBridge {
         sample: [],
         expanded: [],
       })
+    );
+  }
+
+  /**
+   * 把用户粘贴的一段路径文本解析成可发送的路径清单。
+   *
+   * ## 为什么解析要在 Rust 侧做
+   *
+   * 引号、`file:///`、`%VAR%`、`~`、`\\?\` 以及"这个路径到底存不存在"
+   * 全是操作系统语义。前端自己写一套，迟早与 `previewSendPaths` /
+   * `send_files` 的判断分叉 —— 而分叉的表现是"清单里显示得挺好，一发
+   * 就报路径不存在"。
+   *
+   * ## 为什么逐行返回问题，而不是整批失败
+   *
+   * 粘贴进来的文本里混着几条失效路径是常态。`previewSendPaths` 遇到一个
+   * 不存在的路径就整批报错（它面向一次拖放），拿它处理粘贴文本会让
+   * **一行笔误害得其余几十行都发不出去**。这里能用的进 `paths`，
+   * 出错的进 `problems`（带行号），由界面把出错的行留在输入框里让用户改。
+   */
+  static async resolveInputPaths(text: string): Promise<ResolvedInputPaths> {
+    if (notInTauri()) {
+      // 原型模式没有真实文件系统可问：把每行原样当成路径交给上层，
+      // 上层照样会走到"无设备 → 进待发清单"的分支，行为上可接受。
+      const lines = text
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+      return { paths: lines, problems: [] };
+    }
+    return invokeSafe<ResolvedInputPaths>(
+      "resolve_input_paths",
+      { text },
+      () => ({ paths: [], problems: [] })
     );
   }
 

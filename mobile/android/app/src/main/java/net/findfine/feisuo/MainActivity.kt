@@ -25,6 +25,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONObject
+import java.io.File
 
 /**
  * 飞梭 Android 端主界面。
@@ -61,6 +62,18 @@ class MainActivity : Activity() {
     private var openDirButton: Button? = null
     private var notificationStatusView: TextView? = null
     private var notificationActionButton: Button? = null
+    private var updateStatusView: TextView? = null
+    private var updateCheckButton: Button? = null
+    /** 检查通过、下载前的一次点击；文本随状态在「下载并安装 / 立即安装」之间切换 */
+    private var updateActionButton: Button? = null
+    /** 已下载并校验通过、等待安装的更新包 */
+    private var pendingApk: File? = null
+    /** 检查出的新版本（下载时还要用它，例如体积与 tag 文案） */
+    private var pendingRelease: UpdateChecker.ReleaseInfo? = null
+    /** 用户被带去开「安装未知应用」权限，回到界面时要续上那次安装 */
+    private var awaitingUnknownSources = false
+    /** 检查更新是纯网络操作，但同样不能占主线程 */
+    private var updateThread: Thread? = null
     /** 引擎启动/配置读取都要跑在 core 的 tokio runtime 上, 不能在主线程做 */
     private var worker: Thread? = null
     /** 配对是网络操作, 绝不能在主线程跑(见 android_guard) */
@@ -78,6 +91,10 @@ class MainActivity : Activity() {
         startDaemonService()
         requestNotificationPermissionIfNeeded()
         updateNotificationStatus()
+
+        // 启动时静默检查一次：用户不会为了"看看有没有新版"主动点按钮，
+        // 而失败时**不打扰**（离线用户每次开应用都弹红条只会让人关掉通知）。
+        checkForUpdate(silent = true)
     }
 
     override fun onResume() {
@@ -86,6 +103,14 @@ class MainActivity : Activity() {
         // 只在 onCreate 查一次，用户改完设置回来看到的还是旧结论。
         // 这里只读系统服务，不碰任何阻塞的 core 接口。
         updateNotificationStatus()
+
+        // 同理：用户为了装更新去了「安装未知应用」授权页，回来后要把
+        // 刚才被打断的那次安装续上。不续的话，界面上明明写着"授权后即可继续"，
+        // 实际什么都没发生 —— 用户只能再点一次（而且不知道该点哪个）。
+        if (awaitingUnknownSources && ApkInstaller.canInstallPackages(this)) {
+            awaitingUnknownSources = false
+            pendingApk?.takeIf { it.isFile }?.let { installPendingApk(it) }
+        }
     }
 
     override fun onDestroy() {
@@ -202,6 +227,33 @@ class MainActivity : Activity() {
             setOnClickListener { startEngineAsync() }
         }
         root.addView(refresh, lp(top = dp(8)))
+
+        section("版本与更新")
+        addParagraph(
+            "在线升级直接从 Release 下载 APK（国内优先走 Gitee），" +
+                "下载完成会先校验签名，再由系统安装器完成安装 —— " +
+                "首次使用需要在系统的「安装未知应用」里允许一次。"
+        )
+        // 版本号来自 BuildConfig（源头是仓库根 Cargo.toml），与电脑端同一个版本号。
+        // 写死字符串的话，用户装了新版界面还显示旧版号，而且不报错。
+        addRow("当前版本", BuildConfig.VERSION_NAME)
+        updateStatusView = addRow("更新状态", "尚未检查")
+        val checkBtn = Button(this).apply {
+            text = "检查更新"
+            setOnClickListener { checkForUpdate(silent = false) }
+        }
+        updateCheckButton = checkBtn
+        root.addView(checkBtn, lp(top = dp(8)))
+
+        // 只在"确实有可做的事"时出现：没有新版本时挂一个灰按钮，
+        // 用户会反复点它并怀疑功能坏了。
+        val actionBtn = Button(this).apply {
+            text = "下载并安装"
+            visibility = View.GONE
+            setOnClickListener { downloadAndInstall() }
+        }
+        updateActionButton = actionBtn
+        root.addView(actionBtn, lp(top = dp(8)))
 
         section("随用随走 · 零后台")
         addParagraph(
@@ -484,6 +536,191 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             "解析失败"
         }
+    }
+
+    // ---------------------------------------------------------------- 在线升级
+
+    /**
+     * 检查是否有新版本。
+     *
+     * 全程后台线程：网络请求在弱网下可能卡满超时，主线程做这件事直接 ANR。
+     *
+     * @param silent 启动时自动检查传 true —— **失败不打扰**。离线用户每次
+     *        开应用都被弹一句"检查更新失败"，得到的结论是"这软件毛病多"，
+     *        而不是"我现在没网"。
+     */
+    private fun checkForUpdate(silent: Boolean) {
+        if (updateThread?.isAlive == true) return
+        updateCheckButton?.isEnabled = false
+        updateActionButton?.isEnabled = false
+        if (!silent) updateStatusView?.text = "正在检查…"
+
+        val t = Thread({
+            val result = runCatching { UpdateChecker.check(BuildConfig.VERSION_NAME) }
+                .getOrElse {
+                    UpdateChecker.CheckResult.Failed("检查更新失败：${it.message}")
+                }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                updateCheckButton?.isEnabled = true
+                applyCheckResult(result, silent)
+            }
+        }, "feisuo-update-check")
+        t.isDaemon = true
+        updateThread = t
+        t.start()
+    }
+
+    private fun applyCheckResult(result: UpdateChecker.CheckResult, silent: Boolean) {
+        when (result) {
+            is UpdateChecker.CheckResult.UpToDate -> {
+                pendingRelease = null
+                pendingApk = null
+                updateStatusView?.text = "已是最新版本 v${BuildConfig.VERSION_NAME}"
+                updateActionButton?.visibility = View.GONE
+            }
+
+            is UpdateChecker.CheckResult.Newer -> {
+                pendingRelease = result.release
+                updateStatusView?.text = "发现新版本 ${result.release.tagName}"
+                updateActionButton?.apply {
+                    visibility = View.VISIBLE
+                    isEnabled = true
+                    text = "下载并安装 ${result.release.tagName}"
+                }
+            }
+
+            is UpdateChecker.CheckResult.Failed -> {
+                pendingRelease = null
+                updateStatusView?.text = if (silent) "尚未检查" else result.message
+                if (!silent) toast(result.message)
+                updateActionButton?.visibility = View.GONE
+            }
+        }
+    }
+
+    /**
+     * 下载（下载完直接进入安装）。
+     *
+     * 一次点击走完"下载 → 校验 → 拉起系统安装器"：中间只让用户看进度，
+     * 不要求他再点一次 —— 多一次点击只会多一次"我点了怎么没反应"。
+     * 只有在系统要求授权「安装未知应用」时，才会真的打断一次。
+     */
+    private fun downloadAndInstall() {
+        val ready = pendingApk
+        if (ready != null && ready.isFile) {
+            installPendingApk(ready)
+            return
+        }
+        val release = pendingRelease ?: return
+
+        updateCheckButton?.isEnabled = false
+        updateActionButton?.isEnabled = false
+        updateStatusView?.text = "正在下载 ${release.tagName}…"
+
+        val t = Thread({
+            val dl = UpdateChecker.download(this, release) { received, total ->
+                // 回调在**下载线程**上，必须切回主线程再碰 View
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    updateStatusView?.text = "正在下载 ${release.tagName} · " +
+                        progressText(received, total)
+                }
+            }
+            // 解析 APK 也要读几百 KB 的 zip 目录，放后台线程做
+            val verifyError = if (dl is UpdateChecker.DownloadResult.Ok) {
+                ApkInstaller.verify(this, dl.file)
+            } else {
+                null
+            }
+
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                updateCheckButton?.isEnabled = true
+                when {
+                    dl is UpdateChecker.DownloadResult.Failed -> {
+                        updateStatusView?.text = dl.message
+                        updateActionButton?.apply {
+                            visibility = View.VISIBLE
+                            isEnabled = true
+                            text = "重试下载 ${release.tagName}"
+                        }
+                        toast(dl.message)
+                    }
+
+                    verifyError != null -> {
+                        // 校验失败时**不装**，并清掉这份包：留着它只会让下一次
+                        // "重试"复用一个错误的文件，错误会一直复现。
+                        pendingApk = null
+                        UpdateChecker.clearDownloads(this)
+                        updateStatusView?.text = verifyError
+                        updateActionButton?.apply {
+                            visibility = View.VISIBLE
+                            isEnabled = true
+                            text = "重新下载 ${release.tagName}"
+                        }
+                        toast(verifyError)
+                    }
+
+                    else -> {
+                        val file = (dl as UpdateChecker.DownloadResult.Ok).file
+                        pendingApk = file
+                        updateStatusView?.text = "${release.tagName} 已下载并校验通过"
+                        updateActionButton?.apply {
+                            visibility = View.VISIBLE
+                            isEnabled = true
+                            text = "立即安装"
+                        }
+                        installPendingApk(file)
+                    }
+                }
+            }
+        }, "feisuo-update-download")
+        t.isDaemon = true
+        updateThread = t
+        t.start()
+    }
+
+    /**
+     * 把更新包交给系统安装器。
+     *
+     * 「安装未知应用」没开时**先带用户去开**，并记下这次被打断的安装 ——
+     * 回到界面由 [onResume] 续上。直接拉起安装器在那种状态下是
+     * `SecurityException` 或什么都不发生，两种都不该让用户看到。
+     */
+    private fun installPendingApk(apk: File) {
+        if (!ApkInstaller.canInstallPackages(this)) {
+            awaitingUnknownSources = true
+            updateStatusView?.text = "需要允许「安装未知应用」，授权后回到飞梭会自动继续"
+            if (!ApkInstaller.openUnknownSourcesSettings(this)) {
+                awaitingUnknownSources = false
+                toast("请到「设置 → 应用 → 飞梭 → 安装未知应用」里允许后重试")
+            }
+            return
+        }
+        val err = ApkInstaller.startInstall(this, apk)
+        if (err != null) {
+            updateStatusView?.text = err
+            toast(err)
+        } else {
+            updateStatusView?.text = "已交给系统安装器，按系统提示完成安装"
+        }
+    }
+
+    private fun progressText(received: Long, total: Long): String {
+        val got = formatMegabytes(received)
+        return if (total > 0) {
+            val pct = (received * 100 / total).coerceIn(0, 100)
+            "$pct%（$got / ${formatMegabytes(total)}）"
+        } else {
+            got
+        }
+    }
+
+    private fun formatMegabytes(bytes: Long): String = when {
+        bytes >= 1024 * 1024 -> String.format("%.1f MB", bytes / (1024.0 * 1024.0))
+        bytes >= 1024 -> String.format("%.0f KB", bytes / 1024.0)
+        else -> "$bytes B"
     }
 
     // ---------------------------------------------------------------- 引擎与服务
