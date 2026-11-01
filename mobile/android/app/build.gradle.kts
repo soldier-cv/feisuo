@@ -59,7 +59,17 @@ fun secretFrom(fileKey: String, envKey: String): String? {
     return null
 }
 
-val releaseStorePath = secretFrom("storeFile", "FEISUO_KEYSTORE")
+// 密钥路径的解析基准：**一律用 mobile/android/ 这个模块根**，与 keystore.properties 里
+// `storeFile=` 的相对语义一致。不要直接 `file(x)` —— 在 app/build.gradle.kts 里它相对 app/，
+// 于是"文件明明在"也会判成不存在（2026-11-01 CI 因此误报"缺少密钥"）。
+val androidModuleDir = rootProject.projectDir
+fun resolveKeystore(raw: String?): File? {
+    if (raw.isNullOrBlank()) return null
+    val f = File(raw)
+    return if (f.isAbsolute) f else androidModuleDir.resolve(raw)
+}
+
+val releaseStoreFile = resolveKeystore(secretFrom("storeFile", "FEISUO_KEYSTORE"))
 val releaseStorePass = secretFrom("storePassword", "FEISUO_KEYSTORE_PASSWORD")
 val releaseKeyAlias = secretFrom("keyAlias", "FEISUO_KEY_ALIAS")
 val releaseKeyPass = secretFrom("keyPassword", "FEISUO_KEY_PASSWORD")
@@ -69,8 +79,8 @@ val releaseKeyPass = secretFrom("keyPassword", "FEISUO_KEY_PASSWORD")
 // 报错发生在用户手机上（INSTALL_PARSE_FAILED_NO_CERTIFICATES），
 // 比构建期报错难查得多。
 val hasReleaseKeystore = listOf(
-    releaseStorePath, releaseStorePass, releaseKeyAlias, releaseKeyPass
-).all { !it.isNullOrBlank() } && file(releaseStorePath ?: "").exists()
+    releaseStoreFile?.path, releaseStorePass, releaseKeyAlias, releaseKeyPass
+).all { !it.isNullOrBlank() } && (releaseStoreFile?.isFile == true)
 
 // 发布流水线必须带正式密钥：置 FEISUO_REQUIRE_RELEASE_KEYSTORE=true 后，缺失即失败。
 // 本地开发不设这个变量，仍可回退 debug 签名自测（产物带 -debugkey 标记）。
@@ -79,6 +89,9 @@ val requireReleaseKeystore = System.getenv("FEISUO_REQUIRE_RELEASE_KEYSTORE")
 if (requireReleaseKeystore && !hasReleaseKeystore) {
     throw GradleException(
         "[feisuo] 发布构建缺少 release 签名密钥。" +
+        "当前解析到的密钥路径=$releaseStoreFile（存在=${releaseStoreFile?.exists() ?: false}），" +
+        "口令已配=${!releaseStorePass.isNullOrBlank()}，别名=[${releaseKeyAlias ?: ""}], " +
+        "keyPassword 已配=${!releaseKeyPass.isNullOrBlank()}。" +
         "CI 需要 secrets: FEISUO_KEYSTORE_B64 / FEISUO_KEYSTORE_PASSWORD / FEISUO_KEY_PASSWORD " +
         "与 vars: FEISUO_KEY_ALIAS（配置见 docs/ANDROID-SIGNING.md）。" +
         "不允许用 debug 密钥发版 —— 那样每个 runner 的证书都不同，已装用户永远升级不上。"
@@ -182,7 +195,7 @@ android {
     signingConfigs {
         if (hasReleaseKeystore) {
             create("release") {
-                storeFile = file(releaseStorePath!!)
+                storeFile = releaseStoreFile!!
                 storePassword = releaseStorePass
                 keyAlias = releaseKeyAlias
                 keyPassword = releaseKeyPass

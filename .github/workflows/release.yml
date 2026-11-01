@@ -304,8 +304,10 @@ jobs:
           }
           $jks = Join-Path (Get-Location) 'feisuo-release.jks'
           [IO.File]::WriteAllBytes($jks, [Convert]::FromBase64String($env:FEISUO_KEYSTORE_B64))
+          if ((Get-Item $jks).Length -lt 1000) { throw "keystore 落盘异常（$((Get-Item $jks).Length) 字节）——检查 FEISUO_KEYSTORE_B64 是否被截断" }
+          # 写绝对路径：Gradle 侧虽然也能解析相对路径，但绝对路径不存在任何解析基准歧义
           $props = @(
-            "storeFile=feisuo-release.jks",
+            "storeFile=$jks",
             "storePassword=$env:FEISUO_KEYSTORE_PASSWORD",
             "keyAlias=$env:FEISUO_KEY_ALIAS",
             "keyPassword=$env:FEISUO_KEY_PASSWORD"
@@ -318,7 +320,7 @@ jobs:
         working-directory: mobile/android
         env:
           FEISUO_REQUIRE_RELEASE_KEYSTORE: 'true'
-          FEISUO_KEYSTORE: feisuo-release.jks
+          FEISUO_KEYSTORE: ${{ github.workspace }}\mobile\android\feisuo-release.jks
           FEISUO_KEYSTORE_PASSWORD: ${{ secrets.FEISUO_KEYSTORE_PASSWORD }}
           FEISUO_KEY_ALIAS: ${{ vars.FEISUO_KEY_ALIAS }}
           FEISUO_KEY_PASSWORD: ${{ secrets.FEISUO_KEY_PASSWORD }}
