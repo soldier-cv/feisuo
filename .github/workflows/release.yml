@@ -282,16 +282,71 @@ jobs:
           if (-not (Test-Path $so)) { throw "原生库缺失: $so" }
           Write-Host "OK $so ($([math]::Round((Get-Item $so).Length/1MB,2)) MB)"
 
+      # 正式签名密钥落位 + 闸门 A：没有密钥直接失败，绝不回退 debug 签名。
+      # 背景：0.1.17 → 0.1.18 两次发版签名不同，用户端表现为"更新失败/装不上"。
+      # 根因就是这一步缺失 —— CI 上没有 release keystore，Gradle 回退临时 debug 密钥，
+      # 每个 runner 的 debug 密钥都不同，于是每一版换一次签名。
+      - name: Materialize Android release keystore
+        shell: pwsh
+        working-directory: mobile/android
+        env:
+          FEISUO_KEYSTORE_B64: ${{ secrets.FEISUO_KEYSTORE_B64 }}
+          FEISUO_KEYSTORE_PASSWORD: ${{ secrets.FEISUO_KEYSTORE_PASSWORD }}
+          FEISUO_KEY_ALIAS: ${{ vars.FEISUO_KEY_ALIAS }}
+          FEISUO_KEY_PASSWORD: ${{ secrets.FEISUO_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($n in @('FEISUO_KEYSTORE_B64','FEISUO_KEYSTORE_PASSWORD','FEISUO_KEY_ALIAS','FEISUO_KEY_PASSWORD')) {
+            $v = [Environment]::GetEnvironmentVariable($n)
+            if ([string]::IsNullOrWhiteSpace($v)) {
+              throw "缺少 $n（release 流水线不允许回退 debug 签名；配置见 docs/ANDROID-SIGNING.md）"
+            }
+          }
+          $jks = Join-Path (Get-Location) 'feisuo-release.jks'
+          [IO.File]::WriteAllBytes($jks, [Convert]::FromBase64String($env:FEISUO_KEYSTORE_B64))
+          $props = @(
+            "storeFile=feisuo-release.jks",
+            "storePassword=$env:FEISUO_KEYSTORE_PASSWORD",
+            "keyAlias=$env:FEISUO_KEY_ALIAS",
+            "keyPassword=$env:FEISUO_KEY_PASSWORD"
+          ) -join "`n"
+          Set-Content -LiteralPath (Join-Path (Get-Location) 'keystore.properties') -Value $props -Encoding ascii -NoNewline
+          Write-Host "keystore 已就位：$jks ($((Get-Item $jks).Length) 字节)"
+
       - name: Build Android release APK
         shell: pwsh
         working-directory: mobile/android
+        env:
+          FEISUO_REQUIRE_RELEASE_KEYSTORE: 'true'
+          FEISUO_KEYSTORE: feisuo-release.jks
+          FEISUO_KEYSTORE_PASSWORD: ${{ secrets.FEISUO_KEYSTORE_PASSWORD }}
+          FEISUO_KEY_ALIAS: ${{ vars.FEISUO_KEY_ALIAS }}
+          FEISUO_KEY_PASSWORD: ${{ secrets.FEISUO_KEY_PASSWORD }}
         run: |
           $ver = '${{ steps.ver.outputs.version }}'
           .\gradlew.bat assembleRelease --console=plain
           if ($LASTEXITCODE -ne 0) { throw "assembleRelease 失败" }
+          # 闸门 A：产物文件名带 -debugkey 即说明回退到了 debug 签名 —— 直接失败，
+          # 这种包能被"装上去"但永远无法被正式版覆盖升级，等于给用户埋一个装不上的坑。
+          $bad = Get-ChildItem 'app/build/outputs/apk/release' -Filter '*debugkey*.apk' -ErrorAction SilentlyContinue
+          if ($bad) { throw "产物使用了 debug 签名（$($bad[0].Name)）—— 拒绝发布" }
+
+          # 闸门 B：证书指纹必须等于固化值。换密钥 = 所有已装用户升级失败，绝不允许无意发生。
           $apk = Get-ChildItem 'app/build/outputs/apk/release' -Filter *.apk -ErrorAction SilentlyContinue |
                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $apk) { throw '没找到 Release APK 产物' }
+          $expected = '02d2ad432970812f55e6e71b89a42d32548c9fe4781940958b7f3c51913ef71f'
+          $bt = Get-ChildItem (Join-Path $env:ANDROID_SDK_ROOT 'build-tools') -Directory |
+                Sort-Object { [version]($_.Name -replace '[^0-9.].*$','') } | Select-Object -Last 1
+          $apksigner = Join-Path $bt.FullName 'apksigner.bat'
+          if (-not (Test-Path $apksigner)) { $apksigner = Join-Path $bt.FullName 'apksigner' }
+          $out = & $apksigner verify --print-certs $apk.FullName 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "apksigner 校验失败：$out" }
+          $m = [regex]::Match($out, 'SHA-256 digest:\s*([0-9a-fA-F]+)')
+          if (-not $m.Success) { throw "无法从 apksigner 输出解析证书指纹：$out" }
+          $fp = $m.Groups[1].Value.ToLower()
+          if ($fp -ne $expected) { throw "签名证书指纹不符：实际 $fp，期望 $expected —— 拒绝发布" }
+          Write-Host "签名校验通过：$fp"
 
           $destDir = (Resolve-Path '../../publish').Path
           if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Force -Path $destDir | Out-Null }

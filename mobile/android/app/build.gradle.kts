@@ -34,10 +34,15 @@ plugins {
 //      两者都**不入库**（密钥进仓库 = 谁都能冒充你发更新）。
 //   2. **没有密钥也照样能出可安装的 APK** —— 回退到 debug 签名。
 //
-// 第 2 点是刻意的：把"没配密钥"做成**构建失败**是常见的坏做法，
-// 它让人以为 release 构建坏了，而实际问题只是"你还没创建密钥"。
+// 第 2 点**只适用于本地开发**。发布流水线（GitHub Actions）里没有密钥必须**构建失败**：
+// 0.1.17 → 0.1.18 就是因为 CI 上没有正式密钥、静默回退到 runner 临时 debug 密钥，
+// 每版换一次签名，已装用户全部升级失败（INSTALL_FAILED_UPDATE_INCOMPATIBLE）。
+// 现在由环境变量 `FEISUO_REQUIRE_RELEASE_KEYSTORE=true` 控制（CI 置 true → 缺密钥直接失败）。
+//
+// 旧的考虑是：把"没配密钥"做成**构建失败**会让人以为 release 构建坏了，
+// 而实际问题只是"你还没创建密钥"。
 // 能不能正式分发是**发布时**的决定，不是构建时该拦下来的事。
-// 为了让产物不���被误当正式版，文件名与产物目录都会带 `-debugkey` 标记。
+// 为了让产物不被误当正式版，文件名与产物目录都会带 `-debugkey` 标记。
 // ---------------------------------------------------------------------------
 val keystorePropsFile = rootProject.file("keystore.properties")
 val keystoreProps = Properties().apply {
@@ -66,6 +71,19 @@ val releaseKeyPass = secretFrom("keyPassword", "FEISUO_KEY_PASSWORD")
 val hasReleaseKeystore = listOf(
     releaseStorePath, releaseStorePass, releaseKeyAlias, releaseKeyPass
 ).all { !it.isNullOrBlank() } && file(releaseStorePath ?: "").exists()
+
+// 发布流水线必须带正式密钥：置 FEISUO_REQUIRE_RELEASE_KEYSTORE=true 后，缺失即失败。
+// 本地开发不设这个变量，仍可回退 debug 签名自测（产物带 -debugkey 标记）。
+val requireReleaseKeystore = System.getenv("FEISUO_REQUIRE_RELEASE_KEYSTORE")
+    ?.equals("true", ignoreCase = true) == true
+if (requireReleaseKeystore && !hasReleaseKeystore) {
+    throw GradleException(
+        "[feisuo] 发布构建缺少 release 签名密钥。" +
+        "CI 需要 secrets: FEISUO_KEYSTORE_B64 / FEISUO_KEYSTORE_PASSWORD / FEISUO_KEY_PASSWORD " +
+        "与 vars: FEISUO_KEY_ALIAS（配置见 docs/ANDROID-SIGNING.md）。" +
+        "不允许用 debug 密钥发版 —— 那样每个 runner 的证书都不同，已装用户永远升级不上。"
+    )
+}
 
 if (!hasReleaseKeystore) {
     logger.lifecycle(

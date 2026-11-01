@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [0.1.19] — 2026-11-01
+
+### 修复
+
+- **Android 正式签名固化，修复"新版本装不上"**：0.1.17 与 0.1.18 的 APK 分别由两把不同的 **Android Debug** 证书签名（`2c0fe7cf…` / `c6e3541d…`），而 Android 只允许同证书覆盖安装，因此升级一律 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`。根因是发布流水线从未持有正式签名密钥：`release.yml` 构建 APK 时没有注入 keystore，`app/build.gradle.kts` 在缺密钥时**静默回退 debug 签名**，而 GitHub Actions runner 的 debug 密钥每次都是临时生成的 —— 等于每发一版换一次证书。
+  - 新增正式签名密钥（RSA 4096 / 10000 天 / 别名 `feisuo`），证书 SHA-256 固化为 `02d2ad432970812f55e6e71b89a42d32548c9fe4781940958b7f3c51913ef71f`，密钥只存 CI Secret，不入库。
+  - `release.yml` 新增「Materialize Android release keystore」步骤：缺 `FEISUO_KEYSTORE_B64` / `FEISUO_KEYSTORE_PASSWORD` / `FEISUO_KEY_ALIAS` / `FEISUO_KEY_PASSWORD` 任一项即失败，不再产出 debug 签名包。
+  - 出包后两道闸：产物名出现 `-debugkey` 标记直接失败；`apksigner verify --print-certs` 的证书 SHA-256 必须等于固化值，不符拒绝发布。
+  - `build.gradle.kts` 新增 `FEISUO_REQUIRE_RELEASE_KEYSTORE=true` 开关：发布环境缺密钥在配置期抛 `GradleException`；本地开发不设该变量，仍可用 debug 签名自测。
+  - 配置与排查说明见新增文档 `docs/ANDROID-SIGNING.md`。
+
+  > **升级须知（仅本次）**：历史各版均由临时 debug 密钥签名，无可继承的签名，需**卸载旧版后手动安装 0.1.19 一次**；此后同密钥发布，可正常覆盖升级。
+
 ## [0.1.18] — 2026-11-01
 
 ### 新增
