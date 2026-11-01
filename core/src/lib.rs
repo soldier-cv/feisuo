@@ -705,6 +705,7 @@ impl FeisuoEngine {
                 resume_key.as_deref().unwrap_or(""),
                 &label,
                 "send",
+                target_device_id,
                 target_device_name,
                 target_ip,
                 total_size,
@@ -797,6 +798,7 @@ impl FeisuoEngine {
                     &label,
                     bytes_recorded,
                     "send",
+                    target_device_id,
                     target_device_name,
                     target_ip,
                     status,
@@ -978,8 +980,23 @@ impl FeisuoEngine {
         self.trust_store.list_transfer_records(limit)
     }
 
+    /// 只取与某一台设备有关的传输记录（`peer_device_id` 传空串 = 全部）。
+    pub fn list_transfer_records_for(
+        &self,
+        peer_device_id: &str,
+        limit: u32,
+    ) -> Result<Vec<TransferRecord>> {
+        self.trust_store
+            .list_transfer_records_for(peer_device_id, limit)
+    }
+
     pub fn clear_transfer_records(&self) -> Result<()> {
         self.trust_store.clear_transfer_records()
+    }
+
+    /// 只清空某一台设备的传输记录（`peer_device_id` 传空串 = 全部）。
+    pub fn clear_transfer_records_for(&self, peer_device_id: &str) -> Result<()> {
+        self.trust_store.clear_transfer_records_for(peer_device_id)
     }
 
     pub fn list_trusted_devices(&self) -> Result<Vec<TrustedDevice>> {

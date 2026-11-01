@@ -3105,6 +3105,7 @@ fn test_transfer_history_retention_policy() {
                 &format!("f{}.bin", i),
                 i as u64,
                 if i % 2 == 0 { "send" } else { "recv" },
+                "",
                 "peer",
                 "127.0.0.1",
                 "completed",
@@ -3131,9 +3132,64 @@ fn test_transfer_history_retention_policy() {
 }
 
 // ==============================================================
-// 22. 传输记录: 发起即记账, 收尾改成终态
+// 21b. 传输记录可以按设备过滤 —— 「记录」页只看当前设备
 // ==============================================================
 //
+// ## 这组测试在防什么
+//
+// 用户在侧栏点中了某一台电脑，「传输记录」页却混着全机所有设备的条目，
+// 就没法回答"我和这台电脑之间传过什么"。过滤键必须是 `peer_device_id`
+// （Ed25519 派生的指纹）而不是名字 —— 名字能改，改完历史就"换主"了。
+//
+// 同时锁住**清空的范围**：用户筛选到某台设备再点"清空记录"，
+// 只能清掉那一台 —— 顺手清掉别的设备的账本是数据丢失。
+#[test]
+fn test_transfer_records_are_scoped_per_device() {
+    let dir = temp_dir("history-scope");
+    let store = TrustStore::open_at(dir.join("trust_store.db")).unwrap();
+
+    for (peer_id, name) in [("dev-a", "笔记本"), ("dev-b", "手机")] {
+        store
+            .add_transfer_record(
+                &format!("{}.bin", peer_id),
+                1,
+                "send",
+                peer_id,
+                name,
+                "10.0.0.1",
+                "completed",
+                500,
+                30,
+                feisuo_core::security::TransferMetrics::default(),
+                &[],
+            )
+            .expect("写入历史");
+    }
+
+    let all = store.list_transfer_records(100).unwrap();
+    assert_eq!(all.len(), 2, "空范围 = 全部设备");
+
+    let only_a = store.list_transfer_records_for("dev-a", 100).unwrap();
+    assert_eq!(only_a.len(), 1, "只应拿到 dev-a 的记录");
+    assert_eq!(only_a[0].peer_device_id, "dev-a");
+    assert_eq!(only_a[0].file_name, "dev-a.bin");
+
+    // 清空一台设备不能波及另一台
+    store.clear_transfer_records_for("dev-a").unwrap();
+    let rest = store.list_transfer_records(100).unwrap();
+    assert_eq!(rest.len(), 1, "清 dev-a 不应删掉 dev-b");
+    assert_eq!(rest[0].peer_device_id, "dev-b");
+
+    // 空指纹 = 清全部（设置页那一栏的语义）
+    store.clear_transfer_records_for("").unwrap();
+    assert!(store.list_transfer_records(100).unwrap().is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ==============================================================
+// 22. 传输记录: 发起即记账, 收尾改成终态
+// ==============================================================//
 // ## 这组测试在防什么
 //
 // 用户报的现象: 传一个几百 MB 的文件，中途切到「记录」页，那里**空的**。
@@ -3161,6 +3217,7 @@ fn test_transfer_record_starts_at_launch_and_settles() {
             "tid-1",
             "big.bin",
             "send",
+            "",
             "peer",
             "127.0.0.1",
             9_000,
@@ -3203,7 +3260,7 @@ fn test_transfer_record_starts_at_launch_and_settles() {
 
     // 删掉正在跑的那行（协商回合 / 提前放弃）
     let pending_id = store
-        .begin_transfer_record("tid-2", "x.bin", "send", "peer", "127.0.0.1", 1, &[], 500, 30)
+        .begin_transfer_record("tid-2", "x.bin", "send", "", "peer", "127.0.0.1", 1, &[], 500, 30)
         .unwrap();
     store.discard_running_transfer_record(pending_id).unwrap();
     assert!(
@@ -3225,7 +3282,7 @@ fn test_stale_running_records_are_failed_on_reopen() {
     {
         let store = TrustStore::open_at(db.clone()).unwrap();
         store
-            .begin_transfer_record("tid-stale", "half.bin", "recv", "peer", "127.0.0.1", 100, &[], 500, 30)
+            .begin_transfer_record("tid-stale", "half.bin", "recv", "", "peer", "127.0.0.1", 100, &[], 500, 30)
             .unwrap();
         // 不调用 finish —— 模拟进程被强杀 / 断电
     }
@@ -3249,7 +3306,7 @@ fn test_running_record_is_never_trimmed_by_history_limit() {
 
     // 正在跑的那条先建，后面再灌满已完成记录
     store
-        .begin_transfer_record("tid-live", "live.bin", "send", "peer", "127.0.0.1", 1, &[], 2, 30)
+        .begin_transfer_record("tid-live", "live.bin", "send", "", "peer", "127.0.0.1", 1, &[], 2, 30)
         .unwrap();
     for i in 0..5 {
         store
@@ -3257,6 +3314,7 @@ fn test_running_record_is_never_trimmed_by_history_limit() {
                 &format!("done{}.bin", i),
                 1,
                 "send",
+                "",
                 "peer",
                 "127.0.0.1",
                 "completed",

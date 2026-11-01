@@ -73,6 +73,20 @@ object NativeBridge {
     fun configJson(): String = if (loaded) (nativeGetConfigJson() ?: "") else ""
 
     /**
+     * 修改本机设备名（会写进 config、广播给局域网内的对端）。
+     *
+     * 消毒与落盘全在 core 侧（`engine_host::set_device_name`）：
+     * 设备名同时决定"对端看到的我"和"对端传输记录里那一行"，两端的
+     * 判断规则只允许有一份，否则同一个名字在手机和电脑上会得到不同结论。
+     *
+     * @return null 表示成功; 非 null 为可展示的中文失败原因。
+     */
+    fun setDeviceName(name: String): String? {
+        if (!loaded) return "引擎未启动"
+        return nativeSetDeviceName(name)
+    }
+
+    /**
      * 已配对设备的 JSON 数组快照 (供系统分享流程挑选推送目标)。
      * 引擎未启动或读取失败时返回 "[]", 不会是 null。
      */
@@ -151,6 +165,7 @@ object NativeBridge {
     private external fun nativeIsEngineRunning(): Int
     private external fun nativeGetDeviceId(): String?
     private external fun nativeGetConfigJson(): String?
+    private external fun nativeSetDeviceName(name: String): String?
     private external fun nativeGetTrustedDevicesJson(): String?
     private external fun nativeProbeDevice(ip: String): String?
     private external fun nativePairWithDevice(ip: String, port: Int, pin: String): String?

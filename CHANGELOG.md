@@ -4,6 +4,27 @@
 
 ## [Unreleased]
 
+## [0.1.17] — 2026-11-01
+
+### 新增
+
+- **传输记录只看当前设备（`core/src/security/trust_store.rs` + `desktop/src-tauri/src/commands.rs` + `ui/src/App.vue`）**：侧栏已经点中某台电脑，「传输记录」页却混着全机所有设备的条目，用户无法回答"我和它之间传过什么"。现在记录落库时多存一列 `peer_device_id`（Ed25519 派生的指纹：名字能改、IP 会变，都不适合当过滤键），`get_transfer_history` / `clear_transfer_history` 都按它收窄；记录页顶部新增「当前设备 / 全部设备」切换，默认跟随侧栏选中的设备。
+  - 老库通过 `ensure_column` 补列并留空串，读取侧对空指纹的记录退化成"按信任库里这台设备的当前名字匹配" —— 升级后历史不会凭空消失。
+  - **看到的范围等于清掉的范围**：筛选到某台设备时「清空记录」只清那一台；设置页的「清空记录」仍是全部，两处文案各自写明。
+  - 新增用例 `test_transfer_records_are_scoped_per_device`：按设备过滤只返回本设备的记录、清一台不波及另一台、空范围仍是全部。
+- **Android 端「打开接收目录」与设备名可修改（`MainActivity.kt` + `NativeBridge.kt` + `core/src/mobile.rs`）**：收到的文件以前只能靠文件管理器一层层点进 `/sdcard/Download/feisuo`。现在主界面直接给出「保存位置」和「打开接收目录」，依次尝试外部存储目录 document URI、存储根 URI、`ACTION_OPEN_DOCUMENT_TREE` 三种 intent（"打开文件夹"在 Android 上没有唯一标准），都不可用时明确报出路径。
+  - 目录与设备名都**从配置读**，不写死：用户在电脑端改过收件目录/设备名时，手机上显示的仍是真实值。私有目录（无外部存储权限时的 `/data/...`）会明说文件管理器打不开，而不是点了没反应。
+  - 设备名的消毒、长度与空串判定只在 core（`engine_host::set_device_name`）实现一份，宿主只负责提交并显示中文错误；写配置是阻塞 JNI，一律走后台线程（`android_guard` 的 `BLOCKING_METHODS` 已补上 `setDeviceName`）。
+
+### 优化
+
+- **Android 前台通知写明设备名，并在授权后补挂（`FeisuoDaemonService.kt`）**：通知栏是用户判断"飞梭还开着吗"的唯一可见证据，但文案此前是固定的，局域网里两台手机的通知长得一模一样。现在通知带上本机设备名（改名后立即重挂），主界面新增「通知栏」状态行 —— 同时检查运行时权限、应用级开关与通知渠道三层 —— 不可用时给出「开启通知 / 去系统设置开启」的对应入口。
+  - Android 13+ 在通知权限**授予之前**发出的通知会被系统丢弃且不会补发，所以授权成功、改名成功都会重挂一次常驻通知；不然用户点了"允许"却依然什么都看不到。
+
+### 修复
+
+- **Windows 托盘左键单击无效 / 窗口闪一下（`desktop/src-tauri/src/tray.rs`）**：`tray-icon` 0.25 在 Windows 上对 `WM_LBUTTONDOWN` 与 `WM_LBUTTONUP` **各发一次** `Click` 事件，两次切换互相抵消，表现就是"点一下窗口闪一下又收回去"。现在只响应 `button_state == Up` 的事件，并加 400ms 节流吸收双击；顺带把显示/隐藏逻辑抽成 `toggle_main()`，右键菜单路径不受影响（它本来就只在 `WM_RBUTTONUP` 触发）。
+
 ## [0.1.16] — 2026-10-30
 
 ### 修复

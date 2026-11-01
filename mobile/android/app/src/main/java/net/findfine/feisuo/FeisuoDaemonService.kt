@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
@@ -32,20 +33,57 @@ class FeisuoDaemonService : Service() {
 
     companion object {
         private const val TAG = "FeisuoDaemonService"
-        private const val CHANNEL_ID = "feisuo_daemon_channel"
+        /** 常驻通知渠道。MainActivity 读它检查"通知是否被关掉" */
+        const val CHANNEL_ID = "feisuo_daemon_channel"
         private const val ACTION_CHANNEL_ID = "feisuo_approval_channel"
         private const val NOTIFICATION_ID = 42100
         private const val APPROVAL_NOTIFICATION_ID_BASE = 42110
         private const val ACTION_STOP = "net.findfine.feisuo.action.STOP_DAEMON"
+        /** 重挂一次常驻通知: 通知权限刚授予 / 设备名刚改完时需要 */
+        const val ACTION_REFRESH = "net.findfine.feisuo.action.REFRESH_NOTIFICATION"
         private const val ACTION_ALLOW = "net.findfine.feisuo.action.ALLOW"
         private const val ACTION_REJECT = "net.findfine.feisuo.action.REJECT"
         private const val EXTRA_APPROVAL_ID = "approval_id"
+        /** 改名后随刷新通知一起带进来，省一次阻塞的配置读取 */
+        private const val EXTRA_DEVICE_NAME = "device_name"
+
+        /**
+         * 让运行中的服务重挂一次常驻通知。
+         *
+         * 为什么必须重挂: Android 13+ 在通知权限**授予之前**发的通知会被丢弃，
+         * 授权之后系统不会补发。不重挂的话用户明明点了"允许"，通知栏里
+         * 却什么都没有 —— 于是他以为应用没在跑，转头又来问"到底开着没"。
+         * 服务已在前台运行时 `startService` 不会触发 12+ 的后台启动限制。
+         *
+         * @param deviceName 传了就同时更新通知里的设备名（用户刚改完名）。
+         */
+        fun refreshNotification(context: Context, deviceName: String? = null) {
+            try {
+                val i = Intent(context, FeisuoDaemonService::class.java)
+                    .setAction(ACTION_REFRESH)
+                    .apply {
+                        if (!deviceName.isNullOrBlank()) putExtra(EXTRA_DEVICE_NAME, deviceName)
+                    }
+                context.startService(i)
+            } catch (e: Exception) {
+                Log.w(TAG, "刷新常驻通知失败: ${e.message}")
+            }
+        }
     }
 
     private var multicastLock: MulticastLock? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     /** 审批监听线程; 停止服务时必须结束它, 否则它会一直占着引擎句柄 */
     private var approvalThread: Thread? = null
+    /**
+     * 引擎就绪后读到的本机设备名。
+     *
+     * 通知文案要在用户改名后立刻跟着变 —— 每次重挂通知都去读一次配置
+     * 意味着阻塞 JNI，而通知的刷新入口分散在主线程（onStartCommand），
+     * 所以这里只缓存，改名时由调用方显式刷新。
+     */
+    @Volatile
+    private var cachedDeviceName: String = ""
 
     override fun onCreate() {
         super.onCreate()
@@ -200,6 +238,14 @@ class FeisuoDaemonService : Service() {
                 FeisuoRuntime.ensureStarted(ctx)
                 if (FeisuoRuntime.isEngineRunning()) {
                     Log.i(TAG, "core 引擎就绪, 自连待命中")
+                    // 通知栏是用户判断"飞梭还开着吗"的唯一地方。
+                    // 引擎起来之前只能写静态文案，现在把真实设备名补上去 ——
+                    // 否则同一局域网里三台手机的通知长得一模一样。
+                    cachedDeviceName = runCatching {
+                        org.json.JSONObject(NativeBridge.configJson())
+                            .optString("device_name")
+                    }.getOrDefault("")
+                    refreshPersistentNotification()
                     // 引擎就绪是"稍后重试"承诺的第一个兑现时机: 之前分享
                     // 失败而暂存下来的文件, 在这里补发。
                     runCatching { ShareDispatcher.retryPending(ctx) }
@@ -235,6 +281,15 @@ class FeisuoDaemonService : Service() {
         ) {
             val id = intent.getStringExtra(EXTRA_APPROVAL_ID).orEmpty()
             if (id.isNotEmpty()) resolveApproval(id, ACTION_ALLOW == intent.action)
+            return START_NOT_STICKY
+        }
+        // 通知权限刚授予 / 设备名刚改完: 重挂一次常驻通知。
+        // onCreate 已经挂过一次，但那时可能还没有权限（通知被系统丢弃）。
+        if (intent != null && ACTION_REFRESH == intent.action) {
+            intent.getStringExtra(EXTRA_DEVICE_NAME)
+                ?.takeIf { it.isNotBlank() }
+                ?.let { cachedDeviceName = it }
+            refreshPersistentNotification()
             return START_NOT_STICKY
         }
         if (intent != null && ACTION_STOP == intent.action) {
@@ -329,9 +384,17 @@ class FeisuoDaemonService : Service() {
         // 用户点通知会触发 IntentSenderRecord.sendInner 里的 NPE 而崩溃。
         val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
 
+        // 文案里带上**本机设备名**：局域网里同时开着两台手机时，
+        // 只写"飞梭局域网互传已就绪"根本分不清通知属于哪一台。
+        val contentText = if (cachedDeviceName.isNotBlank()) {
+            getString(R.string.notification_text_named, cachedDeviceName)
+        } else {
+            getString(R.string.notification_text)
+        }
+
         return builder
             .setContentTitle(getString(R.string.notification_title))
-            .setContentText(getString(R.string.notification_text))
+            .setContentText(contentText)
             // TODO: 工程补齐 res/drawable 后应替换为应用自有的单色矢量图标,
             //       框架内置图标在状态栏会被系统着色变形
             // 应用自有的纯白单色矢量图标。
@@ -358,6 +421,21 @@ class FeisuoDaemonService : Service() {
             )
             .setOngoing(true)
             .build()
+    }
+
+    /**
+     * 用同一条 id 重挂常驻通知（内容变了而不重挂，用户看到的还是旧文案）。
+     *
+     * 从后台线程调用是安全的：`NotificationManager.notify` 不要求主线程，
+     * 而引擎就绪后确实是在 worker 线程上读到设备名的。
+     */
+    private fun refreshPersistentNotification() {
+        try {
+            getSystemService(NotificationManager::class.java)
+                ?.notify(NOTIFICATION_ID, buildPersistentNotification())
+        } catch (e: Exception) {
+            Log.w(TAG, "重挂常驻通知失败: ${e.message}")
+        }
     }
 
     private fun acquireMulticastLock() {

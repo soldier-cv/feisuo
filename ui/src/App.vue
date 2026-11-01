@@ -1316,11 +1316,52 @@
                 <h2>传输记录 <i class="ph ph-question" title="速度按纯数据传输耗时计算，已排除审批与落盘等待"></i></h2>
               </div>
               <div class="header-actions">
+                <!--
+                  范围切换。默认「当前设备」：用户在侧栏点中某台电脑之后，
+                  这里就该只剩与它之间的记录。保留「全部设备」是为了
+                  让被隐藏/解除配对的设备留下过的历史仍然看得到。
+                -->
+                <div
+                  v-if="store.roster.length > 0"
+                  class="history-scope-switch"
+                  role="group"
+                  aria-label="传输记录范围"
+                >
+                  <button
+                    type="button"
+                    class="history-scope-btn"
+                    :class="{ active: historyScope === 'device' }"
+                    :aria-pressed="historyScope === 'device'"
+                    :title="`只看与「${historyScopeName}」之间的传输`"
+                    @click="historyScope = 'device'"
+                  >
+                    当前设备
+                  </button>
+                  <button
+                    type="button"
+                    class="history-scope-btn"
+                    :class="{ active: historyScope === 'all' }"
+                    :aria-pressed="historyScope === 'all'"
+                    title="显示所有设备的传输记录"
+                    @click="historyScope = 'all'"
+                  >
+                    全部设备
+                  </button>
+                </div>
                 <!-- 诊断报告导出：复现问题后把这份文件交给开发者即可定位瓶颈（§9.7） -->
                 <button class="btn-clear-history" @click="exportDiagnostics">
                   <i class="ph ph-file-arrow-down"></i> 导出诊断报告
                 </button>
-                <button class="btn-clear-history" @click="clearHistory" v-if="transferLogs.length > 0">
+                <button
+                  class="btn-clear-history"
+                  @click="clearHistory"
+                  v-if="transferLogs.length > 0"
+                  :title="
+                    historyScopeDeviceId
+                      ? `清空与「${historyScopeName}」的传输记录`
+                      : '清空全部传输记录'
+                  "
+                >
                   <i class="ph ph-trash"></i> 清空记录
                 </button>
               </div>
@@ -1388,7 +1429,13 @@
               </div>
               <div v-if="transferLogs.length === 0" class="empty-log-box">
                 <i class="ph ph-tray"></i>
-                <span>暂无传输记录</span>
+                <span v-if="historyScopeDeviceId">
+                  与「{{ historyScopeName }}」暂无传输记录
+                </span>
+                <span v-else>暂无传输记录</span>
+                <span v-if="historyScopeDeviceId" class="empty-log-hint">
+                  换一台设备，或切到「全部设备」查看本机所有记录
+                </span>
               </div>
             </div>
 
@@ -1656,7 +1703,7 @@
               <div class="setting-desc-text">
                 <strong title="清空所有历史传输记录">清空记录</strong>
               </div>
-              <button class="btn-fluent-secondary danger-action" @click="clearHistory">
+              <button class="btn-fluent-secondary danger-action" @click="clearAllHistory">
                 <i class="ph ph-trash"></i> 清空
               </button>
             </div>
@@ -2759,6 +2806,22 @@ const selectedLocalNames = ref<Set<string>>(new Set());
 const selectedRemoteNames = ref<Set<string>>(new Set());
 
 const transferLogs = ref<TransferRecord[]>([]);
+/**
+ * 「传输记录」的范围。
+ *
+ * 默认按**当前选中的设备**过滤：用户已经在侧栏点中某台电脑，
+ * 「记录」页却混着全机所有设备的条目，就没法回答"我和它之间传过什么"。
+ *
+ * 仍然保留「全部设备」：设备被隐藏或解除配对之后，用户还需要一个
+ * 地方能看到那些历史 —— 记录本身不会因为设备从名册消失而消失。
+ */
+const historyScope = ref<"device" | "all">("device");
+/** 记录页真正的过滤目标；空串 = 全部设备。 */
+const historyScopeDeviceId = computed(() =>
+  historyScope.value === "device" ? store.selectedDevice?.device_id || "" : ""
+);
+/** 空态文案里要说出"跟谁没有记录"，否则用户分不清是没传过还是筛选错了。 */
+const historyScopeName = computed(() => store.selectedDevice?.device_name || "当前设备");
 /** 最近诊断（含归因）。默认**不展开** —— 见模板里的说明。 */
 const diagnostics = ref<import("./api/feisuoBridge").TransferDiagnostic[]>([]);
 const showDiagnostics = ref(false);
@@ -4485,7 +4548,10 @@ function resetRemotePath() {
 
 async function loadTransferHistory() {
   try {
-    transferLogs.value = await FeisuoBridge.getTransferHistory(200);
+    transferLogs.value = await FeisuoBridge.getTransferHistory(
+      200,
+      historyScopeDeviceId.value
+    );
   } catch (e) {
     showToast(FeisuoBridge.describeError(e, "读取传输记录失败"), true);
   }
@@ -4505,7 +4571,10 @@ async function loadTransferHistory() {
 /** 只刷传输记录本身（不含诊断），供传输进行中的轮询使用。 */
 async function refreshTransferLogsOnly() {
   try {
-    transferLogs.value = await FeisuoBridge.getTransferHistory(200);
+    transferLogs.value = await FeisuoBridge.getTransferHistory(
+      200,
+      historyScopeDeviceId.value
+    );
   } catch {
     // 轮询失败静默：这是后台刷新，弹红条只会打断用户正在看的页面。
   }
@@ -4544,6 +4613,13 @@ function clearHistoryPolling() {
   }
 }
 watch([() => currentTab.value, runningCount], () => syncHistoryPolling());
+
+// 切换设备或范围后立刻重拉：否则列表还留着上一台设备的记录，
+// 而标题写着"当前设备"，用户会以为这些就是当前设备的。
+// 只在记录页刷新 —— 别的页签切回来时 `watch(currentTab)` 已经会拉一次。
+watch([() => store.selectedDevice?.device_id, historyScope], () => {
+  if (currentTab.value === "log") void loadTransferHistory();
+});
 
 function toggleDiagnostics() {
   showDiagnostics.value = !showDiagnostics.value;
@@ -4677,11 +4753,32 @@ async function exportDiagnostics() {
   }
 }
 
+/**
+ * 清空**当前范围**的传输记录（记录页用）。
+ *
+ * 范围与列表一致：筛选到某台设备时只清它的，用户点"清空记录"期望的
+ * 就是"把眼前这张表清掉"，不是"把全机的账本删掉"。
+ */
 async function clearHistory() {
+  try {
+    await FeisuoBridge.clearTransferHistory(historyScopeDeviceId.value);
+    transferLogs.value = [];
+    showToast(
+      historyScopeDeviceId.value
+        ? `已清空与「${historyScopeName.value}」的传输记录`
+        : "已清空传输历史记录"
+    );
+  } catch (e) {
+    showToast(FeisuoBridge.describeError(e, "清空记录失败"), true);
+  }
+}
+
+/** 清空**所有设备**的记录（设置页用；那里写的就是"清空所有历史传输记录"）。 */
+async function clearAllHistory() {
   try {
     await FeisuoBridge.clearTransferHistory();
     transferLogs.value = [];
-    showToast("已清空传输历史记录");
+    showToast("已清空全部传输历史记录");
   } catch (e) {
     showToast(FeisuoBridge.describeError(e, "清空记录失败"), true);
   }
@@ -9913,6 +10010,27 @@ function getFileIcon(name: string) {
 }
 .btn-clear-history:hover { color: var(--danger-text); }
 
+/* 记录范围切换：两个互斥选项，做成紧凑的分段控件。
+ * 用边框而不是背景色块区分，避免在深色主题里显得比内容还重。 */
+.history-scope-switch {
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.history-scope-btn {
+  background: none;
+  border: 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 3px 10px;
+}
+.history-scope-btn + .history-scope-btn { border-left: 1px solid var(--border-subtle); }
+.history-scope-btn:hover { color: var(--text-primary); }
+.history-scope-btn.active { color: var(--accent-text); background: var(--accent-soft); font-weight: 600; }
+
 .log-entries-list { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
 .log-entry-row {
   display: flex;
@@ -9957,6 +10075,8 @@ function getFileIcon(name: string) {
   font-size: 13px;
 }
 .empty-log-box i { font-size: 32px; }
+/* 空态的第二行：只解释"为什么是空的/还能去哪看"，比主文案更弱 */
+.empty-log-hint { font-size: 11.5px; color: var(--text-tertiary); }
 
 /* ---- 最近诊断（默认折叠的次级小节）----
  *

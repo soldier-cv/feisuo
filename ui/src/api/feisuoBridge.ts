@@ -72,6 +72,13 @@ export interface TransferRecord {
   peer_name: string;
   peer_ip: string;
   /**
+   * 对端设备指纹（Ed25519 派生的 `device_id`）。
+   *
+   * 空串 = 升级前写入的老记录，后端会退化成按 `peer_name` 匹配。
+   * 它是**过滤键**，不是展示字段 —— 界面要显示 `peer_name`。
+   */
+  peer_device_id?: string;
+  /**
    * `running` = **已经发起、还没结束**。
    *
    * 记录不再是"传完才写"：发起时就落一行，收尾改成终态。用户中途
@@ -1310,8 +1317,25 @@ export class FeisuoBridge {
     return invokeSafe<number>("get_session_grant_window", undefined, () => 0);
   }
 
-  static async getTransferHistory(limit?: number): Promise<TransferRecord[]> {
-    return invokeSafe<TransferRecord[]>("get_transfer_history", { limit: limit ?? null }, () => []);
+  /**
+   * 最近 N 条传输记录。
+   *
+   * `deviceId` 非空时只取**与这台设备**有关的记录：界面已经选中了某台电脑，
+   * 「传输记录」页却混着全机所有设备的条目，用户无法回答"我和它传过什么"。
+   * 传空/省略 = 全部设备（已配对设备被隐藏或删除后，历史仍然要能看到）。
+   *
+   * 过滤依据是 `peer_device_id`（Ed25519 派生的指纹，重新配对之外恒定），
+   * 而不是名字或 IP —— 名字能改、IP 会变，用它们过滤会让历史"换主"。
+   */
+  static async getTransferHistory(
+    limit?: number,
+    deviceId?: string
+  ): Promise<TransferRecord[]> {
+    return invokeSafe<TransferRecord[]>(
+      "get_transfer_history",
+      { limit: limit ?? null, deviceId: deviceId || null },
+      () => []
+    );
   }
 
   /**
@@ -1330,8 +1354,19 @@ export class FeisuoBridge {
     );
   }
 
-  static async clearTransferHistory(): Promise<boolean> {
-    return invokeSafe<boolean>("clear_transfer_history", undefined, () => true);
+  /**
+   * 清空传输记录。
+   *
+   * `deviceId` 非空时只清这台设备的 —— **看到的范围必须等于清掉的范围**：
+   * 用户筛选到某台设备后点「清空记录」，结果把别的设备的账本一起删掉，
+   * 那是数据丢失，不是"顺手清干净"。
+   */
+  static async clearTransferHistory(deviceId?: string): Promise<boolean> {
+    return invokeSafe<boolean>(
+      "clear_transfer_history",
+      { deviceId: deviceId || null },
+      () => true
+    );
   }
 
   // ------------------------------------------------------------------ 配置

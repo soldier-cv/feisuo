@@ -51,6 +51,12 @@ pub struct TransferRecord {
     pub direction: String,
     pub peer_name: String,
     pub peer_ip: String,
+    /// 对端设备指纹（Ed25519 派生的 `device_id`）。
+    ///
+    /// 空串 = 旧版本写入的记录（那时还没有这一列），读取侧会退化成
+    /// 按 `peer_name` 匹配。**不要**把它当展示字段：界面要显示名字。
+    #[serde(default)]
+    pub peer_device_id: String,
     pub status: String,
     pub created_at: i64,
     pub time_formatted: String,
@@ -461,6 +467,27 @@ impl TrustStore {
         Self::ensure_column(conn, "transfer_history", "transfer_id", "TEXT NOT NULL DEFAULT ''")?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_transfer_history_tid ON transfer_history(transfer_id)",
+            [],
+        )?;
+
+        // ---- v3：传输记录的**对端设备指纹** ----
+        //
+        // 为什么必须有这一列: 「传输记录」页此前只能显示全机所有设备的记录。
+        // 用户已经选中了某台设备，看记录时却混着别的设备的条目，
+        // 只能靠 `peer_name` 让人用肉眼分辨 —— 而设备名可以改、也可能重名。
+        //
+        // 只按 `peer_name` / `peer_ip` 过滤都不成立:
+        //   * 名字可以在设置里改 ⇒ 改名之前的历史会突然"不属于"这台设备;
+        //   * IP 会随 DHCP 变化 ⇒ 换一次网段就认不出来。
+        // `device_id`（Ed25519 指纹派生）在重新配对之外恒定不变。
+        //
+        // 老库补列时统一给空串。读取侧对空串的记录退化成按
+        // `peer_name` 匹配（见 `list_transfer_records_for`）——
+        // 升级前留下的历史不至于凭空消失。
+        Self::ensure_column(conn, "transfer_history", "peer_device_id", "TEXT NOT NULL DEFAULT ''")?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_transfer_history_peer
+                 ON transfer_history(peer_device_id)",
             [],
         )?;
 
@@ -1117,6 +1144,7 @@ impl TrustStore {
         file_name: &str,
         bytes_transferred: u64,
         direction: &str,
+        peer_device_id: &str,
         peer_name: &str,
         peer_ip: &str,
         status: &str,
@@ -1132,8 +1160,8 @@ impl TrustStore {
             "INSERT INTO transfer_history
                 (file_name, file_size, direction, peer_name, peer_ip, status, created_at,
                  declared_size, duration_active_ms, duration_wall_ms, duration_verify_ms,
-                 over_overlay, connect_ms, file_paths)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                 over_overlay, connect_ms, file_paths, peer_device_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 file_name,
                 bytes_transferred as i64,
@@ -1149,6 +1177,7 @@ impl TrustStore {
                 if metrics.over_overlay { 1 } else { 0 },
                 metrics.connect_ms as i64,
                 paths_json,
+                peer_device_id,
             ],
         )?;
 
@@ -1179,6 +1208,7 @@ impl TrustStore {
         transfer_id: &str,
         file_name: &str,
         direction: &str,
+        peer_device_id: &str,
         peer_name: &str,
         peer_ip: &str,
         declared_size: u64,
@@ -1193,8 +1223,8 @@ impl TrustStore {
             "INSERT INTO transfer_history
                 (transfer_id, file_name, file_size, direction, peer_name, peer_ip, status, created_at,
                  declared_size, duration_active_ms, duration_wall_ms, duration_verify_ms,
-                 over_overlay, connect_ms, file_paths)
-             VALUES (?1, ?2, 0, ?3, ?4, ?5, 'running', ?6, ?7, 0, 0, 0, 0, 0, ?8)",
+                 over_overlay, connect_ms, file_paths, peer_device_id)
+             VALUES (?1, ?2, 0, ?3, ?4, ?5, 'running', ?6, ?7, 0, 0, 0, 0, 0, ?8, ?9)",
             params![
                 transfer_id,
                 file_name,
@@ -1204,6 +1234,7 @@ impl TrustStore {
                 now,
                 declared_size as i64,
                 paths_json,
+                peer_device_id,
             ],
         )?;
         let row_id = conn.last_insert_rowid();
@@ -1353,14 +1384,58 @@ impl TrustStore {
     }
 
     pub fn list_transfer_records(&self, limit: u32) -> Result<Vec<TransferRecord>> {
+        self.query_transfer_records(limit, None)
+    }
+
+    /// 只取**与某一台设备**有关的传输记录。
+    ///
+    /// ## 为什么还要看 `peer_name`
+    ///
+    /// `peer_device_id` 是升级后才有的列，老记录的该列是空串。
+    /// 只按指纹过滤会让用户升级后立刻看到"历史全没了"，那比混着别的
+    /// 设备更难解释。所以空指纹的记录退化成按名字匹配 —— 名字取
+    /// **信任库里这台设备的当前名字**，用子查询取，调用方不必再传。
+    /// 未配对过的设备（信任库里没有）自然匹配不到老记录，这是可接受的。
+    pub fn list_transfer_records_for(
+        &self,
+        peer_device_id: &str,
+        limit: u32,
+    ) -> Result<Vec<TransferRecord>> {
+        if peer_device_id.trim().is_empty() {
+            return self.list_transfer_records(limit);
+        }
+        self.query_transfer_records(limit, Some(peer_device_id))
+    }
+
+    fn query_transfer_records(
+        &self,
+        limit: u32,
+        peer_device_id: Option<&str>,
+    ) -> Result<Vec<TransferRecord>> {
         let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, file_name, file_size, direction, peer_name, peer_ip, status, created_at,
-                    declared_size, duration_active_ms, duration_wall_ms, duration_verify_ms,
-                    over_overlay, connect_ms, file_paths, transfer_id
-             FROM transfer_history ORDER BY id DESC LIMIT ?1"
-        )?;
-        let rows = stmt.query_map(params![limit], |row| {
+        // 两种范围共用同一段 SELECT / 行映射，避免"过滤版本忘了加新列"
+        // 那种一旦只有一处漏改就很难被发现的漂移。
+        let sql = match peer_device_id {
+            Some(_) => {
+                "SELECT id, file_name, file_size, direction, peer_name, peer_ip, status, created_at,
+                        declared_size, duration_active_ms, duration_wall_ms, duration_verify_ms,
+                        over_overlay, connect_ms, file_paths, transfer_id, peer_device_id
+                 FROM transfer_history
+                 WHERE peer_device_id = ?1
+                    OR (peer_device_id = ''
+                        AND peer_name = (SELECT device_name FROM trusted_devices
+                                          WHERE device_id = ?1))
+                 ORDER BY id DESC LIMIT ?2"
+            }
+            None => {
+                "SELECT id, file_name, file_size, direction, peer_name, peer_ip, status, created_at,
+                        declared_size, duration_active_ms, duration_wall_ms, duration_verify_ms,
+                        over_overlay, connect_ms, file_paths, transfer_id, peer_device_id
+                 FROM transfer_history ORDER BY id DESC LIMIT ?1"
+            }
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let map_row = |row: &rusqlite::Row<'_>| {
             let id: i64 = row.get(0)?;
             let file_name: String = row.get(1)?;
             let file_size_i64: i64 = row.get(2)?;
@@ -1379,6 +1454,7 @@ impl TrustStore {
             let paths_json = row.get::<_, Option<String>>(14)?.unwrap_or_else(|| "[]".to_string());
             let file_paths: Vec<String> = serde_json::from_str(&paths_json).unwrap_or_default();
             let transfer_id = row.get::<_, Option<String>>(15)?.unwrap_or_default();
+            let peer_device_id = row.get::<_, Option<String>>(16)?.unwrap_or_default();
 
             let size_formatted = format_bytes(file_size);
             let dt = chrono::DateTime::from_timestamp(created_at, 0)
@@ -1396,6 +1472,7 @@ impl TrustStore {
                 direction,
                 peer_name,
                 peer_ip,
+                peer_device_id,
                 status,
                 created_at,
                 time_formatted,
@@ -1410,11 +1487,22 @@ impl TrustStore {
             };
             let speed_display = rec.speed_display();
             Ok(TransferRecord { speed_display, ..rec })
-        })?;
+        };
 
         let mut list = Vec::new();
-        for r in rows {
-            list.push(r?);
+        match peer_device_id {
+            Some(pid) => {
+                let rows = stmt.query_map(params![pid, limit], map_row)?;
+                for r in rows {
+                    list.push(r?);
+                }
+            }
+            None => {
+                let rows = stmt.query_map(params![limit], map_row)?;
+                for r in rows {
+                    list.push(r?);
+                }
+            }
         }
         Ok(list)
     }
@@ -1422,6 +1510,27 @@ impl TrustStore {
     pub fn clear_transfer_records(&self) -> Result<()> {
         let conn = self.conn();
         conn.execute("DELETE FROM transfer_history", [])?;
+        Ok(())
+    }
+
+    /// 清空**某一台设备**的传输记录。
+    ///
+    /// 与 [`Self::list_transfer_records_for`] 用同一套匹配规则：
+    /// 界面看到什么范围，点"清空记录"清掉的就得是同一批 ——
+    /// 否则用户只是想清掉一台设备的记录，结果把全机的账本都删了。
+    pub fn clear_transfer_records_for(&self, peer_device_id: &str) -> Result<()> {
+        if peer_device_id.trim().is_empty() {
+            return self.clear_transfer_records();
+        }
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM transfer_history
+             WHERE peer_device_id = ?1
+                OR (peer_device_id = ''
+                    AND peer_name = (SELECT device_name FROM trusted_devices
+                                      WHERE device_id = ?1))",
+            params![peer_device_id],
+        )?;
         Ok(())
     }
 

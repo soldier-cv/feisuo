@@ -218,6 +218,46 @@ pub fn config_json(handle: i64) -> String {
     }
 }
 
+/// 修改本机设备名（Android 宿主用）。
+///
+/// ## 为什么逻辑放在这里而不是 Kotlin
+///
+/// 设备名会写进 `config.json`、广播到整个局域网、并成为对端传输记录里的
+/// `peer_name`。消毒规则（控制字符 / 长度上限 / 空串）只允许存在一份，
+/// 否则宿主与桌面端会对同一个名字给出两种判断。所以消毒与落盘都走
+/// core，Kotlin 只负责把用户敲的字交进来、把中文错误显示出去。
+///
+/// 返回 `Err(可展示的中文原因)`。写入顺序是"先落盘再换内存"：
+/// 落盘失败时运行中的配置保持原样，不会出现"界面上是新的、重启后变回去"。
+///
+/// 设备名**不是**所有东西都立刻跟着变：发现信标每轮都重新读配置
+/// （`discovery::build_beacon`），所以最长一个广播周期内对端就会看到新名字；
+/// 而已经写进历史与信任库的旧名字是历史事实，不回写。
+pub fn set_device_name(handle: i64, raw: &str) -> std::result::Result<(), String> {
+    let Some(engine) = engine_for_handle(handle) else {
+        return Err("引擎未启动".to_string());
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("设备名称不能为空".to_string());
+    }
+    let cleaned = crate::config::sanitize_device_name(trimmed);
+    // 输入全是非法字符时, 消毒会退化成默认名 —— 必须报错而不是
+    // 静默把用户的设备改名成"飞梭设备"(那种"我明明改了却变回去"最费解)。
+    if cleaned == "飞梭设备" && trimmed != "飞梭设备" {
+        return Err("设备名称含有无效字符 (控制字符 / 纯空白)".to_string());
+    }
+    let app_dir = engine.app_dir.clone();
+    runtime().block_on(async {
+        let mut cfg = engine.config.write().await;
+        let mut next = cfg.clone();
+        next.device_name = cleaned;
+        next.save_in(&app_dir).map_err(|e| format!("保存配置失败: {}", e))?;
+        *cfg = next;
+        Ok(())
+    })
+}
+
 /// 强制清空单例, 让同一进程内可以反复测启动/停止。
 ///
 /// **仅供集成测试使用。** 用 `#[doc(hidden)]` 而不是 `#[cfg(test)]`:

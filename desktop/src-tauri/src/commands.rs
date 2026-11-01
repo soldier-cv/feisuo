@@ -901,20 +901,42 @@ pub async fn open_log_folder(state: State<'_, AppState>) -> Result<(), String> {
     open_in_explorer(&state.engine.app_dir.join("logs"))
 }
 
+/// 最近 N 条传输记录。
+///
+/// `device_id` 非空时只返回**与这台设备**有关的记录 —— 界面已经选中了
+/// 某台设备，「传输记录」页却混着全机所有设备的条目，用户无法回答
+/// "我和这台电脑之间传过什么"。
+///
+/// 老库里的记录没有 `peer_device_id`（升级前写的），core 侧会退化成
+/// 按设备名匹配，因此升级后历史不会凭空消失。
 #[tauri::command]
 pub fn get_transfer_history(
     limit: Option<u32>,
+    device_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Vec<feisuo_core::TransferRecord>, String> {
     let limit = limit.unwrap_or(200);
-    state.engine.list_transfer_records(limit).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn clear_transfer_history(state: State<'_, AppState>) -> Result<bool, String> {
+    let scope = device_id.unwrap_or_default();
     state
         .engine
-        .clear_transfer_records()
+        .list_transfer_records_for(&scope, limit)
+        .map_err(|e| e.to_string())
+}
+
+/// 清空传输记录。
+///
+/// `device_id` 非空时只清这台设备的 —— **看到的范围与清掉的范围必须一致**：
+/// 用户筛选了某台设备再点「清空记录」，结果把别的设备的账本一起删掉，
+/// 是数据丢失，不是"顺手清干净"。
+#[tauri::command]
+pub fn clear_transfer_history(
+    device_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let scope = device_id.unwrap_or_default();
+    state
+        .engine
+        .clear_transfer_records_for(&scope)
         .map_err(|e| e.to_string())?;
     Ok(true)
 }

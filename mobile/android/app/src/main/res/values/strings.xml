@@ -5,6 +5,7 @@
     <string name="daemon_channel_desc">保持 Wi-Fi 组播监听与文件接收通道，锁屏期间可用</string>
     <string name="notification_title">飞梭局域网互传已就绪</string>
     <string name="notification_text">局域网待命中 · 锁屏状态下可正常接收</string>
+    <string name="notification_text_named">%1$s · 局域网待命中 · 锁屏也能接收</string>
     <string name="action_stop_daemon">停止待命</string>
     <string name="approval_channel_name">文件接收确认</string>
     <string name="approval_channel_desc">未配对设备请求发送文件时提醒你确认</string>

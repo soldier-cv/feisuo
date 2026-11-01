@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager,
 };
 use tracing::{info, warn};
@@ -110,26 +110,75 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if let tauri::tray::TrayIconEvent::Click {
-                button: tauri::tray::MouseButton::Left,
+            // ❌ 这里曾经写的是 `if let Click { button: Left, .. } = event { 切换面板 }`,
+            //    **完全忽略 button_state**, 结果左键单击只会"闪一下"、面板打不开。
+            //
+            //    原因在 tray-icon 的 Windows 实现里: WM_LBUTTONDOWN 与 WM_LBUTTONUP
+            //    各自映射成一条 TrayIconEvent::Click, 只有 button_state 不同
+            //    (Down / Up)。于是**一次物理点击会进这个回调两次**:
+            //      第 1 次 Down → 窗口还隐藏着 → show_main() 把面板弹出来
+            //      第 2 次 Up   → 刚弹出来的窗口 is_visible() == true → hide()
+            //    肉眼看到的就是面板一闪即没。右键不受影响, 因为菜单是在
+            //    WM_RBUTTONUP 这一条路径上弹的(tray-icon 内部只认那一条)。
+            //
+            //    修法有两层: ① 只认抬起(Up), 按下不动 —— 一次物理点击 = 一次切换,
+            //    与 Windows 任务栏/托盘"抬键才响应"的惯例一致;
+            //    ② 再加 400ms 节流 —— 双击在 Windows 上的消息序列是
+            //    Down/Up/DBLCLK/Up, 两条 Up 照样会"弹出→收起"闪一下。
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
                 ..
             } = event
             {
-                let app = tray.app_handle();
-                if let Some(window) = app.get_webview_window("main") {
-                    let is_visible = window.is_visible().unwrap_or(false);
-                    let is_minimized = window.is_minimized().unwrap_or(false);
-                    if is_visible && !is_minimized {
-                        let _ = window.hide();
-                    } else {
-                        show_main(app);
-                    }
+                if !allow_tray_toggle() {
+                    return;
                 }
+                toggle_main(tray.app_handle());
             }
         })
         .build(app)?;
 
     Ok(())
+}
+
+/// 距上一次托盘切换不足这个间隔的重复事件一律丢弃。
+/// 窗口的显示/隐藏是"有反作用"的操作, 连做两次等于什么也没做,
+/// 用户只会看到一闪 —— 所以宁可吞掉双击的后半截。
+const TRAY_TOGGLE_THROTTLE: std::time::Duration = std::time::Duration::from_millis(400);
+
+static LAST_TRAY_TOGGLE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// 本次左键事件是否值得执行切换（节流）。
+fn allow_tray_toggle() -> bool {
+    let now = std::time::Instant::now();
+    // 锁中毒说明上一次持锁的线程 panic 了, 这里没有不变量需要保护,
+    // 取回内部值继续用即可, 绝不因为中毒就永久屏蔽托盘点击。
+    let mut last = match LAST_TRAY_TOGGLE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(prev) = *last {
+        if now.duration_since(prev) < TRAY_TOGGLE_THROTTLE {
+            return false;
+        }
+    }
+    *last = Some(now);
+    true
+}
+
+/// 左键语义: 面板在前台就收回到托盘, 否则唤出。
+fn toggle_main(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let is_visible = window.is_visible().unwrap_or(false);
+    let is_minimized = window.is_minimized().unwrap_or(false);
+    if is_visible && !is_minimized {
+        let _ = window.hide();
+    } else {
+        show_main(app);
+    }
 }
 
 /// 唤出并聚焦主窗口。

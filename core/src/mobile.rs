@@ -123,6 +123,36 @@ pub extern "system" fn Java_net_findfine_feisuo_NativeBridge_nativeGetConfigJson
     new_jstring(&mut env, &value)
 }
 
+/// 修改本机设备名。
+///
+/// 对应 Kotlin: `NativeBridge.nativeSetDeviceName(name: String): String?`
+///
+/// 返回 `null` 表示成功; 非 null 是可展示的中文失败原因。
+/// 与 `nativePairWithDevice` 一样统一成"成功 null / 失败文案"，
+/// 宿主不需要靠返回值形状去猜结果。
+#[no_mangle]
+pub extern "system" fn Java_net_findfine_feisuo_NativeBridge_nativeSetDeviceName<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    name: JString<'local>,
+) -> jstring {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let raw: String = env
+            .get_string(&name)
+            .map_err(|e| format!("读取设备名参数失败: {}", e))?
+            .into();
+        host::set_device_name(host::current_handle(), &raw)
+    }));
+    match result {
+        Ok(Ok(())) => std::ptr::null_mut(),
+        Ok(Err(msg)) => new_jstring(&mut env, &msg),
+        Err(_) => {
+            host::log_error("修改设备名时发生 panic, 已在 FFI 边界拦截");
+            new_jstring(&mut env, "修改设备名时发生内部错误")
+        }
+    }
+}
+
 /// 取下一个待审批请求 (最多等待 timeoutMs 毫秒); 没有则返回 null。
 ///
 /// 对应 Kotlin: `NativeBridge.nativeNextApproval(timeoutMs: Int): String?`

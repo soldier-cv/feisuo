@@ -45,6 +45,9 @@ const BLOCKING_METHODS: &[&str] = &[
     "trustedDevicesJson",
     "configJson",
     "deviceId",
+    // 内部是 `runtime().block_on(...)` 写配置: 一次同步落盘,
+    // 放主线程在慢盘 / 省电模式下会掉帧甚至 ANR。
+    "setDeviceName",
 ];
 
 /// **间接**阻塞入口: 这些宿主方法内部会走到阻塞的 core 接口。
