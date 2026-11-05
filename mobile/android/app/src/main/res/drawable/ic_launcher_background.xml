@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  启动图标背景层：深海军蓝 + 中心偏上的墨绿辉光。
+  与桌面端品牌图标（#0b1322 底 + 绿色描边）保持一致；
+  自适应图标会被裁切，所以这里不画外框，只铺满底色和光晕。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path android:pathData="M0,0 H108 V108 H0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="54"
+                android:centerY="34"
+                android:gradientRadius="88"
+                android:type="radial">
+                <item
+                    android:color="#FF153A30"
+                    android:offset="0" />
+                <item
+                    android:color="#FF0C1A20"
+                    android:offset="0.58" />
+                <item
+                    android:color="#FF0B1322"
+                    android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

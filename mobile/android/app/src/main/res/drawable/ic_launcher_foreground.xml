@@ -1,6 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
 <!--
-  启动图标前景: 白色"飞梭"标志。
-  108x108 画布, 内容限制在中间 72x72 安全区内 (即 18~90)。
+  启动图标前景层：与桌面端 desktop/src-tauri/icons/icon.svg 同一架纸飞机。
+
+  108x108 画布，内容全部落在中间 66x66 安全区（21~87）内 ——
+  启动器会按圆形 / 圆角方形 / 方形裁切，超出安全区的部分会被切掉。
+  颜色也直接沿用桌面端：深绿 #047857、暗绿 #06523C、白 #FFFFFF、亮绿 #00DC82。
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
@@ -8,21 +12,20 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- 纸飞机主体 -->
+    <!-- 上侧机翼 -->
+    <path
+        android:fillColor="#FF047857"
+        android:pathData="M81.64,26.36 L23.28,62.20 L44.78,56.04 Z" />
+    <!-- 下侧机翼 -->
+    <path
+        android:fillColor="#FF06523C"
+        android:pathData="M81.64,26.36 L51.96,63.22 L45.80,84.72 Z" />
+    <!-- 白色折面 -->
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M54,30 L78,40 L54,50 L30,40 Z" />
+        android:pathData="M81.64,26.36 L44.78,56.04 L32.50,75.50 Z" />
+    <!-- 亮绿折面 -->
     <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M36,50 L54,58 L54,80 L36,66 Z" />
-    <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M72,50 L54,58 L54,80 L72,66 Z" />
-    <!-- 尾部速度线 -->
-    <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M40,72 L50,78 L50,81 L40,75 Z" />
-    <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M48,80 L56,85 L56,88 L48,83 Z" />
+        android:fillColor="#FF00DC82"
+        android:pathData="M81.64,26.36 L32.50,75.50 L51.96,63.22 Z" />
 </vector>

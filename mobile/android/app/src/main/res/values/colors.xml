@@ -1,7 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#0E9A6E</color>
-    <color name="feisuo_accent">#0E9A6E</color>
-    <color name="feisuo_accent_dark">#0C825D</color>
+    <!-- 品牌色：与桌面端 ui/src/style.css 的窗口底色、卡片底色与强调色同源 -->
+    <color name="feisuo_bg">#121318</color>
+    <color name="feisuo_card">#1B1E26</color>
+    <color name="feisuo_card_stroke">#2A2E39</color>
+    <color name="feisuo_input">#14161C</color>
+    <color name="feisuo_input_stroke">#2A2E39</color>
+    <color name="feisuo_accent">#2FBF8A</color>
+    <color name="feisuo_accent_dark">#26A375</color>
+    <color name="feisuo_accent_disabled">#1E4A3A</color>
+    <color name="feisuo_on_accent">#042417</color>
+    <color name="feisuo_text_primary">#E8ECF3</color>
+    <color name="feisuo_text_secondary">#9AA4B2</color>
+    <color name="feisuo_text_tertiary">#6B7686</color>
+    <color name="feisuo_danger">#FF6B6B</color>
+
+    <!-- 启动图标背景（自适应图标 background 层使用渐变矢量，这里保留同色兜底） -->
+    <color name="ic_launcher_background">#0B1322</color>
     <color name="ic_stat_white">#FFFFFFFF</color>
 </resources>

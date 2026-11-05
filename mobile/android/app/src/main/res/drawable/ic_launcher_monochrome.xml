@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 13+ 主题化图标（monochrome）层。
+
+  系统只读取 alpha 通道并重新着色，所以这里必须是单色轮廓；
+  四块折面全部填白后合并成一架完整纸飞机。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M81.64,26.36 L23.28,62.20 L44.78,56.04 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M81.64,26.36 L51.96,63.22 L45.80,84.72 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M81.64,26.36 L44.78,56.04 L32.50,75.50 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M81.64,26.36 L32.50,75.50 L51.96,63.22 Z" />
+</vector>

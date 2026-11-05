@@ -6,7 +6,7 @@ import android.app.NotificationManager
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Color
+import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
@@ -20,10 +20,15 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import org.json.JSONObject
 import java.io.File
 
@@ -49,6 +54,14 @@ class MainActivity : Activity() {
     }
 
     private lateinit var root: LinearLayout
+    /**
+     * 当前分区的内容容器。
+     *
+     * [section] 负责新建一张卡片并把它设为当前容器，后面的 [addRow] /
+     * [addParagraph] / [addInput] / [addButton] 都挂进这张卡片；
+     * 卡片之外调用时回退到 [root]，行为与旧版扁平列表一致。
+     */
+    private var sectionBody: LinearLayout? = null
     private var engineStatusView: TextView? = null
     private var deviceIdView: TextView? = null
     private var configView: TextView? = null
@@ -81,6 +94,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 先定窗口外观（深色底 + 系统栏配色），再搭界面 —— 顺序反了会先闪一下白底。
+        configureWindow()
         buildUi()
 
         // 数据目录必须在任何 core 调用之前确定; 引擎是进程内单例, 重复调用安全。
@@ -126,22 +141,53 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- UI
 
+    /**
+     * 窗口外观：深色底 + 透明系统栏背景。
+     *
+     * targetSdk 35 在 Android 15 上强制沉浸式布局（edge-to-edge），
+     * 内容会画到状态栏下面。这里统一关闭系统自动 inset，改由
+     * [buildUi] 里的 insets 监听把内容让出来 —— 否则标题会被状态栏盖住。
+     */
+    @Suppress("DEPRECATION")
+    private fun configureWindow() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = getColor(R.color.feisuo_bg)
+        window.navigationBarColor = getColor(R.color.feisuo_bg)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
+    }
+
     private fun buildUi() {
-        val scroll = ScrollView(this)
+        val scroll = ScrollView(this).apply {
+            setBackgroundColor(getColor(R.color.feisuo_bg))
+            isFillViewport = true
+            clipToPadding = false
+        }
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(28), dp(20), dp(28))
+            setPadding(dp(20), dp(24), dp(20), dp(36))
         }
         scroll.addView(root, ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
         ))
+        // 状态栏 / 刘海 / 手势条的高度由系统给，不写死数值：
+        // 不同 ROM 的导航方式差别很大，写死一定会在某台设备上压住内容。
+        ViewCompat.setOnApplyWindowInsetsListener(scroll) { view, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            view.setPadding(0, bars.top, 0, bars.bottom)
+            insets
+        }
         setContentView(scroll)
+        ViewCompat.requestApplyInsets(scroll)
 
-        addTitle("飞梭", 22f)
-        addSubtitle("局域网互传 · 无人值守待命")
+        addHeader()
 
-        // section() 内部已经 root.addView(it)，外面再包一层会把同一个 View
+        // section() 内部已经 root.addView(卡片)，外面再包一层会把同一个 View
         // 添加两次，onCreate 直接抛 IllegalStateException（"specified child
         // already has a parent"）——应用一启动就闪退。
         section("运行状态")
@@ -157,13 +203,8 @@ class MainActivity : Activity() {
                 "保存后最多一个广播周期（约 3 秒）就会被对端刷新，已发生的历史记录不会改名。"
         )
         deviceNameInput = addInput("设备名", "例如 客厅手机")
-        val saveName = Button(this).apply {
-            text = "保存设备名"
-            isEnabled = false
-            setOnClickListener { saveDeviceName() }
-        }
-        nameSaveButton = saveName
-        root.addView(saveName, lp(top = dp(8)))
+        nameSaveButton = addButton("保存设备名", primary = true) { saveDeviceName() }
+        nameSaveButton?.isEnabled = false
 
         section("接收目录")
         addParagraph(
@@ -171,24 +212,14 @@ class MainActivity : Activity() {
                 "之后可以直接查看、转发或删除。"
         )
         receiveDirView = addRow("保存位置", "读取中…")
-        val openDir = Button(this).apply {
-            text = "打开接收目录"
-            isEnabled = false
-            setOnClickListener { openReceiveDir() }
-        }
-        openDirButton = openDir
-        root.addView(openDir, lp(top = dp(8)))
+        openDirButton = addButton("打开接收目录", primary = false) { openReceiveDir() }
+        openDirButton?.isEnabled = false
 
         section("通知权限与锁屏可用")
         // 通知栏是用户判断"飞梭到底还开着没"的唯一可见证据：
         // 没有这条通知，前台服务在用户眼里等于不存在。
         notificationStatusView = addRow("通知栏", "检查中…")
-        val notificationAction = Button(this).apply {
-            text = "开启通知"
-            setOnClickListener { onNotificationAction() }
-        }
-        notificationActionButton = notificationAction
-        root.addView(notificationAction, lp(top = dp(8)))
+        notificationActionButton = addButton("开启通知", primary = false) { onNotificationAction() }
         addParagraph(
             "飞梭在打开期间通过前台通知维持局域网待命与 Wi-Fi 组播监听，" +
                 "确保手机在锁屏、切 Wi-Fi 之后仍能被电脑秒搜并投递文件。" +
@@ -211,22 +242,12 @@ class MainActivity : Activity() {
         pinInput = addInput("6 位配对码", "123456").apply {
             inputType = InputType.TYPE_CLASS_NUMBER
         }
-        val pairButton = Button(this).apply {
-            text = "配对"
-            isEnabled = false
-            setOnClickListener { pairWithDesktop() }
-        }
-        pairButtonRef = pairButton
-        root.addView(pairButton, lp(top = dp(16)))
+        pairButtonRef = addButton("配对", primary = true) { pairWithDesktop() }
+        pairButtonRef?.isEnabled = false
 
         section("已配对设备")
         trustedView = addRow("受信设备", "读取中…")
-
-        val refresh = Button(this).apply {
-            text = "刷新状态"
-            setOnClickListener { startEngineAsync() }
-        }
-        root.addView(refresh, lp(top = dp(8)))
+        addButton("刷新状态", primary = false) { startEngineAsync() }
 
         section("版本与更新")
         addParagraph(
@@ -238,22 +259,15 @@ class MainActivity : Activity() {
         // 写死字符串的话，用户装了新版界面还显示旧版号，而且不报错。
         addRow("当前版本", BuildConfig.VERSION_NAME)
         updateStatusView = addRow("更新状态", "尚未检查")
-        val checkBtn = Button(this).apply {
-            text = "检查更新"
-            setOnClickListener { checkForUpdate(silent = false) }
+        updateCheckButton = addButton("检查更新", primary = false) {
+            checkForUpdate(silent = false)
         }
-        updateCheckButton = checkBtn
-        root.addView(checkBtn, lp(top = dp(8)))
 
         // 只在"确实有可做的事"时出现：没有新版本时挂一个灰按钮，
         // 用户会反复点它并怀疑功能坏了。
-        val actionBtn = Button(this).apply {
-            text = "下载并安装"
-            visibility = View.GONE
-            setOnClickListener { downloadAndInstall() }
-        }
-        updateActionButton = actionBtn
-        root.addView(actionBtn, lp(top = dp(8)))
+        updateActionButton = addButton("下载并安装", primary = true) {
+            downloadAndInstall()
+        }.apply { visibility = View.GONE }
 
         section("随用随走 · 零后台")
         addParagraph(
@@ -508,6 +522,9 @@ class MainActivity : Activity() {
                     failure != null -> "未就绪 — $failure"
                     else -> "未就绪"
                 }
+                engineStatusView?.setTextColor(
+                    getColor(if (ok) R.color.feisuo_accent else R.color.feisuo_danger)
+                )
                 deviceIdView?.text = deviceId.ifEmpty { "—" }
                 configView?.text = summarizeConfig(configJson)
                 // 引擎就绪后才允许配对, 免得用户点下去必然失败
@@ -577,12 +594,14 @@ class MainActivity : Activity() {
                 pendingRelease = null
                 pendingApk = null
                 updateStatusView?.text = "已是最新版本 v${BuildConfig.VERSION_NAME}"
+                updateStatusView?.setTextColor(getColor(R.color.feisuo_accent))
                 updateActionButton?.visibility = View.GONE
             }
 
             is UpdateChecker.CheckResult.Newer -> {
                 pendingRelease = result.release
                 updateStatusView?.text = "发现新版本 ${result.release.tagName}"
+                updateStatusView?.setTextColor(getColor(R.color.feisuo_accent))
                 updateActionButton?.apply {
                     visibility = View.VISIBLE
                     isEnabled = true
@@ -593,6 +612,9 @@ class MainActivity : Activity() {
             is UpdateChecker.CheckResult.Failed -> {
                 pendingRelease = null
                 updateStatusView?.text = if (silent) "尚未检查" else result.message
+                updateStatusView?.setTextColor(
+                    getColor(if (silent) R.color.feisuo_text_primary else R.color.feisuo_danger)
+                )
                 if (!silent) toast(result.message)
                 updateActionButton?.visibility = View.GONE
             }
@@ -797,6 +819,9 @@ class MainActivity : Activity() {
     private fun updateNotificationStatus() {
         notificationStatusView?.text = notificationStateText()
         val usable = notificationsUsable()
+        notificationStatusView?.setTextColor(
+            getColor(if (usable) R.color.feisuo_accent else R.color.feisuo_danger)
+        )
         notificationActionButton?.apply {
             visibility = if (usable) View.GONE else View.VISIBLE
             text = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -859,73 +884,162 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- 小工具
 
-    private fun addTitle(text: String, sizeSp: Float): TextView =
-        TextView(this).apply {
-            this.text = text
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
-            setTextColor(Color.WHITE)
-            setTypeface(typeface, Typeface.BOLD)
-        }.also { root.addView(it) }
+    private fun addHeader() {
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(2))
+        }
+        val badge = ImageView(this).apply {
+            setImageResource(R.drawable.ic_stat_feisuo)
+            imageTintList = ColorStateList.valueOf(getColor(R.color.feisuo_accent))
+            setPadding(dp(11), dp(11), dp(11), dp(11))
+            setBackgroundResource(R.drawable.bg_logo_badge)
+            contentDescription = getString(R.string.app_name)
+        }
+        header.addView(badge, LinearLayout.LayoutParams(dp(52), dp(52)))
 
-    private fun addSubtitle(text: String): TextView =
-        TextView(this).apply {
+        val titles = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), 0, 0, 0)
+        }
+        titles.addView(TextView(this).apply {
+            text = "飞梭"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
+            setTextColor(getColor(R.color.feisuo_text_primary))
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        })
+        titles.addView(TextView(this).apply {
+            text = "局域网互传 · 无人值守待命"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setTextColor(getColor(R.color.feisuo_text_secondary))
+            setPadding(0, dp(3), 0, 0)
+        })
+        header.addView(titles, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(header)
+    }
+
+    /**
+     * 分区标题 + 一张卡片。
+     *
+     * 卡片会被设为 [sectionBody]，后续的 [addRow] / [addParagraph] /
+     * [addInput] / [addButton] 自动挂进这张卡片，直到下一个 [section]。
+     * 返回值仍是标题 TextView（保留旧调用形态），但**不要**再 root.addView 一次。
+     */
+    private fun section(text: String): TextView {
+        val header = TextView(this).apply {
             this.text = text
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setTextColor(0xFF9AA4B2.toInt())
-            setPadding(0, dp(4), 0, dp(18))
-        }.also { root.addView(it) }
+            setTextColor(getColor(R.color.feisuo_accent))
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            setPadding(dp(2), dp(24), 0, dp(8))
+        }
+        root.addView(header)
 
-    private fun section(text: String): TextView =
-        TextView(this).apply {
-            this.text = text
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTextColor(0xFF2FBF8A.toInt())
-            setTypeface(typeface, Typeface.BOLD)
-            setPadding(0, dp(20), 0, dp(6))
-        }.also { root.addView(it) }
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(10), dp(16), dp(14))
+            setBackgroundResource(R.drawable.bg_card)
+        }
+        root.addView(body)
+        sectionBody = body
+        return header
+    }
 
     private fun addRow(label: String, value: String): TextView {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(6), 0, dp(6))
+            setPadding(0, dp(7), 0, dp(7))
         }
-        val l = TextView(this).apply {
+        val labelView = TextView(this).apply {
             text = label
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setTextColor(0xFF9AA4B2.toInt())
-            layoutParams = LinearLayout.LayoutParams(dp(88), ViewGroup.LayoutParams.WRAP_CONTENT)
+            setTextColor(getColor(R.color.feisuo_text_secondary))
+            layoutParams = LinearLayout.LayoutParams(dp(84), ViewGroup.LayoutParams.WRAP_CONTENT)
         }
-        val v = TextView(this).apply {
+        val valueView = TextView(this).apply {
             text = value
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setTextColor(Color.WHITE)
+            setTextColor(getColor(R.color.feisuo_text_primary))
+            setLineSpacing(dp(3).toFloat(), 1f)
             // 设备指纹是长字符串, 必须允许换行, 否则会被截断成看不出是什么
             setTextIsSelectable(true)
         }
-        row.addView(l)
-        row.addView(v, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(row)
-        return v
+        row.addView(labelView)
+        row.addView(valueView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        // 卡片存在时挂进卡片；没有 section 时回退到根布局。
+        // 这个 if/else 必须保留 root.addView 分支 —— android_guard 靠它识别
+        // "自己会挂载"的 helper，删掉后守卫会判定 addRow 不再自挂载。
+        val parent = sectionBody ?: root
+        if (parent === root) {
+            root.addView(row, lp(top = dp(2)))
+        } else {
+            parent.addView(row, lp(top = dp(2)))
+        }
+        return valueView
+    }
+
+    /** 把 View 挂进当前卡片；没有 section 时挂到根布局。 */
+    private fun addToSection(view: View, top: Int = dp(2)) {
+        val parent = sectionBody ?: root
+        if (parent === root) {
+            root.addView(view, lp(top = top))
+        } else {
+            parent.addView(view, lp(top = top))
+        }
     }
 
     private fun addParagraph(text: String): TextView =
         TextView(this).apply {
             this.text = text
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setTextColor(0xFFCBD3DE.toInt())
+            setTextColor(getColor(R.color.feisuo_text_secondary))
             setLineSpacing(dp(4).toFloat(), 1f)
-        }.also { root.addView(it, lp(top = dp(4))) }
+        }.also { addToSection(it, top = dp(6)) }
 
     /** 单行输入框, 配对表单用 */
     private fun addInput(label: String, hint: String): EditText =
         EditText(this).apply {
             this.hint = "$label · $hint"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            setTextColor(Color.WHITE)
-            setHintTextColor(0xFF6B7686.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setTextColor(getColor(R.color.feisuo_text_primary))
+            setHintTextColor(getColor(R.color.feisuo_text_tertiary))
             setSingleLine(true)
-        }.also { root.addView(it, lp(top = dp(8))) }
+            setBackgroundResource(R.drawable.bg_input)
+            backgroundTintList = null
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            minHeight = dp(48)
+        }.also { addToSection(it, top = dp(10)) }
+
+    /**
+     * 统一样式的操作按钮。
+     *
+     * @param primary true = 品牌绿实心（页面主操作）；false = 描边次按钮。
+     */
+    private fun addButton(label: String, primary: Boolean, onClick: () -> Unit): Button =
+        Button(this).apply {
+            text = label
+            isAllCaps = false
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTextColor(
+                resources.getColorStateList(
+                    if (primary) R.color.button_primary_text else R.color.button_secondary_text,
+                    theme
+                )
+            )
+            setBackgroundResource(
+                if (primary) R.drawable.bg_button_primary else R.drawable.bg_button_secondary
+            )
+            backgroundTintList = null
+            stateListAnimator = null
+            minHeight = dp(46)
+            minimumHeight = dp(46)
+            setPadding(dp(16), 0, dp(16), 0)
+            if (primary) typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            setOnClickListener { onClick() }
+        }.also { addToSection(it, top = dp(12)) }
 
     private fun toast(msg: String) {
         runOnUiThread {
