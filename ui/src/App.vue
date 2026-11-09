@@ -202,6 +202,16 @@
               >
                 <i class="ph ph-eye-slash"></i>
               </button>
+              <!-- 删除记录：改过名字后残留的旧条目只能靠它清掉。
+                   与「隐藏」「解除配对」是三个互不替代的动作。 -->
+              <button
+                class="delete-device-btn"
+                title="删除该设备记录"
+                :aria-label="`删除 ${dev.device_name || '该设备'} 的设备记录`"
+                @click.stop="confirmDeleteDevice(dev)"
+              >
+                <i class="ph ph-trash"></i>
+              </button>
             </div>
           </div>
 
@@ -358,6 +368,7 @@
                 </div>
               </div>
               <button class="btn-quick-pair" @click="store.toggleHidden(dev.device_id)">取消隐藏</button>
+              <button class="hidden-row-delete-btn" @click.stop="confirmDeleteDevice(dev)">删除</button>
             </div>
           </div>
 
@@ -730,6 +741,61 @@
             </div>
           </div>
 
+          <!-- 删除设备确认弹层：与「取消认证」分开，删的是本机名册记录 -->
+          <div
+            v-if="deleteConfirmDev"
+            class="modal-mask"
+            @click.self="deleteConfirmDev = null"
+          >
+            <div
+              v-modal-focus
+              class="unpair-modal-card"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="delete-modal-title"
+              tabindex="-1"
+            >
+              <div class="unpair-modal-header">
+                <div class="unpair-title-row">
+                  <i class="ph-bold ph-trash"></i>
+                  <h3 id="delete-modal-title">删除设备</h3>
+                </div>
+                <button class="scope-close" @click="deleteConfirmDev = null" title="关闭">
+                  <i class="ph ph-x"></i>
+                </button>
+              </div>
+
+              <div class="unpair-modal-body">
+                <p class="unpair-headline">
+                  从设备列表中移除「<strong>{{ deleteConfirmDev.device_name || '该设备' }}</strong>」？
+                </p>
+                <div class="unpair-impact-box">
+                  <div class="unpair-impact-item">
+                    <i class="ph-bold ph-trash-simple"></i>
+                    <span>删除本机保存的配对记录、访问授权与已知地址</span>
+                  </div>
+                  <div class="unpair-impact-item">
+                    <i class="ph-bold ph-clock-counter-clockwise"></i>
+                    <span>传输记录会保留；若对方仍在线，会重新出现在「其他设备」中，需重新配对</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="unpair-modal-footer">
+                <button class="btn-fluent-secondary" @click="deleteConfirmDev = null">取消</button>
+                <button
+                  class="btn-danger-solid"
+                  :disabled="deletingInProgress"
+                  @click="executeDeleteDevice"
+                >
+                  <i v-if="deletingInProgress" class="ph-bold ph-spinner animate-spin"></i>
+                  <i v-else class="ph-bold ph-trash"></i>
+                  确认删除
+                </button>
+              </div>
+            </div>
+          </div>
+
           <!--
             「输入对方窗口上的匹配码」（§2.3）
 
@@ -791,51 +857,55 @@
             </div>
           </div>
 
-          <!--
-            连接路径（§3.9 / P4 ⑧）。
-            一台设备同时有 ZeroTier 与物理网卡时，用户需要能看见"现在走的是哪条"
-            并能显式切换 —— 尤其是"覆盖网通但很慢、想试试局域网"这种场景。
-            默认按覆盖网优先自动选（D6），这里只把选择权交还给用户。
-          -->
+          <!-- 连接路径：默认只显示当前走哪条，展开后才给出可切换的端点。
+               原始 IP / 端口 / 校验状态属于高级信息，不常驻主界面。 -->
           <div
             v-if="store.selectedDevice && deviceEndpoints.length > 0"
             class="endpoint-bar"
           >
-            <span class="endpoint-label">
-              <i class="ph ph-signpost"></i> 连接路径
-            </span>
             <button
-              class="endpoint-chip"
-              :class="{ 'is-active': !pinnedEndpoints[store.selectedDevice.device_id] }"
-              title="按“覆盖网优先”自动选择（ZeroTier 优先，绕开家庭 NAT）"
-              @click="pinDeviceEndpoint(store.selectedDevice.device_id, null)"
+              type="button"
+              class="endpoint-toggle"
+              :aria-expanded="showEndpointBar"
+              @click="showEndpointBar = !showEndpointBar"
             >
-              自动
+              <i class="ph ph-signpost"></i>
+              <span>连接路径</span>
+              <span class="endpoint-current">{{ currentEndpointLabel }}</span>
+              <i class="ph ph-caret-down" :class="{ rotated: showEndpointBar }"></i>
             </button>
-            <button
-              v-for="ep in deviceEndpoints"
-              :key="`${ep.ip}:${ep.port}`"
-              class="endpoint-chip"
-              :class="{
-                'is-active':
-                  pinnedEndpoints[store.selectedDevice.device_id]?.ip === ep.ip &&
-                  pinnedEndpoints[store.selectedDevice.device_id]?.port === ep.port,
-              }"
-              :disabled="ep.port === 0"
-              :title="
-                (ep.port === 0
-                  ? '该地址还没有已知的传输端口（设备从未在这个地址上回应过），暂不可选'
-                  : endpointKindLabel(ep.kind) +
-                    (ep.verified ? '' : ' · 尚未验证过')) +
-                ' · 上次活动 ' +
-                humanizeEndpoint(ep.last_seen)
-              "
-              @click="pinDeviceEndpoint(store.selectedDevice.device_id, ep)"
-            >
-              {{ endpointKindLabel(ep.kind) }}
-              <span class="endpoint-ip">{{ ep.ip }}</span>
-              <i v-if="!ep.verified" class="ph ph-question" title="尚未验证过"></i>
-            </button>
+            <template v-if="showEndpointBar">
+              <button
+                class="endpoint-chip"
+                :class="{ 'is-active': !pinnedEndpoints[store.selectedDevice.device_id] }"
+                title="自动选择（覆盖网优先）"
+                @click="pinDeviceEndpoint(store.selectedDevice.device_id, null)"
+              >
+                自动
+              </button>
+              <button
+                v-for="ep in deviceEndpoints"
+                :key="`${ep.ip}:${ep.port}`"
+                class="endpoint-chip"
+                :class="{
+                  'is-active':
+                    pinnedEndpoints[store.selectedDevice.device_id]?.ip === ep.ip &&
+                    pinnedEndpoints[store.selectedDevice.device_id]?.port === ep.port,
+                }"
+                :disabled="ep.port === 0"
+                :title="
+                  (ep.port === 0
+                    ? '该地址还没有已知的传输端口，暂不可选'
+                    : endpointKindLabel(ep.kind) + (ep.verified ? '' : ' · 尚未验证过')) +
+                  ' · 上次活动 ' + humanizeEndpoint(ep.last_seen)
+                "
+                @click="pinDeviceEndpoint(store.selectedDevice.device_id, ep)"
+              >
+                {{ endpointKindLabel(ep.kind) }}
+                <span class="endpoint-ip">{{ ep.ip }}</span>
+                <i v-if="!ep.verified" class="ph ph-question" title="尚未验证过"></i>
+              </button>
+            </template>
           </div>
         </div>
 
@@ -1444,12 +1514,6 @@
                       title="经覆盖网（ZeroTier / Tailscale 的 100.64/10）"
                       >经虚拟网卡</span
                     >
-                    <span
-                      v-if="log.connect_ms > 0"
-                      class="link-tag"
-                      :title="'两端 TCP 建连耗时 ' + log.connect_ms + 'ms'"
-                      >建连 {{ log.connect_ms }}ms</span
-                    >
                   </div>
                   <!-- 慢的时候说清"时间花在哪"：审批等待 vs 数据流 -->
                   <div
@@ -1920,8 +1984,7 @@
 
             <div class="settings-footer-note">
               <i class="ph ph-info"></i>
-              飞梭 v{{ localInfo.app_version || '0.1.0' }} · 设备指纹 {{ localInfo.device_id || '—' }} · 传输端口
-              {{ localInfo.transfer_port }} · 发现端口 {{ localInfo.discovery_port }}
+              飞梭 v{{ localInfo.app_version || '0.1.0' }}
             </div>
           </div>
         </div>
@@ -3557,6 +3620,16 @@ const preferredEndpoint = ref<DeviceEndpoint | null>(null);
 /** 当前选中设备的全部已知端点（供路径切换 UI 用） */
 const deviceEndpoints = ref<DeviceEndpoint[]>([]);
 
+/** 连接路径默认收起：主界面只显示当前走哪条，端点列表按需展开 */
+const showEndpointBar = ref(false);
+
+/** 收起状态下的一行摘要：手动固定时显示路径种类，否则显示「自动」 */
+const currentEndpointLabel = computed(() => {
+  const dev = store.selectedDevice;
+  const pinned = dev ? pinnedEndpoints[dev.device_id] : null;
+  return pinned ? endpointKindLabel(pinned.kind) : "自动";
+});
+
 /** 端点的"多久之前"人话 */
 function humanizeEndpoint(ts: number): string {
   if (ts <= 0) return "未知";
@@ -4807,6 +4880,54 @@ async function removeTrusted(deviceId: string) {
     }
   } catch (e) {
     showToast(FeisuoBridge.describeError(e, "取消认证失败"), true);
+  }
+}
+
+/**
+ * 删除设备记录：清掉改名 / 换机之后再也上不线的旧条目。
+ *
+ * 与「取消认证」是三个互不替代的动作：
+ * - 隐藏 = 纯显示偏好，信任与推送都保留；
+ * - 取消认证 = 双向解除信任，但**保留**名册这一行（降为未信任）；
+ * - 删除 = 二次确认后把本机这一行及其授权、端点一并清掉。
+ *
+ * 在线设备先尽力走一次双向解除配对，避免本机删了、对端仍以为彼此受信；
+ * 离线旧条目没有通知对象，直接删（这正是用户要清掉的那种条目）。
+ */
+const deleteConfirmDev = ref<DeviceRosterEntry | null>(null);
+const deletingInProgress = ref(false);
+
+function confirmDeleteDevice(dev: DeviceRosterEntry) {
+  deleteConfirmDev.value = dev;
+}
+
+async function executeDeleteDevice() {
+  const dev = deleteConfirmDev.value;
+  if (!dev) return;
+  deletingInProgress.value = true;
+  try {
+    // 在线设备先尽力双向解除；离线旧条目直接删。
+    if (dev.ip) {
+      try {
+        await FeisuoBridge.unpairDevice(dev.device_id);
+      } catch {
+        // 通知失败不挡住删除：用户要的是清掉本机这条记录。
+      }
+    }
+    const ok = await FeisuoBridge.deleteDevice(dev.device_id);
+    deleteConfirmDev.value = null;
+    await Promise.all([loadTrustedDevices(), refreshDevices()]);
+    if (store.selectedDeviceId === dev.device_id) {
+      store.selectedDeviceId = store.myDevices[0]?.device_id || "";
+    }
+    showToast(
+      ok ? `已删除「${dev.device_name || "该设备"}」` : "该设备记录已不存在",
+      !ok,
+    );
+  } catch (e) {
+    showToast(FeisuoBridge.describeError(e, "删除设备失败"), true);
+  } finally {
+    deletingInProgress.value = false;
   }
 }
 
@@ -8416,6 +8537,30 @@ function getFileIcon(name: string) {
 .device-card-row:hover .hide-device-btn { opacity: 1; }
 .hide-device-btn:hover { background: var(--bg-hover-soft); color: var(--text-main); }
 
+.delete-device-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 3px 4px;
+  border-radius: var(--radius-md);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.device-card-row:hover .delete-device-btn { opacity: 1; }
+.delete-device-btn:hover { background: var(--danger-soft); color: var(--danger-text); }
+
+.hidden-row-delete-btn {
+  background: transparent;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm);
+  color: var(--danger-text);
+  font-size: 11px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.hidden-row-delete-btn:hover { background: var(--danger-soft); }
+
 .roster-empty-hint {
   padding: 8px 12px 12px;
   font-size: 12px;
@@ -8783,13 +8928,25 @@ function getFileIcon(name: string) {
   gap: 6px;
   padding: 6px 2px 2px;
 }
-.endpoint-label {
+.endpoint-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  padding: 3px 9px;
   font-size: 11.5px;
-  color: var(--text-tertiary);
-  margin-right: 2px;
+  font-family: inherit;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.endpoint-toggle:hover { background: var(--bg-hover-soft); color: var(--text-primary); }
+.endpoint-toggle .ph-caret-down.rotated { transform: rotate(180deg); }
+.endpoint-current {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent-on-soft);
 }
 .endpoint-chip {
   display: inline-flex;

@@ -93,6 +93,22 @@ object NativeBridge {
     fun trustedDevicesJson(): String = if (loaded) (nativeGetTrustedDevicesJson() ?: "[]") else "[]"
 
     /**
+     * 彻底删除一条设备记录（清掉改名后残留的旧条目）。
+     *
+     * 与解除配对不同：解除只降级信任并保留行，删除会把本机名册记录、
+     * 访问授权与已知地址一并清掉。此操作只作用于本机，不通知对端，
+     * 调用前应由界面做二次确认。
+     *
+     * @return null 表示成功; 非 null 为可展示的中文失败原因。
+     * @author xudong.hua,gemini
+     * @since 2026-11-07 10:30 星期六
+     */
+    fun deleteDevice(deviceId: String): String? {
+        if (!loaded) return "引擎未启动"
+        return nativeDeleteDevice(deviceId)
+    }
+
+    /**
      * 主动探测对端 IP, 拿它**当前**的传输端口。
      *
      * 信任库里只记了 last_ip、没有记端口, 而端口可以在对端设置里改;
@@ -167,6 +183,7 @@ object NativeBridge {
     private external fun nativeGetConfigJson(): String?
     private external fun nativeSetDeviceName(name: String): String?
     private external fun nativeGetTrustedDevicesJson(): String?
+    private external fun nativeDeleteDevice(deviceId: String): String?
     private external fun nativeProbeDevice(ip: String): String?
     private external fun nativePairWithDevice(ip: String, port: Int, pin: String): String?
     private external fun nativeNextApproval(timeoutMs: Int): String?

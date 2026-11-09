@@ -1,4 +1,4 @@
-﻿"""守卫：**不得存在"只降级本地、不通知对端"的解除配对通路**。
+﻿"""守卫：**解除配对通路不得删行**；删记录只能是那个独立的「删除设备」动作。
 
 ## 它防的是什么
 
@@ -22,24 +22,21 @@
    同一个按钮，两种结果，取决于一个用户看不见也控制不了的变量：
    没 IP 时用户刚隐藏的设备会**从主列表里人间蒸发**并丢掉隐藏偏好。
 
-## 为什么是"删掉"而不是"对齐"
+## 2026-11-07 新增：删除设备 ≠ 解除配对
 
-两条冗余通路可以"对齐语义"，但那只是把分叉挪了个位置 ——
-下一个人加新分支时又会分叉。**删掉一条，分叉在编译期就没了。**
+用户改名后，旧的离线条目既不会再上线、也没法靠解除配对清掉，明确要求
+补一个删除功能。于是 `DELETE FROM trusted_devices` 现在**有一个**合法去处：
+`TrustStore::delete_device`，由界面「删除设备」二次确认后调用，与
+`unpair_device` / `downgrade_to_untrusted` 完全分离。
 
-这与 `blocked` 那一轮是同一个教训：**删掉一条冗余通路，
-比让它和另一条"保持一致"更彻底。**
+因此本守卫的判据从「任何 DELETE 都必须为 0」收窄为：
 
-## 扫描范围与判据
+- 名字类标记（5 类）仍然全为 0 —— 那条本地单向解除通路不许复活；
+- `DELETE FROM trusted_devices` **只允许出现在 `delete_device` 函数体内**；
+- 并且全仓库必须**恰好**只有这一个函数在删行（多一个、少一个都算失败）。
 
-扫 `core/src` + `desktop/src-tauri/src` + `ui/src`（含 `.vue` / `.ts`），
-**6 类标记必须全为 0**。刻意同时盯**类型层**（`remove_device` /
-`remove_trusted_device` 的方法定义与调用）、**界面层**
-（`removeTrustedDevice`）与**存储层**（`DELETE FROM trusted_devices`）。
-
-> 标记只有 6 类是**刻意的**：这一轮把"删掉"做实了，所以路径比
-> `guard_blocked_dimension.py` 少得多。变异测试证明每类都真的会被红 ——
-> 少但有效，优于多而有一条是摆设。
+少一个 = 删除功能被悄悄删掉；出现在别的函数里 = 解除配对又偷偷删行了。
+两种失效都不再能"一路绿"。
 
 ## 用法
 
@@ -75,9 +72,13 @@ MARKERS = [
     ('remove_trusted_device 命令',        r'remove_trusted_device'),
     # —— 界面层 ——
     ('bridge removeTrustedDevice',       r'removeTrustedDevice'),
-    # —— 存储层：任何"把行删掉"的 SQL ——
+    # —— 存储层：把行删掉的 SQL（只允许出现在 delete_device 里）——
     ('DELETE FROM trusted_devices',      r'DELETE\s+FROM\s+trusted_devices'),
 ]
+
+SQL_MARKER = 'DELETE FROM trusted_devices'
+DELETE_FN = 'delete_device'
+TRUST_STORE = os.path.join('core', 'src', 'security', 'trust_store.rs')
 
 # 允许出现的位置：纯注释行。刻意**不**排除文档字符串 ——
 # 文档里提到它是必要的（解释为什么删掉），但它必须以注释形式出现。
@@ -94,9 +95,14 @@ def is_comment(line):
     return (t.startswith('//') or t.startswith('*')
             or t.startswith('/*') or t.startswith('#'))
 
+# Rust 函数签名行。用来判断 `DELETE FROM trusted_devices` 落在哪个函数体内：
+# 只有 `delete_device` 获准，其余（尤其 unpair / downgrade）一律报红。
+RUST_FN = re.compile(r'^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)')
+
 
 def main():
     hits = {}
+    sql_fns = set()
     for root, exts in TARGETS:
         if not os.path.isdir(root):
             continue
@@ -109,29 +115,54 @@ def main():
                     text = io.open(path, encoding='utf-8').read()
                 except (IOError, UnicodeDecodeError):
                     continue
+                current_fn = ''
                 for i, ln in enumerate(text.split('\n'), 1):
+                    # 只在 Rust 文件里跟踪函数体；TS / Vue 里出现这条 SQL
+                    # 一律算越界（current_fn 恒为空）。
+                    if path.endswith('.rs'):
+                        m = RUST_FN.match(ln)
+                        if m:
+                            current_fn = m.group(1)
                     if is_comment(ln):
                         continue
                     for name, pat in MARKERS:
-                        if re.search(pat, ln):
-                            hits.setdefault(name, []).append(
-                                '%s:%d' % (path.replace('\\', '/'), i))
+                        if not re.search(pat, ln):
+                            continue
+                        if name == SQL_MARKER:
+                            sql_fns.add(current_fn or '(未知函数)')
+                            if current_fn == DELETE_FN:
+                                continue
+                        hits.setdefault(name, []).append(
+                            '%s:%d' % (path.replace('\\', '/'), i))
 
     total = sum(len(v) for v in hits.values())
-    if total == 0:
-        print(u'✓ 只有一条解除配对通路（`unpair_device` 双向）；'
-              u'本地单向 DELETE 通路 %d 类标记全为 0' % len(MARKERS))
-        return 0
+    if total:
+        print(u'✗ 存在「只降级本地、不通知对端」的解除配对通路，共 %d 处:' % total)
+        for name, _pat in MARKERS:
+            if name in hits:
+                print(u'  %s (%d):' % (name, len(hits[name])))
+                for loc in hits[name][:6]:
+                    print(u'      %s' % loc)
+                if len(hits[name]) > 6:
+                    print(u'      ... 还有 %d 处' % (len(hits[name]) - 6))
+        return 1
 
-    print(u'✗ 存在「只降级本地、不通知对端」的解除配对通路，共 %d 处:' % total)
-    for name, _pat in MARKERS:
-        if name in hits:
-            print(u'  %s (%d):' % (name, len(hits[name])))
-            for loc in hits[name][:6]:
-                print(u'      %s' % loc)
-            if len(hits[name]) > 6:
-                print(u'      ... 还有 %d 处' % (len(hits[name]) - 6))
-    return 1
+    # 正面断言：删行的能力必须存在，且恰好只有一个出口。
+    # 少了它，有人把删除功能整段删掉，上面的 6 类标记反而"全 0"一路绿。
+    try:
+        store = io.open(TRUST_STORE, encoding='utf-8').read()
+    except (IOError, UnicodeDecodeError):
+        store = ''
+    has_delete_api = re.search(r'pub fn delete_device\s*\(', store) is not None
+    if not has_delete_api or sql_fns != {DELETE_FN}:
+        print(u'✗ 删设备记录的通路不合法：delete_device 存在=%s，删行所在函数=%s'
+              % (has_delete_api, sorted(sql_fns)))
+        print(u'  要求：core 里有 pub fn delete_device，且只有它含 DELETE FROM trusted_devices')
+        return 1
+
+    print(u'✓ 只有一条解除配对通路（`unpair_device` 双向）；'
+          u'删记录只由独立动作 `delete_device` 承担，%d 类标记全为 0' % len(MARKERS))
+    return 0
 
 
 if __name__ == '__main__':

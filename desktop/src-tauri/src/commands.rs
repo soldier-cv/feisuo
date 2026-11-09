@@ -1179,6 +1179,16 @@ pub fn get_hidden_devices(
     state.engine.list_hidden_devices().map_err(|e| e.to_string())
 }
 
+/// 彻底删除一条设备记录（用户二次确认后的「删除设备」）。
+///
+/// 与 `unpair_device` 是**两个动作**：解除配对保留行、尽力双向通知；
+/// 删除则清掉本机名册记录。界面在调用本命令之前，对仍在线的设备会先走
+/// `unpair_device`，避免本机删了、对端却仍以为彼此受信。
+#[tauri::command]
+pub fn delete_device(device_id: String, state: State<'_, AppState>) -> Result<bool, String> {
+    state.engine.delete_device(&device_id).map_err(|e| e.to_string())
+}
+
 /// 读取对端的可访问范围（§8）。
 #[tauri::command]
 pub fn get_device_access_scope(

@@ -739,6 +739,16 @@ export class FeisuoBridge {
     return invokeSafe<TrustedDevice[]>("get_hidden_devices", undefined, () => []);
   }
 
+  /**
+   * 彻底删除一条设备记录。
+   *
+   * 与 unpairDevice 的区别：解除配对保留行（降为未信任），
+   * 删除会把名册记录、访问授权与已知地址一并清掉。
+   */
+  static async deleteDevice(deviceId: string): Promise<boolean> {
+    return invokeSafe<boolean>("delete_device", { deviceId }, () => false);
+  }
+
   static async getSecurityEvents(limit?: number): Promise<SecurityEvent[]> {
     return invokeSafe<SecurityEvent[]>("get_security_events", { limit: limit ?? null }, () => []);
   }

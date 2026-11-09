@@ -2,6 +2,7 @@ package net.findfine.feisuo
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.NotificationManager
 import android.content.ActivityNotFoundException
 import android.content.Intent
@@ -20,6 +21,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -29,22 +31,26 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
 /**
  * 飞梭 Android 端主界面。
  *
+ * 界面是标准的 App 外壳：固定品牌 AppBar + 三个分页 + 底部导航，
+ * 不再是「一整页从上往下堆说明文字」的长表单。技术细节（设备指纹、
+ * 端口）收进「我的」里默认折叠的「设备信息」。
+ *
  * 核心功能：
- * 1. 呈现飞梭核心引擎运行状态（设备指纹、传输端口等）；
- * 2. 提供极简配对表单（输入电脑 IP 与 6 位配对码，单向握手即享免密互传）；
- * 3. 展示当前局域网受信设备列表；
- * 4. 启动会话级前台守护服务（FeisuoDaemonService），并引导授予通知权限，
- *    确保用户开启应用后即使锁屏也能持续在局域网待命接收文件；
- * 5. 用户退出应用时（返回键退出或划掉任务卡片），优雅关闭服务，零后台驻留。
+ * 1. 互传页：引擎状态、已配对设备（可逐台删除）、接收目录；
+ * 2. 配对页：输入电脑 IP 与 6 位配对码完成绑定；
+ * 3. 我的页：设备名、通知权限、版本与更新、折叠的技术信息；
+ * 4. 启动会话级前台守护服务（FeisuoDaemonService），锁屏仍可接收文件；
+ * 5. 用户退出应用时优雅关闭服务，零后台驻留。
  *
  * @author xudong.hua,gemini
- * @since 2026-10-08 19:40 星期四
+ * @since 2026-11-07 10:30 星期六
  */
 class MainActivity : Activity() {
 
@@ -53,15 +59,30 @@ class MainActivity : Activity() {
         private const val REQUEST_POST_NOTIFICATIONS = 1001
     }
 
+    /** 整页根布局：AppBar / 内容区 / 底部导航，竖排三段。 */
     private lateinit var root: LinearLayout
-    /**
-     * 当前分区的内容容器。
-     *
-     * [section] 负责新建一张卡片并把它设为当前容器，后面的 [addRow] /
-     * [addParagraph] / [addInput] / [addButton] 都挂进这张卡片；
-     * 卡片之外调用时回退到 [root]，行为与旧版扁平列表一致。
-     */
+    private lateinit var appBar: LinearLayout
+    private lateinit var contentHost: FrameLayout
+    private lateinit var bottomNav: LinearLayout
+    private val pages = mutableListOf<View>()
+    private val navItems = mutableListOf<LinearLayout>()
+    private val navIcons = mutableListOf<ImageView>()
+    private val navLabels = mutableListOf<TextView>()
+
+    /** 当前分页的内容容器；[section] 建的卡片挂进它。 */
+    private var pageBody: LinearLayout? = null
+    /** 当前卡片；[addRow] / [addInput] / [addButton] 挂进它。 */
     private var sectionBody: LinearLayout? = null
+
+    /** 互传页：设备列表容器与「还没有配对设备」空态 */
+    private var deviceListBody: LinearLayout? = null
+    private var deviceEmptyView: TextView? = null
+    private var engineStatusPill: TextView? = null
+    private var localNameView: TextView? = null
+    private var receiveDirViewMine: TextView? = null
+    private var deviceInfoBody: LinearLayout? = null
+    private var deviceInfoToggle: TextView? = null
+
     private var engineStatusView: TextView? = null
     private var deviceIdView: TextView? = null
     private var configView: TextView? = null
@@ -159,85 +180,205 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * 搭 App 外壳：固定 AppBar + 可切换的内容区 + 底部导航。
+     *
+     * 老版是「一个 ScrollView 里从上往下堆 8 张说明卡片」——功能都在，
+     * 但看起来是一张网页而不是一个 App。这里把信息按"用户当下要做什么"
+     * 分到三个分页，说明文字压到一行，技术细节默认折叠。
+     */
     private fun buildUi() {
-        val scroll = ScrollView(this).apply {
-            setBackgroundColor(getColor(R.color.feisuo_bg))
-            isFillViewport = true
-            clipToPadding = false
-        }
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(24), dp(20), dp(36))
+            setBackgroundColor(getColor(R.color.feisuo_bg))
         }
-        scroll.addView(root, ViewGroup.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        ))
-        // 状态栏 / 刘海 / 手势条的高度由系统给，不写死数值：
-        // 不同 ROM 的导航方式差别很大，写死一定会在某台设备上压住内容。
-        ViewCompat.setOnApplyWindowInsetsListener(scroll) { view, insets ->
+        setContentView(root)
+
+        buildAppBar()
+        contentHost = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
+            )
+        }
+        root.addView(contentHost)
+        buildBottomNav()
+        buildPages()
+
+        // 状态栏 / 刘海 / 手势条的高度由系统给，不写死数值。
+        // AppBar 用品牌卡片色延伸到状态栏下方，手势条让给底栏。
+        ViewCompat.setOnApplyWindowInsetsListener(root) { _view, insets ->
             val bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
             )
-            view.setPadding(0, bars.top, 0, bars.bottom)
+            appBar.setPadding(
+                dp(18) + bars.left, dp(14) + bars.top, dp(18) + bars.right, dp(14)
+            )
+            contentHost.setPadding(bars.left, 0, bars.right, 0)
+            bottomNav.setPadding(
+                bars.left, dp(10), bars.right, dp(8) + bars.bottom
+            )
             insets
         }
-        setContentView(scroll)
-        ViewCompat.requestApplyInsets(scroll)
+        ViewCompat.requestApplyInsets(root)
+        switchTab(0)
+    }
 
-        addHeader()
+    /** 顶部品牌栏：图标 + 名称 + 一行状态，右侧是可一眼看到的引擎状态。 */
+    private fun buildAppBar() {
+        appBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(getColor(R.color.feisuo_card))
+            setPadding(dp(18), dp(14), dp(18), dp(14))
+        }
+        val badge = ImageView(this).apply {
+            setImageResource(R.drawable.ic_stat_feisuo)
+            imageTintList = ColorStateList.valueOf(getColor(R.color.feisuo_accent))
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            setBackgroundResource(R.drawable.bg_logo_badge)
+            contentDescription = getString(R.string.app_name)
+        }
+        appBar.addView(badge, LinearLayout.LayoutParams(dp(38), dp(38)))
 
-        // section() 内部已经 root.addView(卡片)，外面再包一层会把同一个 View
-        // 添加两次，onCreate 直接抛 IllegalStateException（"specified child
-        // already has a parent"）——应用一启动就闪退。
-        section("运行状态")
+        val titles = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), 0, 0, 0)
+        }
+        titles.addView(TextView(this).apply {
+            text = getString(R.string.app_name)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
+            setTextColor(getColor(R.color.feisuo_text_primary))
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        })
+        titles.addView(TextView(this).apply {
+            text = "局域网互传"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTextColor(getColor(R.color.feisuo_text_secondary))
+        })
+        appBar.addView(titles, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        engineStatusPill = TextView(this).apply {
+            text = "启动中"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTextColor(getColor(R.color.feisuo_text_secondary))
+        }
+        appBar.addView(engineStatusPill)
+        root.addView(appBar, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+    }
+
+    /** 底部导航：三个真实可达的分页，选中项用品牌色。 */
+    private fun buildBottomNav() {
+        val divider = View(this).apply {
+            setBackgroundColor(getColor(R.color.feisuo_card_stroke))
+        }
+        root.addView(divider, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(1)
+        ))
+
+        bottomNav = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(getColor(R.color.feisuo_card))
+            setPadding(0, dp(10), 0, dp(8))
+        }
+        val labels = listOf("互传", "配对", "我的")
+        val icons = listOf(
+            R.drawable.ic_tab_transfer,
+            R.drawable.ic_tab_pair,
+            R.drawable.ic_tab_me
+        )
+        for (i in labels.indices) {
+            val item = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                setOnClickListener { switchTab(i) }
+            }
+            val icon = ImageView(this).apply {
+                setImageResource(icons[i])
+                layoutParams = LinearLayout.LayoutParams(dp(22), dp(22))
+            }
+            val label = TextView(this).apply {
+                text = labels[i]
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                gravity = Gravity.CENTER
+                setPadding(0, dp(3), 0, 0)
+            }
+            item.addView(icon)
+            item.addView(label)
+            bottomNav.addView(item)
+            navItems.add(item)
+            navIcons.add(icon)
+            navLabels.add(label)
+        }
+        root.addView(bottomNav, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+    }
+
+    /** 建一个可滚动分页，并把它设为后续 [section] 的挂载目标。 */
+    private fun newPage(): ScrollView {
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            clipToPadding = false
+            setBackgroundColor(getColor(R.color.feisuo_bg))
+        }
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(12), dp(16), dp(24))
+        }
+        scroll.addView(body, ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+        contentHost.addView(scroll, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        pages.add(scroll)
+        pageBody = body
+        sectionBody = null
+        return scroll
+    }
+
+    private fun buildPages() {
+        buildTransferPage()
+        buildPairPage()
+        buildMinePage()
+    }
+
+    /** 互传页：状态 + 设备列表（可逐台删除）+ 接收目录。 */
+    private fun buildTransferPage() {
+        newPage()
+        section("本机状态")
         engineStatusView = addRow("引擎", "正在启动…")
-        deviceIdView = addRow("设备指纹", "读取中…")
-        configView = addRow("配置", "读取中…")
+        localNameView = addRow("设备名", "读取中…")
 
-        // 设备名此前只能在电脑上看到、无法在手机上调 —— 而局域网里
-        // 三台"飞梭设备"同时在线时，用户根本分不清哪台是自己。
-        section("本机设备名")
-        addParagraph(
-            "这个名字会显示在局域网内其他飞梭设备上（对方看到的“来自哪里”就是它）。" +
-                "保存后最多一个广播周期（约 3 秒）就会被对端刷新，已发生的历史记录不会改名。"
-        )
-        deviceNameInput = addInput("设备名", "例如 客厅手机")
-        nameSaveButton = addButton("保存设备名", primary = true) { saveDeviceName() }
-        nameSaveButton?.isEnabled = false
+        section("已配对设备")
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        deviceListBody = list
+        sectionBody?.addView(list, lp(0))
+        val empty = TextView(this).apply {
+            text = "还没有配对设备"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setTextColor(getColor(R.color.feisuo_text_secondary))
+            setPadding(0, dp(8), 0, dp(8))
+        }
+        deviceEmptyView = empty
+        sectionBody?.addView(empty, lp(0))
+        addButton("刷新设备", primary = false) { startEngineAsync() }
 
-        section("接收目录")
-        addParagraph(
-            "电脑发来的文件默认保存在下面这个位置。点按钮会用系统文件管理器打开它，" +
-                "之后可以直接查看、转发或删除。"
-        )
+        section("接收的文件")
         receiveDirView = addRow("保存位置", "读取中…")
         openDirButton = addButton("打开接收目录", primary = false) { openReceiveDir() }
         openDirButton?.isEnabled = false
+        addHint("在其它应用里点「分享」→ 飞梭，即可发送到已配对设备")
+    }
 
-        section("通知权限与锁屏可用")
-        // 通知栏是用户判断"飞梭到底还开着没"的唯一可见证据：
-        // 没有这条通知，前台服务在用户眼里等于不存在。
-        notificationStatusView = addRow("通知栏", "检查中…")
-        notificationActionButton = addButton("开启通知", primary = false) { onNotificationAction() }
-        addParagraph(
-            "飞梭在打开期间通过前台通知维持局域网待命与 Wi-Fi 组播监听，" +
-                "确保手机在锁屏、切 Wi-Fi 之后仍能被电脑秒搜并投递文件。" +
-                "Android 13+ 需要你授权通知，否则锁屏后系统可能冻结网络连接。"
-        )
-
-        section("如何配对")
-        addParagraph(
-            "1. 在 Windows 桌面端打开「双栏穿梭」或「系统设置」, 点击「查看本机配对码」。\n" +
-                "2. 在下方填入电脑的局域网 IP 与那 6 位配对码, 点击「配对」。\n" +
-                "3. 绑定一次即可, 之后两台设备在局域网内相遇会静默互认, 无需再确认。\n" +
-                "4. 收到的文件默认落在 /sdcard/Download/feisuo/。"
-        )
-
-        // 真实可用的配对表单。
-        // 旧实现只有一个写着"输入配对码"的按钮, 点击后弹"配对界面将在后续版本接入",
-        // 而上方说明却写着"在下方输入桌面端显示的 6 位配对码" —— 文案与按钮都在说谎,
-        // 且配不上意味着整条分享推送链路永远不可达。
+    /** 配对页：只留真正要动手的表单，不再铺四步教程。 */
+    private fun buildPairPage() {
+        newPage()
+        section("配对电脑")
+        addHint("在电脑端查看 6 位配对码，填入下方 IP 与配对码")
         ipInput = addInput("电脑 IP", "例如 192.168.1.10")
         pinInput = addInput("6 位配对码", "123456").apply {
             inputType = InputType.TYPE_CLASS_NUMBER
@@ -245,36 +386,94 @@ class MainActivity : Activity() {
         pairButtonRef = addButton("配对", primary = true) { pairWithDesktop() }
         pairButtonRef?.isEnabled = false
 
-        section("已配对设备")
-        trustedView = addRow("受信设备", "读取中…")
+        section("配对状态")
+        trustedView = addRow("已配对设备", "读取中…")
         addButton("刷新状态", primary = false) { startEngineAsync() }
+    }
+
+    /** 我的页：设置项聚合成行；设备指纹 / 端口这类技术信息默认折叠。 */
+    private fun buildMinePage() {
+        newPage()
+        section("本机")
+        deviceNameInput = addInput("设备名", "例如 客厅手机")
+        nameSaveButton = addButton("保存设备名", primary = true) { saveDeviceName() }
+        nameSaveButton?.isEnabled = false
+        receiveDirViewMine = addRow("接收目录", "读取中…")
+
+        section("通知")
+        notificationStatusView = addRow("通知栏", "检查中…")
+        notificationActionButton = addButton("开启通知", primary = false) { onNotificationAction() }
 
         section("版本与更新")
-        addParagraph(
-            "在线升级直接从 Release 下载 APK（国内优先走 Gitee），" +
-                "下载完成会先校验签名，再由系统安装器完成安装 —— " +
-                "首次使用需要在系统的「安装未知应用」里允许一次。"
-        )
-        // 版本号来自 BuildConfig（源头是仓库根 Cargo.toml），与电脑端同一个版本号。
-        // 写死字符串的话，用户装了新版界面还显示旧版号，而且不报错。
+        // 版本号来自 BuildConfig（源头是仓库根 Cargo.toml），界面不写死。
         addRow("当前版本", BuildConfig.VERSION_NAME)
         updateStatusView = addRow("更新状态", "尚未检查")
         updateCheckButton = addButton("检查更新", primary = false) {
             checkForUpdate(silent = false)
         }
-
         // 只在"确实有可做的事"时出现：没有新版本时挂一个灰按钮，
         // 用户会反复点它并怀疑功能坏了。
         updateActionButton = addButton("下载并安装", primary = true) {
             downloadAndInstall()
         }.apply { visibility = View.GONE }
 
-        section("随用随走 · 零后台")
-        addParagraph(
-            "• 锁屏可用：只要本应用仍在任务列表中，锁屏状态下依然可秒速接收局域网文件。\n" +
-                "• 退出即关：使用完毕后，按返回键退出或在多任务列表中划掉卡片即可彻底停止，不占用后台与电量。"
-        )
+        section("设备信息")
+        val toggle = TextView(this).apply {
+            text = "展开技术信息"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextColor(getColor(R.color.feisuo_text_secondary))
+            setPadding(0, dp(4), 0, dp(4))
+            setOnClickListener { toggleDeviceInfo() }
+        }
+        deviceInfoToggle = toggle
+        sectionBody?.addView(toggle, lp(0))
+        val infoBody = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+        deviceInfoBody = infoBody
+        sectionBody?.addView(infoBody, lp(0))
+        // 临时把 sectionBody 指到折叠容器，让 addRow 挂进去。
+        val outer = sectionBody
+        sectionBody = infoBody
+        deviceIdView = addRow("设备指纹", "读取中…")
+        configView = addRow("配置", "读取中…")
+        sectionBody = outer
+
+        addHint("随用随走 · 退出应用即停止")
     }
+
+    private fun toggleDeviceInfo() {
+        val expanded = deviceInfoBody?.visibility == View.VISIBLE
+        deviceInfoBody?.visibility = if (expanded) View.GONE else View.VISIBLE
+        deviceInfoToggle?.text = if (expanded) "展开技术信息" else "收起技术信息"
+    }
+
+    /** 切换分页：内容只留当前页可见，导航项用品牌色标出选中态。 */
+    private fun switchTab(index: Int) {
+        for (i in pages.indices) {
+            pages[i].visibility = if (i == index) View.VISIBLE else View.GONE
+        }
+        for (i in navItems.indices) {
+            val color = getColor(
+                if (i == index) R.color.feisuo_accent else R.color.feisuo_text_secondary
+            )
+            navIcons[i].imageTintList = ColorStateList.valueOf(color)
+            navLabels[i].setTextColor(color)
+            navLabels[i].typeface = Typeface.create(
+                Typeface.DEFAULT, if (i == index) Typeface.BOLD else Typeface.NORMAL
+            )
+        }
+    }
+
+    /** 一行轻量提示：只给"下一步做什么"，不写说明书。 */
+    private fun addHint(text: String): TextView =
+        TextView(this).apply {
+            this.text = text
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setTextColor(getColor(R.color.feisuo_text_tertiary))
+            setLineSpacing(dp(2).toFloat(), 1f)
+        }.also { addToSection(it, top = dp(10)) }
 
     /**
      * 执行配对。
@@ -308,7 +507,7 @@ class MainActivity : Activity() {
                 val probed = NativeBridge.probeDevice(ip)
                     ?: return@runCatching "无法连接 $ip, 请确认与电脑在同一局域网"
                 val port = runCatching {
-                    org.json.JSONObject(probed).optInt("transfer_port", 0)
+                    JSONObject(probed).optInt("transfer_port", 0)
                 }.getOrDefault(0)
                 if (port <= 0) return@runCatching "未获取到电脑的传输端口"
 
@@ -464,36 +663,133 @@ class MainActivity : Activity() {
         toast("没有找到可用的文件管理器, 接收目录:\n$normalized")
     }
 
+    /** 名册里的一行：id 用于删除，name / ip 用于展示。 */
+    private data class DeviceRow(
+        val id: String,
+        val name: String,
+        val ip: String,
+        val trusted: Boolean,
+    )
+
     /** 刷新已配对设备列表。配对成功后必须能看到结果, 否则用户无从确认。 */
     private fun loadTrustedDevices() {
         val t = Thread({
-            val summary = runCatching {
-                val arr = org.json.JSONArray(NativeBridge.trustedDevicesJson())
+            val rows = runCatching {
+                val arr = JSONArray(NativeBridge.trustedDevicesJson())
                 (0 until arr.length()).mapNotNull { i ->
                     val o = arr.optJSONObject(i) ?: return@mapNotNull null
-                    if (!o.optBoolean("is_trusted", false)) return@mapNotNull null
-                    val name = o.optString("device_name").ifBlank { "未命名设备" }
-                    val ip = o.optString("last_ip").ifBlank { "未知 IP" }
-                    "$name ($ip)"
+                    val id = o.optString("device_id")
+                    if (id.isBlank()) return@mapNotNull null
+                    DeviceRow(
+                        id = id,
+                        name = o.optString("device_name").ifBlank { "未命名设备" },
+                        ip = o.optString("last_ip").ifBlank { "未知 IP" },
+                        trusted = o.optBoolean("is_trusted", false),
+                    )
                 }
             }.getOrDefault(emptyList())
 
-            val text = when {
-                !FeisuoRuntime.isEngineRunning() -> "引擎未就绪"
-                summary.isEmpty() -> "尚未配对"
-                else -> summary.joinToString("\n")
-            }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                trustedView?.text = text
+                renderDeviceRows(rows)
+                trustedView?.text = when {
+                    !FeisuoRuntime.isEngineRunning() -> "引擎未就绪"
+                    rows.isEmpty() -> "尚未配对"
+                    else -> "已配对 ${rows.size} 台"
+                }
             }
         }, "feisuo-trusted-refresh")
         t.isDaemon = true
         t.start()
     }
 
+    /** 每台设备一行，右侧给「删除」——改名后残留的旧条目就靠它清掉。 */
+    private fun renderDeviceRows(rows: List<DeviceRow>) {
+        val body = deviceListBody ?: return
+        body.removeAllViews()
+        deviceEmptyView?.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
+        for (d in rows) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(8), 0, dp(8))
+            }
+            val icon = ImageView(this).apply {
+                setImageResource(R.drawable.ic_stat_feisuo)
+                imageTintList = ColorStateList.valueOf(getColor(R.color.feisuo_accent))
+                alpha = if (d.trusted) 1f else 0.45f
+            }
+            row.addView(icon, LinearLayout.LayoutParams(dp(20), dp(20)))
+
+            val text = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(10), 0, 0, 0)
+            }
+            text.addView(TextView(this).apply {
+                this.text = d.name
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                setTextColor(getColor(R.color.feisuo_text_primary))
+            })
+            text.addView(TextView(this).apply {
+                this.text = if (d.trusted) d.ip else "${d.ip} · 未信任"
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                setTextColor(getColor(R.color.feisuo_text_secondary))
+            })
+            row.addView(text, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+            val delete = Button(this).apply {
+                this.text = "删除"
+                isAllCaps = false
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setTextColor(getColor(R.color.feisuo_danger))
+                setBackgroundResource(R.drawable.bg_button_secondary)
+                backgroundTintList = null
+                stateListAnimator = null
+                minHeight = 0
+                minimumHeight = 0
+                setPadding(dp(10), dp(4), dp(10), dp(4))
+                setOnClickListener { confirmDeleteDevice(d) }
+            }
+            row.addView(delete)
+            body.addView(row, lp(0))
+        }
+    }
+
+    /** 删除不可撤销，先二次确认；文案只说后果，不铺说明书。 */
+    private fun confirmDeleteDevice(dev: DeviceRow) {
+        AlertDialog.Builder(this)
+            .setTitle("删除设备")
+            .setMessage(
+                "从设备列表中移除「${dev.name}」？\n\n" +
+                    "将删除本机保存的配对记录与已知地址，传输记录会保留。"
+            )
+            .setNegativeButton("取消", null)
+            .setPositiveButton("删除") { _, _ -> executeDeleteDevice(dev) }
+            .show()
+    }
+
+    /** 删除是一次同步落盘，放后台线程（见 android_guard 的 BLOCKING_METHODS）。 */
+    private fun executeDeleteDevice(dev: DeviceRow) {
+        val t = Thread({
+            val err = runCatching { NativeBridge.deleteDevice(dev.id) }
+                .getOrElse { "删除失败: ${it.message}" }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (err == null) {
+                    toast("已删除「${dev.name}」")
+                    loadTrustedDevices()
+                } else {
+                    toast(err)
+                }
+            }
+        }, "feisuo-delete-device")
+        t.isDaemon = true
+        t.start()
+    }
+
     private fun startEngineAsync() {
         engineStatusView?.text = "正在启动…"
+        engineStatusPill?.text = "启动中"
         worker?.interrupt()
         worker = Thread {
             // nativeInitEngine 失败返回 0, 不会抛异常;
@@ -525,6 +821,10 @@ class MainActivity : Activity() {
                 engineStatusView?.setTextColor(
                     getColor(if (ok) R.color.feisuo_accent else R.color.feisuo_danger)
                 )
+                engineStatusPill?.text = if (ok) "运行中" else "未就绪"
+                engineStatusPill?.setTextColor(
+                    getColor(if (ok) R.color.feisuo_accent else R.color.feisuo_danger)
+                )
                 deviceIdView?.text = deviceId.ifEmpty { "—" }
                 configView?.text = summarizeConfig(configJson)
                 // 引擎就绪后才允许配对, 免得用户点下去必然失败
@@ -532,7 +832,9 @@ class MainActivity : Activity() {
                 nameSaveButton?.isEnabled = ok
                 openDirButton?.isEnabled = ok
                 if (deviceName.isNotBlank()) deviceNameInput?.setText(deviceName)
+                localNameView?.text = deviceName.ifBlank { "—" }
                 receiveDirView?.text = receiveDir.ifBlank { "—" }
+                receiveDirViewMine?.text = receiveDir.ifBlank { "—" }
             }
             if (ok) loadTrustedDevices()
         }.also {
@@ -884,47 +1186,13 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- 小工具
 
-    private fun addHeader() {
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(2))
-        }
-        val badge = ImageView(this).apply {
-            setImageResource(R.drawable.ic_stat_feisuo)
-            imageTintList = ColorStateList.valueOf(getColor(R.color.feisuo_accent))
-            setPadding(dp(11), dp(11), dp(11), dp(11))
-            setBackgroundResource(R.drawable.bg_logo_badge)
-            contentDescription = getString(R.string.app_name)
-        }
-        header.addView(badge, LinearLayout.LayoutParams(dp(52), dp(52)))
-
-        val titles = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), 0, 0, 0)
-        }
-        titles.addView(TextView(this).apply {
-            text = "飞梭"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
-            setTextColor(getColor(R.color.feisuo_text_primary))
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        })
-        titles.addView(TextView(this).apply {
-            text = "局域网互传 · 无人值守待命"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setTextColor(getColor(R.color.feisuo_text_secondary))
-            setPadding(0, dp(3), 0, 0)
-        })
-        header.addView(titles, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(header)
-    }
-
     /**
      * 分区标题 + 一张卡片。
      *
-     * 卡片会被设为 [sectionBody]，后续的 [addRow] / [addParagraph] /
-     * [addInput] / [addButton] 自动挂进这张卡片，直到下一个 [section]。
-     * 返回值仍是标题 TextView（保留旧调用形态），但**不要**再 root.addView 一次。
+     * 卡片会被设为 [sectionBody]，后续的 [addRow] / [addInput] /
+     * [addButton] / [addHint] 自动挂进这张卡片，直到下一个 [section]。
+     * 挂到当前分页 [pageBody]；**不要**在调用处再 root.addView 一次
+     * （同一个 View 挂两次会抛 IllegalStateException，应用启动即闪退）。
      */
     private fun section(text: String): TextView {
         val header = TextView(this).apply {
@@ -932,16 +1200,25 @@ class MainActivity : Activity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             setTextColor(getColor(R.color.feisuo_accent))
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            setPadding(dp(2), dp(24), 0, dp(8))
+            setPadding(dp(2), dp(18), 0, dp(8))
         }
-        root.addView(header)
+        val parent = pageBody
+        if (parent == null) {
+            root.addView(header)
+        } else {
+            parent.addView(header)
+        }
 
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(10), dp(16), dp(14))
             setBackgroundResource(R.drawable.bg_card)
         }
-        root.addView(body)
+        if (parent == null) {
+            root.addView(body)
+        } else {
+            parent.addView(body)
+        }
         sectionBody = body
         return header
     }
@@ -969,10 +1246,10 @@ class MainActivity : Activity() {
         row.addView(labelView)
         row.addView(valueView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
-        // 卡片存在时挂进卡片；没有 section 时回退到根布局。
+        // 卡片存在时挂进卡片；没有 section 时回退到分页 / 根布局。
         // 这个 if/else 必须保留 root.addView 分支 —— android_guard 靠它识别
         // "自己会挂载"的 helper，删掉后守卫会判定 addRow 不再自挂载。
-        val parent = sectionBody ?: root
+        val parent = sectionBody ?: pageBody ?: root
         if (parent === root) {
             root.addView(row, lp(top = dp(2)))
         } else {
@@ -981,23 +1258,15 @@ class MainActivity : Activity() {
         return valueView
     }
 
-    /** 把 View 挂进当前卡片；没有 section 时挂到根布局。 */
+    /** 把 View 挂进当前卡片；没有 section 时挂到分页 / 根布局。 */
     private fun addToSection(view: View, top: Int = dp(2)) {
-        val parent = sectionBody ?: root
+        val parent = sectionBody ?: pageBody ?: root
         if (parent === root) {
             root.addView(view, lp(top = top))
         } else {
             parent.addView(view, lp(top = top))
         }
     }
-
-    private fun addParagraph(text: String): TextView =
-        TextView(this).apply {
-            this.text = text
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setTextColor(getColor(R.color.feisuo_text_secondary))
-            setLineSpacing(dp(4).toFloat(), 1f)
-        }.also { addToSection(it, top = dp(6)) }
 
     /** 单行输入框, 配对表单用 */
     private fun addInput(label: String, hint: String): EditText =

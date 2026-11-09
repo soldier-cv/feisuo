@@ -354,6 +354,16 @@ pub fn trusted_devices_json(handle: i64) -> String {
     }
 }
 
+/// 彻底删除一条设备记录（界面「删除设备」）。
+///
+/// 与解除配对的区别：解除配对只降级信任等级并**保留行**，删除会清掉
+/// 名册记录、访问授权与已知端点。它是用户二次确认后的纯本地动作，
+/// 用于清掉改名 / 换机之后再也上不线的旧条目。
+pub fn delete_device(handle: i64, device_id: &str) -> std::result::Result<bool, String> {
+    let engine = engine_for_handle(handle).ok_or_else(|| "引擎未启动".to_string())?;
+    engine.delete_device(device_id).map_err(|e| describe(&e))
+}
+
 /// 向指定设备发送文件。
 ///
 /// 系统"分享到飞梭"的落点: 分享 Activity 只负责把字节流落盘,

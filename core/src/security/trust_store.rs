@@ -959,6 +959,50 @@ impl TrustStore {
         Ok(affected > 0)
     }
 
+    /// 彻底删除一条设备记录（用户显式操作，与「解除配对」是两个动作）。
+    ///
+    /// `downgrade_to_untrusted` **保留行**：它只把信任等级降回 `pending`，
+    /// 于是设备仍以「未信任」留在名册里。用户改了手机名之后，旧的离线条目
+    /// 既不会再上线，也没法靠解除配对清掉 —— 这正是需要一条真正删除通路
+    /// 的原因（2026-11-07 明确提出）。
+    ///
+    /// 与解除配对的边界（守卫 `guard_no_local_only_unpair.py` 会盯着）：
+    /// - **只有**本方法允许 `DELETE FROM trusted_devices`；
+    /// - `unpair_device` / `downgrade_to_untrusted` 仍然只 `UPDATE`，绝不删行；
+    /// - 删除只作用于本机名册。是否通知对端由宿主层在删除前尽力完成：
+    ///   在线设备先走双向解除配对，离线旧条目无需通知。
+    ///
+    /// 关联数据一并清理（这些表没有外键，漏一条就是永久残留）：
+    /// `access_scopes`（授权）、`session_grants`（短期免确认）、
+    /// `device_endpoints`（历史地址）。**保留** `transfer_history` /
+    /// `security_events` / `access_audit` —— 那是用户的记录与审计轨迹，
+    /// 不该因为删掉一条名册条目而消失。
+    pub fn delete_device(&self, device_id: &str) -> Result<bool> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let affected = tx.execute(
+            "DELETE FROM trusted_devices WHERE device_id = ?1",
+            params![device_id],
+        )?;
+        if affected == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "DELETE FROM access_scopes WHERE peer_device_id = ?1",
+            params![device_id],
+        )?;
+        tx.execute(
+            "DELETE FROM session_grants WHERE peer_device_id = ?1",
+            params![device_id],
+        )?;
+        tx.execute(
+            "DELETE FROM device_endpoints WHERE device_id = ?1",
+            params![device_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// 读取某台设备当前的配对世代（空串 = 无共同世代）。
     pub fn pairing_epoch(&self, device_id: &str) -> Result<Option<String>> {
         let conn = self.conn();
@@ -2602,4 +2646,106 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 每个用例一个独立的临时库，绝不碰用户真实的 trust_store.db。
+    fn temp_db(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "feisuo-delete-{}-{}-{}",
+            tag,
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("创建临时目录");
+        dir.join("trust_store.db")
+    }
+
+    fn bound_device() -> TrustedDevice {
+        TrustedDevice {
+            device_id: "peer".into(),
+            device_name: "旧手机".into(),
+            public_key_hex: "ab".repeat(32),
+            last_ip: "100.64.0.99".into(),
+            bound_at: "2026-01-01T00:00:00Z".into(),
+            is_trusted: true,
+            trust_level: TrustLevel::Permanent,
+            visible: true,
+            last_seen_at: 1_800_000_000,
+            pairing_epoch: "e1".into(),
+        }
+    }
+
+    /// 删除必须把名册行与三张无外键的关联表一起清干净，
+    /// 但**保留**传输记录（那是用户的历史，不是设备的附属状态）。
+    #[test]
+    fn delete_device_clears_related_state_but_keeps_history() {
+        let store = TrustStore::open_at(temp_db("clear")).expect("打开测试库");
+        store.bind_device(&bound_device()).unwrap();
+
+        let mut scope = AccessScope::default();
+        scope.can_pull = false;
+        scope.deny_paths = vec!["/tmp/secret".into()];
+        store.set_access_scope("peer", &scope).unwrap();
+        store.grant_session("peer", "pull", 600).unwrap();
+        store
+            .remember_endpoint("peer", "100.64.0.99", 42100, "overlay", true)
+            .unwrap();
+        store
+            .add_transfer_record(
+                "photo.jpg",
+                1024,
+                "recv",
+                "peer",
+                "旧手机",
+                "100.64.0.99",
+                "completed",
+                100,
+                30,
+                TransferMetrics::default(),
+                &[],
+            )
+            .unwrap();
+
+        assert!(store.delete_device("peer").unwrap());
+        assert!(!store.delete_device("peer").unwrap(), "删第二次应返回 false");
+
+        assert!(store.list_devices().unwrap().is_empty(), "名册行必须消失");
+        assert!(
+            store.list_active_grants("peer").unwrap().is_empty(),
+            "短期授权必须清掉"
+        );
+        assert!(
+            store.all_endpoints().unwrap().is_empty(),
+            "已知端点必须清掉"
+        );
+        assert_eq!(
+            store.get_access_scope("peer").unwrap(),
+            AccessScope::default(),
+            "访问范围必须回到默认"
+        );
+        assert_eq!(
+            store.list_transfer_records(10).unwrap().len(),
+            1,
+            "传输记录不随名册删除"
+        );
+    }
+
+    /// 解除配对仍只降级、保留行 —— 删除是另一个动作，两者不能合并。
+    /// 这条钉住的是 `guard_no_local_only_unpair.py` 的前提。
+    #[test]
+    fn unpair_keeps_the_row_while_delete_removes_it() {
+        let store = TrustStore::open_at(temp_db("unpair")).expect("打开测试库");
+        store.bind_device(&bound_device()).unwrap();
+        assert!(store.downgrade_to_untrusted("peer").unwrap());
+        let rows = store.list_devices().unwrap();
+        assert_eq!(rows.len(), 1, "解除配对绝不删行");
+        assert_eq!(rows[0].trust_level, TrustLevel::Pending);
+
+        assert!(store.delete_device("peer").unwrap());
+        assert!(store.list_devices().unwrap().is_empty());
+    }
 }

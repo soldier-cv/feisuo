@@ -1172,6 +1172,14 @@ impl FeisuoEngine {
         self.trust_store.list_hidden_devices()
     }
 
+    /// 彻底删除一条设备记录（界面「删除设备」）。
+    ///
+    /// 与 `unpair_device` 的区别：解除配对保留行并尽力双向通知对端；
+    /// 删除是用户二次确认后的本地动作，清掉名册记录与相关授权。
+    pub fn delete_device(&self, device_id: &str) -> Result<bool> {
+        self.trust_store.delete_device(device_id)
+    }
+
     /// 构建设备名册：在线表 ∪ 信任库（§3.6）。
     ///
     /// 侧栏应当消费这个结果而不是 `get_online_devices()` ——

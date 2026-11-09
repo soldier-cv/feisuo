@@ -296,6 +296,7 @@ async fn main() {
             commands::set_device_trust_level,
             commands::set_device_visible,
             commands::get_hidden_devices,
+            commands::delete_device,
             commands::cancel_incoming_transfer,
             commands::get_device_access_scope,
             commands::set_device_access_scope,

@@ -6,6 +6,11 @@
   3. 一方解开配对，双方都有变成不信任
   4. 设备分 信任 / 每次认证 / 未信任
 
+第 2 条已被 2026-11-07 的新需求追加：用户改名后旧的离线条目删不掉，
+明确要求补一个「删除设备」动作。界面动作现在是三个互不替代的操作：
+解除配对（双向、保留行）、隐藏（纯显示偏好）、删除（清掉本机名册记录）。
+下面「需求 2」的取证据此更新，并硬断言删除链路真的接通了。
+
 用法: python scripts/audit_trust_requirements.py
 退出码 0 = 全部达到或有据可查地未达成; 非 0 = 有一条的结论是"假的"。
 """
@@ -107,7 +112,9 @@ ev1 = [
 results.append(("1 没有黑名单功能（若有则说明之前做错了）", verdict1, ev1))
 
 # ---------------------------------------------------------------- 需求 2
-# "只有解开配对隐藏设备的功能" —— 界面上的动作应当只有这两个 + 信任档位切换。
+# "只有解开配对隐藏设备的功能" —— 当时界面动作是这两个 + 信任档位切换。
+# 2026-11-07 用户追加了「删除设备」（删掉改名后残留的旧条目），于是现在是
+# 三个互不替代的动作：解除配对保留行、隐藏只改显示、删除清掉本机名册记录。
 # 用函数**定义**判断，而不是"字符串出现过" —— 命令体被清空而签名还在时，
 # 前者会红后者不会。
 has_unpair_cmd = re.search(
@@ -118,13 +125,30 @@ has_hide_cmd = re.search(
     r'#\[tauri::command\]\s*pub fn set_device_visible\(', rd(CMD)) is not None
 app_remove = re.search(r'async function removeTrusted\(.*?\n\}', rd(APP), re.S)
 app_hide = 'setDeviceVisible' in rd(BRG)
-verdict2 = "✅ 界面动作 = 解除配对 + 隐藏（外加信任档位切换）"
+# 删除链路：信任库方法 → core 引擎 → Tauri 命令 → 注册表 → bridge → 界面。
+# 少一环就是"有按钮但点了没反应"，而这类断链在编译期完全无感。
+has_delete_store = re.search(r'pub fn delete_device\s*\(', rd(TS)) is not None
+has_delete_cmd = re.search(
+    r'#\[tauri::command\]\s*pub fn delete_device\(', rd(CMD)) is not None
+has_delete_registered = 'commands::delete_device' in rd(MAIN)
+has_delete_bridge = 'static async deleteDevice' in rd(BRG)
+has_delete_ui = 'FeisuoBridge.deleteDevice(' in rd(APP)
+delete_wired = all([
+    has_delete_store, has_delete_cmd, has_delete_registered,
+    has_delete_bridge, has_delete_ui,
+])
+
+verdict2 = ("✅ 界面动作 = 解除配对 + 隐藏 + 删除（外加信任档位切换）"
+            if delete_wired else "❌ 删除设备链路没接通")
 ev2 = [
     "解除配对命令存在: %s ; 已注册: %s" % (has_unpair_cmd, has_unpair_registered),
     "隐藏命令存在: %s ; bridge 暴露: %s" % (has_hide_cmd, app_hide),
     "removeTrusted 走双向通道: %s" % ('unpairDevice' in app_remove.group(0) if app_remove else False),
+    "删除链路 core存储/命令/注册/bridge/界面: %s/%s/%s/%s/%s" % (
+        has_delete_store, has_delete_cmd, has_delete_registered,
+        has_delete_bridge, has_delete_ui),
 ]
-results.append(("2 只有解开配对 + 隐藏两个功能", verdict2, ev2))
+results.append(("2 解除配对 + 隐藏 + 删除三个功能", verdict2, ev2))
 
 # ---------------------------------------------------------------- 需求 3
 # "一方解开配对，双方都有变成未信任" —— 端到端
@@ -345,6 +369,9 @@ if missing:
 # 需求 2 / 4 的硬断言
 if not hide_wired:
     print("✗ 需求 2 的『隐藏』功能接线不完整（命令 / 注册 / bridge / 界面）")
+    sys.exit(1)
+if not delete_wired:
+    print("✗ 需求 2 的『删除设备』链路不完整（core / 命令 / 注册 / bridge / 界面）")
     sys.exit(1)
 if tier_missing:
     print("✗ 需求 4 缺写入路径的档位: %s —— 三档必须都真的能被写入"

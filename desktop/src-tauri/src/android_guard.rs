@@ -48,6 +48,8 @@ const BLOCKING_METHODS: &[&str] = &[
     // 内部是 `runtime().block_on(...)` 写配置: 一次同步落盘,
     // 放主线程在慢盘 / 省电模式下会掉帧甚至 ANR。
     "setDeviceName",
+    // 删除设备记录同样是一次同步落盘(事务里连清三张表), 不能占主线程。
+    "deleteDevice",
 ];
 
 /// **间接**阻塞入口: 这些宿主方法内部会走到阻塞的 core 接口。
