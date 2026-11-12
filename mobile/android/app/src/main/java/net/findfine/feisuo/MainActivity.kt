@@ -39,13 +39,14 @@ import java.io.File
  * 飞梭 Android 端主界面。
  *
  * 界面是标准的 App 外壳：固定品牌 AppBar + 三个分页 + 底部导航，
- * 不再是「一整页从上往下堆说明文字」的长表单。技术细节（设备指纹、
- * 端口）收进「我的」里默认折叠的「设备信息」。
+ * 不再是「一整页从上往下堆说明文字」的长表单。
  *
  * 核心功能：
- * 1. 互传页：引擎状态、已配对设备（可逐台删除）、接收目录；
- * 2. 配对页：输入电脑 IP 与 6 位配对码完成绑定；
- * 3. 我的页：设备名、通知权限、版本与更新、折叠的技术信息；
+ * 1. 互传页：引擎状态、名册里的已配对设备（在线/离线一目了然，可逐台删除）、
+ *    接收目录；名册每 5 秒自刷新，配对成功后自动出现、自动变在线；
+ * 2. 配对页：两个方向都支持 —— 输入电脑上的 6 位码，或自己出码让电脑来连；
+ *    同局域网的电脑会被自动发现，点一下就能填好 IP；
+ * 3. 我的页：设备名、设备信息（指纹 / 端口 / 接收目录直接展示）、通知、更新；
  * 4. 启动会话级前台守护服务（FeisuoDaemonService），锁屏仍可接收文件；
  * 5. 用户退出应用时优雅关闭服务，零后台驻留。
  *
@@ -57,6 +58,8 @@ class MainActivity : Activity() {
     companion object {
         private const val TAG = "FeisuoMainActivity"
         private const val REQUEST_POST_NOTIFICATIONS = 1001
+        /** 名册轮询间隔：发现信标 3 秒一轮，5 秒足够收敛且不浪费电 */
+        private const val ROSTER_POLL_MS = 5000L
     }
 
     /** 整页根布局：AppBar / 内容区 / 底部导航，竖排三段。 */
@@ -74,19 +77,19 @@ class MainActivity : Activity() {
     /** 当前卡片；[addRow] / [addInput] / [addButton] 挂进它。 */
     private var sectionBody: LinearLayout? = null
 
+    /** 主线程 Handler：名册轮询与配对码倒计时都用它。 */
+    private val ui = android.os.Handler(android.os.Looper.getMainLooper())
+
     /** 互传页：设备列表容器与「还没有配对设备」空态 */
     private var deviceListBody: LinearLayout? = null
     private var deviceEmptyView: TextView? = null
     private var engineStatusPill: TextView? = null
     private var localNameView: TextView? = null
     private var receiveDirViewMine: TextView? = null
-    private var deviceInfoBody: LinearLayout? = null
-    private var deviceInfoToggle: TextView? = null
 
     private var engineStatusView: TextView? = null
     private var deviceIdView: TextView? = null
     private var configView: TextView? = null
-    private var trustedView: TextView? = null
     private var ipInput: EditText? = null
     private var pinInput: EditText? = null
     private var pairButtonRef: Button? = null
@@ -98,6 +101,34 @@ class MainActivity : Activity() {
     private var notificationActionButton: Button? = null
     private var updateStatusView: TextView? = null
     private var updateCheckButton: Button? = null
+
+    // ---------------- 设备名册 / 自动发现 ----------------
+
+    /** 最近一次名册快照，供渲染与"新设备出现"判断复用 */
+    private var rosterRows: List<RosterRow> = emptyList()
+    /** 防止轮询叠加：上一次 JNI 还没返回时直接跳过这一轮 */
+    private var rosterBusy = false
+    /** 应用在前台时才轮询（`onPause` 停掉） */
+    private var rosterPolling = false
+    private var nearbyDeviceBody: LinearLayout? = null
+    private var nearbyEmptyView: TextView? = null
+
+    // ---------------- 配对模式 ----------------
+
+    /** true = 本机出码（电脑来连我），false = 输入电脑的码 */
+    private var isShowPairMode = false
+    private var pairModeButtons: List<Button> = emptyList()
+    private var pairInputViews: MutableList<View> = mutableListOf()
+    private var pairShowViews: MutableList<View> = mutableListOf()
+    private var localPinView: TextView? = null
+    private var localPinTtlView: TextView? = null
+    private var localPinExpiresAt = 0L
+    private var localPinTicking = false
+    /** 出码时的已有配对集合：用来发现"电脑连进来了" */
+    private var pinBaseline: Set<String>? = null
+    /** 名册还没读到时先记着，等第一份名册回来再取基线（否则会误报"已连接"） */
+    private var pinBaselinePending = false
+
     /** 检查通过、下载前的一次点击；文本随状态在「下载并安装 / 立即安装」之间切换 */
     private var updateActionButton: Button? = null
     /** 已下载并校验通过、等待安装的更新包 */
@@ -140,6 +171,12 @@ class MainActivity : Activity() {
         // 这里只读系统服务，不碰任何阻塞的 core 接口。
         updateNotificationStatus()
 
+        // 回到前台就恢复名册轮询：发现服务的设备表在后台一直在更新，
+        // 界面只需要把它读出来。配对的电脑上线/下线因此是**自动**的，
+        // 不需要用户去点"刷新设备"。
+        startRosterPolling()
+        if (isShowPairMode && localPinExpiresAt > nowSecs()) startLocalPinTicker()
+
         // 同理：用户为了装更新去了「安装未知应用」授权页，回来后要把
         // 刚才被打断的那次安装续上。不续的话，界面上明明写着"授权后即可继续"，
         // 实际什么都没发生 —— 用户只能再点一次（而且不知道该点哪个）。
@@ -149,7 +186,17 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onPause() {
+        // 界面不可见时停止轮询与倒计时：后台常驻只负责收文件，
+        // 没必要为一个看不见的 TextView 每秒唤醒一次。
+        stopRosterPolling()
+        stopLocalPinTicker()
+        super.onPause()
+    }
+
     override fun onDestroy() {
+        stopRosterPolling()
+        stopLocalPinTicker()
         worker?.interrupt()
         worker = null
         pairThread?.interrupt()
@@ -353,7 +400,7 @@ class MainActivity : Activity() {
         engineStatusView = addRow("引擎", "正在启动…")
         localNameView = addRow("设备名", "读取中…")
 
-        section("已配对设备")
+        section("设备")
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         deviceListBody = list
         sectionBody?.addView(list, lp(0))
@@ -365,39 +412,105 @@ class MainActivity : Activity() {
         }
         deviceEmptyView = empty
         sectionBody?.addView(empty, lp(0))
-        addButton("刷新设备", primary = false) { startEngineAsync() }
+        addButton("刷新", primary = false) { refreshRoster() }
 
         section("接收的文件")
         receiveDirView = addRow("保存位置", "读取中…")
         openDirButton = addButton("打开接收目录", primary = false) { openReceiveDir() }
         openDirButton?.isEnabled = false
-        addHint("在其它应用里点「分享」→ 飞梭，即可发送到已配对设备")
     }
 
-    /** 配对页：只留真正要动手的表单，不再铺四步教程。 */
+    /**
+     * 配对页：两个方向都支持。
+     *
+     * 旧版只有"输入电脑屏幕上的码"一个方向。可手边有电脑、手机在兜里时，
+     * 让电脑来连手机才是顺手的那个方向（电脑有键盘，敲 6 位快得多）。
+     * 现在拆成两个并列动作，整组切换可见性 —— 不用在界面上写一段
+     * "请对方先点哪里"的教程。
+     */
     private fun buildPairPage() {
         newPage()
-        section("配对电脑")
-        addHint("在电脑端查看 6 位配对码，填入下方 IP 与配对码")
+
+        val (_, modeCard) = sectionGroup("配对方式")
+        val modeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val btnInput = modeButton("输入配对码") { setPairMode(false) }
+        val btnShow = modeButton("本机配对码") { setPairMode(true) }
+        modeRow.addView(btnInput, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        modeRow.addView(btnShow, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            leftMargin = dp(8)
+        })
+        modeCard.addView(modeRow, lp(0))
+        pairModeButtons = listOf(btnInput, btnShow)
+        // 模式选择器**不进** pairInputViews：它在两个方向下都要可见，
+        // 否则切到「本机配对码」之后连切回去的按钮都没了。
+
+        // ---- 方向一：输入电脑上的码 ----
+        val (nearbyHeader, nearbyCard) = sectionGroup("附近的电脑")
+        val nearbyList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        nearbyDeviceBody = nearbyList
+        nearbyCard.addView(nearbyList, lp(0))
+        val nearbyEmpty = TextView(this).apply {
+            text = "正在搜索局域网…"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setTextColor(getColor(R.color.feisuo_text_secondary))
+            setPadding(0, dp(6), 0, dp(6))
+        }
+        nearbyEmptyView = nearbyEmpty
+        nearbyCard.addView(nearbyEmpty, lp(0))
+        pairInputViews.add(nearbyHeader)
+        pairInputViews.add(nearbyCard)
+
+        val (pinHeader, pinCard) = sectionGroup("电脑上的配对码")
         ipInput = addInput("电脑 IP", "例如 192.168.1.10")
         pinInput = addInput("6 位配对码", "123456").apply {
             inputType = InputType.TYPE_CLASS_NUMBER
         }
         pairButtonRef = addButton("配对", primary = true) { pairWithDesktop() }
         pairButtonRef?.isEnabled = false
+        pairInputViews.add(pinHeader)
+        pairInputViews.add(pinCard)
 
-        section("配对状态")
-        trustedView = addRow("已配对设备", "读取中…")
-        addButton("刷新状态", primary = false) { startEngineAsync() }
+        // ---- 方向二：本机出码，电脑来连 ----
+        val (showHeader, showCard) = sectionGroup("本机配对码")
+        localPinView = TextView(this).apply {
+            text = "------"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 40f)
+            typeface = Typeface.MONOSPACE
+            letterSpacing = 0.22f
+            gravity = Gravity.CENTER
+            setTextColor(getColor(R.color.feisuo_accent))
+            setPadding(0, dp(10), 0, dp(4))
+        }
+        showCard.addView(localPinView, lp(0))
+        localPinTtlView = TextView(this).apply {
+            text = "生成后电脑端输入此码即可配对"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextColor(getColor(R.color.feisuo_text_secondary))
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(4))
+        }
+        showCard.addView(localPinTtlView, lp(0))
+        val regen = addButton("生成配对码", primary = true) { generateLocalPin() }
+        regen.visibility = View.VISIBLE
+        pairShowViews.add(showHeader)
+        pairShowViews.add(showCard)
+
+        setPairMode(false)
     }
 
-    /** 我的页：设置项聚合成行；设备指纹 / 端口这类技术信息默认折叠。 */
+    /** 我的页：设置项聚合成行；设备信息直接展示，不再藏进折叠区。 */
     private fun buildMinePage() {
         newPage()
         section("本机")
         deviceNameInput = addInput("设备名", "例如 客厅手机")
         nameSaveButton = addButton("保存设备名", primary = true) { saveDeviceName() }
         nameSaveButton?.isEnabled = false
+        // 设备信息本来就是这一页的主体，没有把它折起来的理由 ——
+        // 折叠只会让用户多点一次，还以为是"高级功能"。
+        deviceIdView = addRow("设备指纹", "读取中…")
+        configView = addRow("端口", "读取中…")
         receiveDirViewMine = addRow("接收目录", "读取中…")
 
         section("通知")
@@ -416,37 +529,6 @@ class MainActivity : Activity() {
         updateActionButton = addButton("下载并安装", primary = true) {
             downloadAndInstall()
         }.apply { visibility = View.GONE }
-
-        section("设备信息")
-        val toggle = TextView(this).apply {
-            text = "展开技术信息"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTextColor(getColor(R.color.feisuo_text_secondary))
-            setPadding(0, dp(4), 0, dp(4))
-            setOnClickListener { toggleDeviceInfo() }
-        }
-        deviceInfoToggle = toggle
-        sectionBody?.addView(toggle, lp(0))
-        val infoBody = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = View.GONE
-        }
-        deviceInfoBody = infoBody
-        sectionBody?.addView(infoBody, lp(0))
-        // 临时把 sectionBody 指到折叠容器，让 addRow 挂进去。
-        val outer = sectionBody
-        sectionBody = infoBody
-        deviceIdView = addRow("设备指纹", "读取中…")
-        configView = addRow("配置", "读取中…")
-        sectionBody = outer
-
-        addHint("随用随走 · 退出应用即停止")
-    }
-
-    private fun toggleDeviceInfo() {
-        val expanded = deviceInfoBody?.visibility == View.VISIBLE
-        deviceInfoBody?.visibility = if (expanded) View.GONE else View.VISIBLE
-        deviceInfoToggle?.text = if (expanded) "展开技术信息" else "收起技术信息"
     }
 
     /** 切换分页：内容只留当前页可见，导航项用品牌色标出选中态。 */
@@ -466,14 +548,17 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 一行轻量提示：只给"下一步做什么"，不写说明书。 */
-    private fun addHint(text: String): TextView =
-        TextView(this).apply {
-            this.text = text
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-            setTextColor(getColor(R.color.feisuo_text_tertiary))
-            setLineSpacing(dp(2).toFloat(), 1f)
-        }.also { addToSection(it, top = dp(10)) }
+    /**
+     * 建一个分区，并把「标题 + 卡片」两个视图一起返回。
+     *
+     * 配对页要在两个方向之间整组切换，单靠 [section] 只拿得到标题、
+     * 拿不到卡片本身。返回 Pair 让调用方能一次性控制整组的可见性。
+     */
+    private fun sectionGroup(title: String): Pair<TextView, LinearLayout> {
+        val header = section(title)
+        val card = sectionBody ?: error("section() 未建立卡片")
+        return header to card
+    }
 
     /**
      * 执行配对。
@@ -519,7 +604,11 @@ class MainActivity : Activity() {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 pairButtonRef?.isEnabled = true
                 if (result == null) {
-                    toast("配对成功, 之后可与该电脑互传文件")
+                    // 配对成功后直接跳到「互传」：新增的电脑会由名册轮询带出来，
+                    // 用户不用再自己找"设备去哪了"。
+                    pinInput?.setText("")
+                    toast("配对成功")
+                    switchTab(0)
                     loadTrustedDevices()
                 } else {
                     toast(result)
@@ -663,61 +752,139 @@ class MainActivity : Activity() {
         toast("没有找到可用的文件管理器, 接收目录:\n$normalized")
     }
 
-    /** 名册里的一行：id 用于删除，name / ip 用于展示。 */
-    private data class DeviceRow(
+    /** 名册里的一行：id 用于删除，name / presence / ip 用于展示。 */
+    private data class RosterRow(
         val id: String,
         val name: String,
+        val presence: String,
         val ip: String,
-        val trusted: Boolean,
+        val lastIp: String,
+        val port: Int,
+        val isPaired: Boolean,
+        val trustLevel: String,
+        val lastSeen: String,
     )
 
-    /** 刷新已配对设备列表。配对成功后必须能看到结果, 否则用户无从确认。 */
-    private fun loadTrustedDevices() {
-        val t = Thread({
-            val rows = runCatching {
-                val arr = JSONArray(NativeBridge.trustedDevicesJson())
-                (0 until arr.length()).mapNotNull { i ->
-                    val o = arr.optJSONObject(i) ?: return@mapNotNull null
-                    val id = o.optString("device_id")
-                    if (id.isBlank()) return@mapNotNull null
-                    DeviceRow(
-                        id = id,
-                        name = o.optString("device_name").ifBlank { "未命名设备" },
-                        ip = o.optString("last_ip").ifBlank { "未知 IP" },
-                        trusted = o.optBoolean("is_trusted", false),
-                    )
-                }
-            }.getOrDefault(emptyList())
+    // ---------------------------------------------------------------- 名册
 
+    /**
+     * 名册轮询：发现服务在后台持续更新设备表，界面每 5 秒读一次。
+     *
+     * 旧实现只在配对成功或用户点"刷新"时读一次，于是"连接成功之后
+     * 什么都没有发生" —— 对方在不在线、IP 有没有变、配对有没有生效，
+     * 界面上全都看不出来。自动轮询让这些状态自己跟上。
+     */
+    private val rosterPoll = object : Runnable {
+        override fun run() {
+            if (!rosterPolling) return
+            refreshRoster()
+            ui.postDelayed(this, ROSTER_POLL_MS)
+        }
+    }
+
+    private fun startRosterPolling() {
+        if (rosterPolling) return
+        rosterPolling = true
+        ui.removeCallbacks(rosterPoll)
+        ui.post(rosterPoll)
+    }
+
+    private fun stopRosterPolling() {
+        rosterPolling = false
+        ui.removeCallbacks(rosterPoll)
+    }
+
+    /** 刷新名册。名字保留 `loadTrustedDevices` 是因为配对成功后也走这里。 */
+    private fun loadTrustedDevices() = refreshRoster()
+
+    private fun refreshRoster() {
+        if (rosterBusy) return
+        if (!FeisuoRuntime.isEngineRunning()) return
+        rosterBusy = true
+        val t = Thread({
+            val raw = runCatching { NativeBridge.rosterJson() }.getOrDefault("[]")
+            var rows = parseRoster(raw)
+            // 名册拿不到（引擎刚起来 / 库还没读到）时退回信任库：
+            // 至少让已配对设备继续可见，而不是整页变空。
+            if (rows.isEmpty()) {
+                val trusted = runCatching { NativeBridge.trustedDevicesJson() }.getOrDefault("[]")
+                rows = parseTrusted(trusted)
+            }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                renderDeviceRows(rows)
-                trustedView?.text = when {
-                    !FeisuoRuntime.isEngineRunning() -> "引擎未就绪"
-                    rows.isEmpty() -> "尚未配对"
-                    else -> "已配对 ${rows.size} 台"
-                }
+                rosterBusy = false
+                rosterRows = rows
+                notifyPairingArrived(rows)
+                renderRoster(rows)
+                renderNearby(rows)
             }
-        }, "feisuo-trusted-refresh")
+        }, "feisuo-roster")
         t.isDaemon = true
         t.start()
     }
 
-    /** 每台设备一行，右侧给「删除」——改名后残留的旧条目就靠它清掉。 */
-    private fun renderDeviceRows(rows: List<DeviceRow>) {
+    private fun parseRoster(json: String): List<RosterRow> = runCatching {
+        val arr = JSONArray(json)
+        (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val id = o.optString("device_id")
+            if (id.isBlank() || o.optBoolean("is_self", false)) return@mapNotNull null
+            val lastIp = o.optString("last_ip")
+            RosterRow(
+                id = id,
+                name = o.optString("device_name").ifBlank { "未命名设备" },
+                presence = o.optString("presence").ifBlank { "offline" },
+                ip = o.optString("ip").ifBlank { lastIp },
+                lastIp = lastIp,
+                port = o.optInt("transfer_port", 0),
+                isPaired = o.optBoolean("is_paired", false),
+                trustLevel = o.optString("trust_level"),
+                lastSeen = o.optString("last_seen_human"),
+            )
+        }
+    }.getOrDefault(emptyList())
+
+    /** 信任库快照的兜底解析（没有在线信息，一律按离线展示）。 */
+    private fun parseTrusted(json: String): List<RosterRow> = runCatching {
+        val arr = JSONArray(json)
+        (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val id = o.optString("device_id")
+            if (id.isBlank()) return@mapNotNull null
+            val level = o.optString("trust_level")
+            val lastIp = o.optString("last_ip")
+            RosterRow(
+                id = id,
+                name = o.optString("device_name").ifBlank { "未命名设备" },
+                presence = "offline",
+                ip = lastIp,
+                lastIp = lastIp,
+                port = 0,
+                isPaired = level == "permanent" || level == "session" || o.optBoolean("is_trusted", false),
+                trustLevel = level,
+                lastSeen = "",
+            )
+        }
+    }.getOrDefault(emptyList())
+
+    /** 每台已配对设备一行，右侧给「删除」——改名后残留的旧条目就靠它清掉。 */
+    private fun renderRoster(rows: List<RosterRow>) {
         val body = deviceListBody ?: return
+        val mine = rows.filter { it.isPaired }
         body.removeAllViews()
-        deviceEmptyView?.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
-        for (d in rows) {
+        deviceEmptyView?.visibility = if (mine.isEmpty()) View.VISIBLE else View.GONE
+        for (d in mine) {
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(0, dp(8), 0, dp(8))
             }
+            val online = d.presence == "online"
             val icon = ImageView(this).apply {
                 setImageResource(R.drawable.ic_stat_feisuo)
-                imageTintList = ColorStateList.valueOf(getColor(R.color.feisuo_accent))
-                alpha = if (d.trusted) 1f else 0.45f
+                imageTintList = ColorStateList.valueOf(
+                    getColor(if (online) R.color.feisuo_accent else R.color.feisuo_text_tertiary)
+                )
             }
             row.addView(icon, LinearLayout.LayoutParams(dp(20), dp(20)))
 
@@ -731,9 +898,11 @@ class MainActivity : Activity() {
                 setTextColor(getColor(R.color.feisuo_text_primary))
             })
             text.addView(TextView(this).apply {
-                this.text = if (d.trusted) d.ip else "${d.ip} · 未信任"
+                this.text = describePresence(d)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                setTextColor(getColor(R.color.feisuo_text_secondary))
+                setTextColor(
+                    getColor(if (online) R.color.feisuo_accent else R.color.feisuo_text_secondary)
+                )
             })
             row.addView(text, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
@@ -755,8 +924,101 @@ class MainActivity : Activity() {
         }
     }
 
+    /** 「在线 · 192.168.1.5」/「离线 · 5 分钟前」/「重连中 · 刚刚」。 */
+    private fun describePresence(d: RosterRow): String = when (d.presence) {
+        "online" -> "在线 · ${d.ip.ifBlank { d.lastIp }}"
+        "reconnecting" -> "重连中 · ${d.lastSeen.ifBlank { "刚刚" }}"
+        "hidden" -> "已隐藏"
+        else -> {
+            val whenText = d.lastSeen.ifBlank { "未知时间" }
+            val where = d.lastIp.ifBlank { "未知 IP" }
+            "离线 · $whenText · $where"
+        }
+    }
+
+    /**
+     * 附近的电脑（自动发现，点一下填好 IP）。
+     *
+     * 这里**不需要**"搜索"按钮：发现服务每 3 秒发一轮信标，名册轮询
+     * 已经把它带回来了。用户打开这一页看到的就应该是最新的一张表。
+     */
+    private fun renderNearby(rows: List<RosterRow>) {
+        val body = nearbyDeviceBody ?: return
+        val online = rows.filter { it.presence == "online" }
+        body.removeAllViews()
+        nearbyEmptyView?.visibility = if (online.isEmpty()) View.VISIBLE else View.GONE
+        for (d in online) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(7), 0, dp(7))
+                isClickable = true
+                setOnClickListener { pickNearby(d) }
+            }
+            val text = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+            text.addView(TextView(this).apply {
+                this.text = d.name
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                setTextColor(getColor(R.color.feisuo_text_primary))
+            })
+            text.addView(TextView(this).apply {
+                this.text = "${d.ip.ifBlank { d.lastIp }}" + if (d.isPaired) " · 已配对" else ""
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                setTextColor(getColor(R.color.feisuo_text_secondary))
+            })
+            row.addView(text, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(TextView(this).apply {
+                this.text = "填入"
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setTextColor(getColor(R.color.feisuo_accent))
+            })
+            body.addView(row, lp(0))
+        }
+
+        // 只有一台设备时直接填好 IP：用户少敲一次，也不会填错。
+        // 只在输入框为空时填，避免覆盖用户手动输入。
+        val only = online.singleOrNull()
+        if (only != null && ipInput?.text.isNullOrBlank()) {
+            ipInput?.setText(only.ip.ifBlank { only.lastIp })
+        }
+    }
+
+    private fun pickNearby(d: RosterRow) {
+        ipInput?.setText(d.ip.ifBlank { d.lastIp })
+        pinInput?.requestFocus()
+        toast("已选择「${d.name}」")
+    }
+
+    /**
+     * 出码时如果电脑连进来了，立刻给出反馈。
+     *
+     * 没有这一步的话，手机端界面上什么都不会变：用户要自己意识到
+     * "配对已经成功"，再去「互传」页确认 —— 而产品承诺的是
+     * "一次配对、终生免密"，配对成功应该是肉眼可见的。
+     */
+    private fun notifyPairingArrived(rows: List<RosterRow>) {
+        if (!isShowPairMode) return
+        if (pinBaselinePending) {
+            // 第一份名册回来时才取基线：出码那一刻名册可能还没加载完，
+            // 拿空集合当基线会把"已有的设备"误报成"刚刚连上"。
+            pinBaselinePending = false
+            pinBaseline = rows.filter { it.isPaired }.map { it.id }.toSet()
+            return
+        }
+        val baseline = pinBaseline ?: return
+        val added = rows.firstOrNull { it.isPaired && it.id !in baseline }
+        if (added == null) return
+        pinBaseline = null
+        localPinExpiresAt = 0
+        stopLocalPinTicker()
+        toast("「${added.name}」已连接")
+        switchTab(0)
+    }
+
     /** 删除不可撤销，先二次确认；文案只说后果，不铺说明书。 */
-    private fun confirmDeleteDevice(dev: DeviceRow) {
+    private fun confirmDeleteDevice(dev: RosterRow) {
         AlertDialog.Builder(this)
             .setTitle("删除设备")
             .setMessage(
@@ -769,7 +1031,7 @@ class MainActivity : Activity() {
     }
 
     /** 删除是一次同步落盘，放后台线程（见 android_guard 的 BLOCKING_METHODS）。 */
-    private fun executeDeleteDevice(dev: DeviceRow) {
+    private fun executeDeleteDevice(dev: RosterRow) {
         val t = Thread({
             val err = runCatching { NativeBridge.deleteDevice(dev.id) }
                 .getOrElse { "删除失败: ${it.message}" }
@@ -777,7 +1039,7 @@ class MainActivity : Activity() {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 if (err == null) {
                     toast("已删除「${dev.name}」")
-                    loadTrustedDevices()
+                    refreshRoster()
                 } else {
                     toast(err)
                 }
@@ -786,6 +1048,120 @@ class MainActivity : Activity() {
         t.isDaemon = true
         t.start()
     }
+
+    // ---------------------------------------------------------------- 本机出码
+
+    private fun modeButton(label: String, onClick: () -> Unit): Button =
+        Button(this).apply {
+            text = label
+            isAllCaps = false
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            minHeight = dp(42)
+            minimumHeight = dp(42)
+            setPadding(dp(8), 0, dp(8), 0)
+            stateListAnimator = null
+            setOnClickListener { onClick() }
+        }
+
+    private fun styleModeButton(button: Button, active: Boolean) {
+        button.setBackgroundResource(
+            if (active) R.drawable.bg_button_primary else R.drawable.bg_button_secondary
+        )
+        button.backgroundTintList = null
+        button.setTextColor(
+            resources.getColorStateList(
+                if (active) R.color.button_primary_text else R.color.button_secondary_text,
+                theme
+            )
+        )
+        button.typeface = Typeface.create(Typeface.DEFAULT, if (active) Typeface.BOLD else Typeface.NORMAL)
+    }
+
+    private fun setPairMode(show: Boolean) {
+        isShowPairMode = show
+        for (v in pairInputViews) v.visibility = if (show) View.GONE else View.VISIBLE
+        for (v in pairShowViews) v.visibility = if (show) View.VISIBLE else View.GONE
+        pairModeButtons.getOrNull(0)?.let { styleModeButton(it, !show) }
+        pairModeButtons.getOrNull(1)?.let { styleModeButton(it, show) }
+        if (show) {
+            if (localPinExpiresAt <= nowSecs()) {
+                // 上一个码已经过期：不要把一个死码留在屏幕上。
+                generateLocalPin()
+            } else {
+                startLocalPinTicker()
+            }
+        } else {
+            pinBaseline = null
+            pinBaselinePending = false
+            stopLocalPinTicker()
+        }
+    }
+
+    private fun generateLocalPin() {
+        if (!FeisuoRuntime.isEngineRunning()) {
+            toast("引擎未就绪, 请稍后重试")
+            return
+        }
+        localPinTtlView?.text = "正在生成…"
+        // 名册已经加载过就直接取基线；还没加载完（引擎刚起来）就等第一份名册。
+        val known = rosterRows
+        if (known.isNotEmpty()) {
+            pinBaseline = known.filter { it.isPaired }.map { it.id }.toSet()
+            pinBaselinePending = false
+        } else {
+            pinBaseline = null
+            pinBaselinePending = true
+        }
+        val t = Thread({
+            val raw = runCatching { NativeBridge.generatePairPin() }.getOrNull()
+            val obj = runCatching { JSONObject(raw ?: "") }.getOrNull()
+            val pin = obj?.optString("pin").orEmpty()
+            val error = obj?.optString("error").orEmpty()
+            val expiresAt = obj?.optLong("expires_at", 0L) ?: 0L
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (pin.length == 6 && expiresAt > 0) {
+                    localPinExpiresAt = expiresAt
+                    localPinView?.text = pin
+                    startLocalPinTicker()
+                } else {
+                    localPinExpiresAt = 0
+                    localPinView?.text = "------"
+                    localPinTtlView?.text = error.ifBlank { "生成失败, 请重试" }
+                }
+            }
+        }, "feisuo-pair-pin")
+        t.isDaemon = true
+        t.start()
+    }
+
+    /** 每秒更新一次剩余秒数；到点自动换码。 */
+    private val pinTicker = object : Runnable {
+        override fun run() {
+            if (!localPinTicking) return
+            if (localPinExpiresAt <= 0) return
+            val left = localPinExpiresAt - nowSecs()
+            if (left <= 0) {
+                generateLocalPin()
+                return
+            }
+            localPinTtlView?.text = "剩余 ${left} 秒 · 过期自动换码"
+            ui.postDelayed(this, 1000)
+        }
+    }
+
+    private fun startLocalPinTicker() {
+        localPinTicking = true
+        ui.removeCallbacks(pinTicker)
+        ui.post(pinTicker)
+    }
+
+    private fun stopLocalPinTicker() {
+        localPinTicking = false
+        ui.removeCallbacks(pinTicker)
+    }
+
+    private fun nowSecs(): Long = System.currentTimeMillis() / 1000
 
     private fun startEngineAsync() {
         engineStatusView?.text = "正在启动…"
@@ -843,15 +1219,14 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 把配置 JSON 压成一行可读摘要, 避免把整个 JSON 糊到界面上 */
+    /** 把配置 JSON 压成一行端口摘要；设备名与接收目录各有自己的行。 */
     private fun summarizeConfig(json: String): String {
         if (json.isBlank()) return "—"
         return try {
             val o = JSONObject(json)
-            val name = o.optString("device_name", "?")
             val tp = o.optInt("transfer_port", 0)
             val dp = o.optInt("discovery_port", 0)
-            "$name · 传输 $tp · 发现 $dp"
+            "传输 $tp · 发现 $dp"
         } catch (e: Exception) {
             "解析失败"
         }
@@ -1190,7 +1565,7 @@ class MainActivity : Activity() {
      * 分区标题 + 一张卡片。
      *
      * 卡片会被设为 [sectionBody]，后续的 [addRow] / [addInput] /
-     * [addButton] / [addHint] 自动挂进这张卡片，直到下一个 [section]。
+     * [addButton] 自动挂进这张卡片，直到下一个 [section]。
      * 挂到当前分页 [pageBody]；**不要**在调用处再 root.addView 一次
      * （同一个 View 挂两次会抛 IllegalStateException，应用启动即闪退）。
      */

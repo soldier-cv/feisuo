@@ -2097,7 +2097,7 @@
     </div>
 
     <!-- 6. 设备配对 -->
-    <div v-if="showPairingDialog" class="fluent-modal-overlay" @click.self="showPairingDialog = false">
+    <div v-if="showPairingDialog" class="fluent-modal-overlay" @click.self="closePairingDialog">
       <div
         v-modal-focus
         class="fluent-modal-dialog"
@@ -2109,27 +2109,18 @@
       >
         <div class="modal-dialog-titlebar">
           <h3 id="pair-dialog-title">{{ pairMode === 'success' ? '配对完成' : '设备配对' }}</h3>
-          <button class="modal-close-icon" @click="showPairingDialog = false" title="关闭"><i class="ph ph-x"></i></button>
+          <button class="modal-close-icon" @click="closePairingDialog" title="关闭"><i class="ph ph-x"></i></button>
         </div>
 
         <!--
-          流程说明。**这是首用最大的摩擦点**，而两个并列的标签页无法表达
-          "谁给谁"这种方向性：新人看到「输入配对码」和「查看本机配对码」
-          并排，只会问"我该点哪个"。而正确顺序是有方向的：
-
-            对方点「查看本机配对码」→ 把屏幕上的 6 位码念给你
-            你点「输入配对码」→ 敲进去 → 配对完成
-
-          两边**不用同时操作**，但被念的一方要在 30 秒内敲进去（码一次性）。
-          这些话写在界面上，比让用户点错一次再回头看文档便宜得多。
+          两个方向并列，不再在界面上铺一段「谁先点哪个」的教程：
+          用户知道自己手里拿的是哪台设备，看得懂「输入」与「查看」的区别。
         -->
-
-
         <div class="pair-mode-selector" v-if="pairMode !== 'success'">
-          <button :class="{ active: pairMode === 'input' }" @click="pairMode = 'input'">
+          <button :class="{ active: pairMode === 'input' }" @click="switchPairMode('input')">
             <i class="ph-bold ph-keyboard"></i> 输入配对码
           </button>
-          <button :class="{ active: pairMode === 'show' }" @click="pairMode = 'show'">
+          <button :class="{ active: pairMode === 'show' }" @click="switchPairMode('show')">
             <i class="ph-bold ph-qr-code"></i> 查看本机配对码
           </button>
         </div>
@@ -2208,7 +2199,7 @@
           </div>
 
           <div class="modal-actions-tray">
-            <button class="btn-fluent-secondary" @click="isPairingSubmit ? cancelPairing() : (showPairingDialog = false)">
+            <button class="btn-fluent-secondary" @click="isPairingSubmit ? cancelPairing() : closePairingDialog()">
               {{ isPairingSubmit ? '取消连接' : '取消' }}
             </button>
             <button
@@ -2226,13 +2217,13 @@
         <!-- 展示本机配对码 -->
         <div v-if="pairMode === 'show'" class="pair-view-content">
           <div class="local-pin-display-box">
-            <span class="box-tiny-label">本机配对码（30 秒内有效，仅可使用一次）</span>
+            <span class="box-tiny-label">本机配对码（{{ pinTtlLabel }}内有效，仅可使用一次）</span>
             <div class="box-giant-pin">{{ localPairPin }}</div>
             <div class="box-pin-actions">
               <button class="btn-mini-action" @click="copyText(localPairPin)">
                 <i class="ph ph-copy"></i> 复制
               </button>
-              <button class="btn-mini-action" @click="refreshLocalPin">
+              <button class="btn-mini-action" @click="refreshLocalPin(true)">
                 <i class="ph ph-arrows-clockwise"></i> 刷新
               </button>
             </div>
@@ -2242,7 +2233,7 @@
                 <span>{{ pinSecondsLeft }}s 后自动刷新</span>
               </div>
               <div class="pin-countdown-track">
-                <div class="pin-countdown-fill" :style="{ transform: `scaleX(${pinSecondsLeft / 30})` }"></div>
+                <div class="pin-countdown-fill" :style="{ transform: `scaleX(${pinSecondsLeft / pinTtlSeconds})` }"></div>
               </div>
             </div>
           </div>
@@ -2266,13 +2257,13 @@
             1. 这里改成真 QR，编码 `feisuo://pair?host=…&port=…&pin=…`；
             2. Android 加 CAMERA 权限 + zxing（或 ML Kit）+ 扫码界面。
 
-            ⚠️ 但要注意方向：扫码会**降低**安全性。PIN 30 秒有效、同 IP 限速
+            ⚠️ 但要注意方向：扫码会**降低**安全性。PIN 有效期有限、同 IP 限速
             5 次，"念 6 位数字"至少要求人在场；二维码一旦被旁人拍到，配对权
             就直接交出去了。所以扫码不是纯粹的体验改进。
           -->
 
           <div class="modal-actions-tray">
-            <button class="btn-fluent-primary" @click="showPairingDialog = false">关闭</button>
+            <button class="btn-fluent-primary" @click="closePairingDialog()">关闭</button>
           </div>
         </div>
 
@@ -2755,6 +2746,7 @@ import {
   RootExpansion,
   VolumeInfo,
   TrustedDevice,
+  PairPin,
   ApprovalRequest,
   ClipboardContent,
   DeviceEndpoint,
@@ -3365,8 +3357,17 @@ const stagedDestTitle = computed(() => {
 });
 
 // ---------------- 配对 ----------------
-const pinSecondsLeft = ref(30);
+/** 本机配对码剩余秒数（由后端给的 `expires_at` 算出来，不写死） */
+const pinSecondsLeft = ref(0);
+/** 本次配对码的有效期总长，进度条按它算比例 */
+const pinTtlSeconds = ref(180);
+/** 本机配对码到期时刻（Unix 秒）；0 = 没有有效码 */
+const pinExpiresAt = ref(0);
 let pinCountdownTimer: any = null;
+/** 「查看本机配对码」时的已有配对数：发现新增设备即视为电脑连进来了 */
+let pairingBaseline: Set<string> | null = null;
+/** 出码时名册还没加载完，等第一份名册回来再取基线（否则会把已有设备误报成刚连上） */
+let pairingBaselinePending = false;
 const showPairingDialog = ref(false);
 /** 「已隐藏」抽屉展开状态（§3.1） */
 const showHiddenDrawer = ref(false);
@@ -3562,6 +3563,12 @@ const pinInputRef = ref<HTMLInputElement | null>(null);
 const isManualIpMode = ref(false);
 const pairedSuccessDevice = ref<TrustedDevice | null>(null);
 let pairingAbortFlag = false;
+
+const pinTtlLabel = computed(() => {
+  const s = pinTtlSeconds.value;
+  if (s >= 60 && s % 60 === 0) return `${s / 60} 分钟`;
+  return `${s} 秒`;
+});
 
 /** 配对目标候选：本机之外的可见设备（离线设备不能配对，故只看在线） */
 const discoveredPeerDevices = computed<DeviceRosterEntry[]>(() =>
@@ -3847,7 +3854,7 @@ const ESCAPABLE_MODALS: Array<{ ref: () => unknown; close: () => void }> = [
     ref: () => showDirectConnectDialog.value,
     close: () => (showDirectConnectDialog.value = false)
   },
-  { ref: () => showPairingDialog.value, close: () => (showPairingDialog.value = false) },
+  { ref: () => showPairingDialog.value, close: () => closePairingDialog() },
   { ref: () => clipboardPreview.value, close: () => (clipboardPreview.value = null) }
 ];
 
@@ -4161,6 +4168,8 @@ async function refreshDevices(silent = false) {
   if (!silent) isRefreshing.value = true;
   try {
     await store.refreshDevices();
+    // 「查看本机配对码」时若冒出新的已配对设备，就是电脑连进来了。
+    checkPairingArrived();
   } catch (e) {
     if (!silent) showToast(FeisuoBridge.describeError(e, "获取设备列表失败"), true);
   } finally {
@@ -7598,18 +7607,22 @@ async function openPairModal(mode: "input" | "show") {
   inputPin.value = "";
   pairingAbortFlag = false;
   pairedSuccessDevice.value = null;
-  try {
-    localPairPin.value = await FeisuoBridge.generatePairPin();
-  } catch {
-    localPairPin.value = "------";
-  }
-  showPairingDialog.value = true;
 
+  // 只有「查看本机配对码」才生成本机的码。
+  // 旧写法两种模式都生成：用户在「输入配对码」里点开弹层，就会顺手把
+  // 另一台设备正在念给他的那份码**覆盖掉** —— 对方屏幕上还亮着的码
+  // 立刻作废，用户得到的只有一句「配对码错误或已失效」。
   if (mode === "show") {
+    await refreshLocalPin(true);
     startPinCountdown();
   } else {
     stopPinCountdown();
+    localPairPin.value = "------";
+    pinExpiresAt.value = 0;
+    pinSecondsLeft.value = 0;
   }
+
+  showPairingDialog.value = true;
 
   // 智能识别局域网 IP
   if (targetDeviceForPairing.value?.ip) {
@@ -7639,16 +7652,43 @@ function formatPinInput(e: Event) {
   inputPin.value = digits;
 }
 
+/**
+ * 切换配对方向。
+ *
+ * 切到「查看本机配对码」时才生成 —— 理由同 `openPairModal`：在「输入」里
+ * 生成会覆盖另一台设备正在展示的码。
+ */
+async function switchPairMode(mode: "input" | "show") {
+  if (pairMode.value === mode) return;
+  pairMode.value = mode;
+  pairErrorMessage.value = "";
+  if (mode === "show") {
+    await refreshLocalPin(true);
+    startPinCountdown();
+  } else {
+    stopPinCountdown();
+    pinExpiresAt.value = 0;
+    pinSecondsLeft.value = 0;
+    localPairPin.value = "------";
+    await nextTick();
+    pinInputRef.value?.focus();
+  }
+}
+
 function startPinCountdown() {
   stopPinCountdown();
-  pinSecondsLeft.value = 30;
-  pinCountdownTimer = setInterval(async () => {
-    if (pinSecondsLeft.value > 1) {
-      pinSecondsLeft.value--;
-    } else {
-      await refreshLocalPin();
+  if (pinExpiresAt.value <= 0) return;
+  const tick = async () => {
+    const left = pinExpiresAt.value - Math.floor(Date.now() / 1000);
+    pinSecondsLeft.value = Math.max(0, left);
+    if (left <= 0) {
+      // 到点才换码。旧实现是每 30 秒无条件刷新，换个场景就会把用户
+      // 正在输入的码刷掉；这里只在**真的过期**之后才换。
+      await refreshLocalPin(true);
     }
-  }, 1000);
+  };
+  void tick();
+  pinCountdownTimer = setInterval(tick, 1000);
 }
 
 function stopPinCountdown() {
@@ -7658,13 +7698,76 @@ function stopPinCountdown() {
   }
 }
 
-async function refreshLocalPin() {
+/** 关闭配对弹层：倒计时与"等电脑连进来"的基线都要一起收掉。 */
+function closePairingDialog() {
+  showPairingDialog.value = false;
+  stopPinCountdown();
+  pairingBaseline = null;
+  pairingBaselinePending = false;
+  pinExpiresAt.value = 0;
+  pinSecondsLeft.value = 0;
+}
+
+/**
+ * 取一个新的本机配对码。
+ *
+ * @param resetBaseline 出码刚生成时必须重置基线：把此刻已有的配对记下来，
+ *        之后名册里多出来的那台就是"刚连进来的电脑"。
+ */
+async function refreshLocalPin(resetBaseline = false) {
+  if (resetBaseline) {
+    if (store.roster.length > 0) {
+      pairingBaseline = new Set(
+        store.roster.filter((d) => d.is_paired).map((d) => d.device_id)
+      );
+      pairingBaselinePending = false;
+    } else {
+      pairingBaseline = null;
+      pairingBaselinePending = true;
+    }
+  }
   try {
-    localPairPin.value = await FeisuoBridge.generatePairPin();
+    const res: PairPin = await FeisuoBridge.generatePairPin();
+    localPairPin.value = res.pin;
+    pinExpiresAt.value = res.expires_at;
+    pinTtlSeconds.value = res.ttl_secs > 0 ? res.ttl_secs : 180;
+    pinSecondsLeft.value = Math.max(
+      0,
+      res.expires_at - Math.floor(Date.now() / 1000)
+    );
   } catch {
     /* 保持旧码 */
   }
-  pinSecondsLeft.value = 30;
+}
+
+/**
+ * 「查看本机配对码」期间，如果名册里冒出一台新配对设备，说明电脑已经连上来了。
+ *
+ * 没有这一步的话桌面端什么都不变：用户必须自己意识到"配对成功了"，
+ * 再去侧栏确认。产品承诺的是"一次配对、终生免密"，配对成功应该看得见。
+ */
+function checkPairingArrived() {
+  if (pairMode.value !== "show" || !showPairingDialog.value) return;
+  if (pairingBaselinePending) {
+    if (store.roster.length === 0) return;
+    pairingBaseline = new Set(
+      store.roster.filter((d) => d.is_paired).map((d) => d.device_id)
+    );
+    pairingBaselinePending = false;
+    return;
+  }
+  const baseline = pairingBaseline;
+  if (!baseline) return;
+  const added = store.roster.find(
+    (d) => d.is_paired && !baseline.has(d.device_id)
+  );
+  if (!added) return;
+  pairingBaseline = null;
+  pairingBaselinePending = false;
+  stopPinCountdown();
+  showPairingDialog.value = false;
+  pairMode.value = "input";
+  showToast(`「${added.device_name || "新设备"}」已连接，可直接互传文件`);
 }
 
 function cancelPairing() {
@@ -7674,17 +7777,15 @@ function cancelPairing() {
 }
 
 function finishPairingSuccess() {
-  stopPinCountdown();
-  showPairingDialog.value = false;
+  closePairingDialog();
   pairMode.value = "input";
 }
 
 function jumpToSendWithPairedDevice() {
-  stopPinCountdown();
+  closePairingDialog();
   if (pairedSuccessDevice.value) {
     store.selectedDeviceId = pairedSuccessDevice.value.device_id;
   }
-  showPairingDialog.value = false;
   currentTab.value = "send";
   pairMode.value = "input";
   showToast(`已选择「${pairedSuccessDevice.value?.device_name || "受信设备"}」，可直接拖拽文件发送`);

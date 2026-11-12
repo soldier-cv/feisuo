@@ -354,6 +354,54 @@ pub fn trusted_devices_json(handle: i64) -> String {
     }
 }
 
+/// 设备名册（在线表 ∪ 信任库）的 JSON 快照；引擎未启动时返回 `[]`。
+///
+/// Android 端此前只能看到「已配对」列表，看不到"对方在不在线"：
+/// 发现服务的设备表被丢弃在 `boot_engine` 里（`drop(handles.devices)`），
+/// 于是配对完成后手机端**没有任何自动反馈** —— 电脑那头是不是真的连上了，
+/// 用户只能靠"能不能发文件"猜。名册把在线状态、IP、端口一并交给宿主，
+/// 宿主就能像桌面端一样持续显示「在线 / 5 分钟前」。
+pub fn roster_json(handle: i64) -> String {
+    let Some(engine) = engine_for_handle(handle) else {
+        return "[]".to_string();
+    };
+    match runtime().block_on(engine.get_roster()) {
+        Ok(list) => serde_json::to_string(&list).unwrap_or_else(|e| {
+            log_error(&format!("序列化设备名册失败: {}", e));
+            "[]".to_string()
+        }),
+        Err(e) => {
+            log_error(&format!("读取设备名册失败: {}", e));
+            "[]".to_string()
+        }
+    }
+}
+
+/// 生成一次**本机**配对码，返回 `{"pin": "...", "expires_at": 秒}`。
+///
+/// Android 端过去只能"输入电脑屏幕上的码"。可方向本该是双向的：
+/// 手边有电脑、手机在兜里时，让电脑去连手机才是顺手的那个方向。
+/// 服务端校验走的是同一个 `trust_store.verify_pair_pin`，所以这里只要
+/// 把码生成出来交给宿主展示即可。
+///
+/// 返回 JSON 而不是裸码：宿主必须知道**什么时候过期**才能显示倒计时、
+/// 到点自动换码，否则界面上会一直挂着一个已经失效的码。
+pub fn pair_pin_json(handle: i64) -> String {
+    let Some(engine) = engine_for_handle(handle) else {
+        return format!(
+            "{{\"error\": {}}}",
+            serde_json::to_string("引擎未启动").unwrap_or_else(|_| "\"引擎未启动\"".to_string())
+        );
+    };
+    let (pin, expires_at) = engine.trust_store.generate_pair_pin();
+    serde_json::json!({
+        "pin": pin,
+        "expires_at": expires_at,
+        "ttl_secs": crate::protocol::PAIR_PIN_TTL_SECS,
+    })
+    .to_string()
+}
+
 /// 彻底删除一条设备记录（界面「删除设备」）。
 ///
 /// 与解除配对的区别：解除配对只降级信任等级并**保留行**，删除会清掉

@@ -238,6 +238,36 @@ pub extern "system" fn Java_net_findfine_feisuo_NativeBridge_nativeGetTrustedDev
     new_jstring(&mut env, &value)
 }
 
+/// 取设备名册（在线表 ∪ 信任库）的 JSON 数组快照。
+///
+/// 对应 Kotlin: `NativeBridge.nativeGetRosterJson(): String?`
+///
+/// 与 `nativeGetTrustedDevicesJson` 的区别：名册带 `presence`（在线/离线）、
+/// 实时 IP 与传输端口。宿主靠它做"配对完成后自动出现、自动变在线"，
+/// 不必让用户再点一次"刷新设备"。
+#[no_mangle]
+pub extern "system" fn Java_net_findfine_feisuo_NativeBridge_nativeGetRosterJson<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) -> jstring {
+    let value = catch_unwind(AssertUnwindSafe(|| host::roster_json(host::current_handle())))
+        .unwrap_or_else(|_| "[]".to_string());
+    new_jstring(&mut env, &value)
+}
+
+/// 生成一次本机配对码，返回 `{"pin": "...", "expires_at": ...}`。
+///
+/// 对应 Kotlin: `NativeBridge.nativeGeneratePairPin(): String?`
+#[no_mangle]
+pub extern "system" fn Java_net_findfine_feisuo_NativeBridge_nativeGeneratePairPin<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) -> jstring {
+    let value = catch_unwind(AssertUnwindSafe(|| host::pair_pin_json(host::current_handle())))
+        .unwrap_or_else(|_| "{}".to_string());
+    new_jstring(&mut env, &value)
+}
+
 /// 彻底删除一条设备记录。
 ///
 /// 对应 Kotlin: `NativeBridge.nativeDeleteDevice(deviceId: String): String?`

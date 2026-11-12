@@ -485,10 +485,28 @@ pub async fn send_files(
     }
 }
 
+/// 本机配对码及其到期时刻。
+///
+/// 只返回 6 位码是不够的：界面必须知道**什么时候过期**，否则倒计时只能
+/// 写死一个数字，而写死的数字一旦和 core 的 `PAIR_PIN_TTL_SECS` 分叉，
+/// 用户会在"看起来还有 20 秒"的时候被对端拒绝。
+#[derive(serde::Serialize)]
+pub struct PairPinView {
+    pub pin: String,
+    /// Unix 秒；到点后必须换码
+    pub expires_at: i64,
+    /// 有效期总长（秒），供倒计时进度条用
+    pub ttl_secs: i64,
+}
+
 #[tauri::command]
-pub fn generate_pair_pin(state: State<'_, AppState>) -> Result<String, String> {
-    let (pin, _) = state.engine.trust_store.generate_pair_pin();
-    Ok(pin)
+pub fn generate_pair_pin(state: State<'_, AppState>) -> Result<PairPinView, String> {
+    let (pin, expires_at) = state.engine.trust_store.generate_pair_pin();
+    Ok(PairPinView {
+        pin,
+        expires_at,
+        ttl_secs: feisuo_core::protocol::PAIR_PIN_TTL_SECS,
+    })
 }
 
 #[tauri::command]

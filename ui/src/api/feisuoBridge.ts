@@ -257,6 +257,21 @@ export interface TrustedDevice {
   trust_level: TrustLevel;
 }
 
+/**
+ * 本机配对码。
+ *
+ * 只给 6 位码是不够的：界面必须知道**什么时候过期**，否则倒计时只能
+ * 写死一个数字，而写死的数字一旦和 core 的 `PAIR_PIN_TTL_SECS` 分叉，
+ * 用户就会在"看起来还有 20 秒"的时候被对端拒绝。
+ */
+export interface PairPin {
+  pin: string;
+  /** Unix 秒；到点后必须换码 */
+  expires_at: number;
+  /** 有效期总长（秒） */
+  ttl_secs: number;
+}
+
 export interface DiskFileInfo {
   name: string;
   is_dir: boolean;
@@ -886,9 +901,23 @@ export class FeisuoBridge {
     return invokeSafe<TrustedDevice>("pair_with_device", { targetIp, targetPort, pin });
   }
 
-  static async generatePairPin(): Promise<string> {
-    if (notInTauri()) return "482917";
-    return invokeSafe<string>("generate_pair_pin");
+  /**
+   * 生成本机配对码。
+   *
+   * 返回值必须带 `expires_at`：倒计时要在**真实到期时刻**上算，不能写死
+   * 一个秒数 —— 写死的数字一旦和 core 的 `PAIR_PIN_TTL_SECS` 分叉，
+   * 用户会在"看起来还有 20 秒"的时候被对端拒绝，而界面上毫无线索说明
+   * 到底是敲错了还是码过期了。
+   */
+  static async generatePairPin(): Promise<PairPin> {
+    if (notInTauri()) {
+      return {
+        pin: "482917",
+        expires_at: Math.floor(Date.now() / 1000) + 180,
+        ttl_secs: 180,
+      };
+    }
+    return invokeSafe<PairPin>("generate_pair_pin");
   }
 
   // ------------------------------------------------------------------ 文件发送

@@ -5,7 +5,7 @@ use tracing::warn;
 use serde::{Deserialize, Serialize};
 use crate::config::AppConfig;
 use crate::error::Result;
-use crate::protocol::{MAX_PIN_ATTEMPTS, PIN_LOCKOUT_SECS};
+use crate::protocol::{MAX_PIN_ATTEMPTS, PAIR_PIN_TTL_SECS, PIN_LOCKOUT_SECS};
 use crate::security::trust_model::{AccessMode, AccessScope, TrustLevel};
 
 /// schema 版本号。用于将来做更细粒度的增量迁移。
@@ -1122,7 +1122,9 @@ impl TrustStore {
         let mut rng = rand::thread_rng();
         let num: u32 = rng.gen_range(100_000..999_999);
         let pin = format!("{:06}", num);
-        let expire = chrono::Utc::now().timestamp() + 30; // 30秒严格即时有效，用完即失效
+        // 有效期由 [`PAIR_PIN_TTL_SECS`] 统一给出：桌面端与安卓端的倒计时
+        // 都读同一个常量，界面上写的秒数必须等于服务端真正接受的窗口。
+        let expire = chrono::Utc::now().timestamp() + PAIR_PIN_TTL_SECS;
         let mut active = self.active_pair_pin.lock().unwrap_or_else(|e| e.into_inner());
         *active = Some((pin.clone(), expire));
         (pin, expire)
@@ -2747,5 +2749,31 @@ mod tests {
 
         assert!(store.delete_device("peer").unwrap());
         assert!(store.list_devices().unwrap().is_empty());
+    }
+
+    /// 配对码的有效期必须与两端界面上的倒计时同源。
+    ///
+    /// 这条钉住的是一个真实投诉：桌面端显示"30 秒内有效"，手机刚打开
+    /// 配对页就已经过期；界面上又没有任何线索说明"是码过期了还是敲错了"。
+    /// 有效期一旦再次被改回 30 秒，这里会直接红。
+    #[test]
+    fn pair_pin_ttl_matches_the_constant_and_is_usable() {
+        let store = TrustStore::open_at(temp_db("pin")).expect("打开测试库");
+        let (pin, expire) = store.generate_pair_pin();
+        assert_eq!(pin.len(), 6, "配对码必须是 6 位数字");
+        assert!(pin.chars().all(|c| c.is_ascii_digit()));
+        let now = chrono::Utc::now().timestamp();
+        let ttl = expire - now;
+        assert!(
+            (PAIR_PIN_TTL_SECS - ttl).abs() <= 2,
+            "有效期必须等于 PAIR_PIN_TTL_SECS, 实际 {} 秒",
+            ttl
+        );
+        assert!(
+            PAIR_PIN_TTL_SECS >= 120,
+            "有效期短于 2 分钟时, 另一台设备来不及完成配对"
+        );
+        assert!(store.verify_pair_pin(&pin), "刚生成的码必须能用");
+        assert!(!store.verify_pair_pin(&pin), "码只能使用一次");
     }
 }

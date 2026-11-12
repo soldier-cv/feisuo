@@ -93,6 +93,27 @@ object NativeBridge {
     fun trustedDevicesJson(): String = if (loaded) (nativeGetTrustedDevicesJson() ?: "[]") else "[]"
 
     /**
+     * 设备名册（在线表 ∪ 信任库）的 JSON 数组。
+     *
+     * 与 [trustedDevicesJson] 的区别: 名册带 `presence`（在线/离线）、
+     * 实时 IP 与传输端口。界面靠它做到"配对完自动出现、自动变在线"。
+     * 引擎未启动或读取失败时返回 "[]", 不会是 null。
+     */
+    fun rosterJson(): String = if (loaded) (nativeGetRosterJson() ?: "[]") else "[]"
+
+    /**
+     * 生成一次**本机**配对码, 返回 `{"pin","expires_at","ttl_secs"}`。
+     *
+     * 补这个接口的原因: 手机端此前只能"输入电脑屏幕上的码"。而手边有电脑、
+     * 手机在兜里时, 让电脑来连手机才是顺手的那个方向 —— 电脑有键盘,
+     * 敲 6 位数字快得多, 也不会因为手机端切界面而错过有效期。
+     *
+     * 返回 JSON 而不是裸码: 宿主需要 `expires_at` 才能显示真实倒计时,
+     * 到点自动换码。
+     */
+    fun generatePairPin(): String? = if (loaded) nativeGeneratePairPin() else null
+
+    /**
      * 彻底删除一条设备记录（清掉改名后残留的旧条目）。
      *
      * 与解除配对不同：解除只降级信任并保留行，删除会把本机名册记录、
@@ -183,6 +204,8 @@ object NativeBridge {
     private external fun nativeGetConfigJson(): String?
     private external fun nativeSetDeviceName(name: String): String?
     private external fun nativeGetTrustedDevicesJson(): String?
+    private external fun nativeGetRosterJson(): String?
+    private external fun nativeGeneratePairPin(): String?
     private external fun nativeDeleteDevice(deviceId: String): String?
     private external fun nativeProbeDevice(ip: String): String?
     private external fun nativePairWithDevice(ip: String, port: Int, pin: String): String?

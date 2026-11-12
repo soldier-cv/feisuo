@@ -50,6 +50,10 @@ const BLOCKING_METHODS: &[&str] = &[
     "setDeviceName",
     // 删除设备记录同样是一次同步落盘(事务里连清三张表), 不能占主线程。
     "deleteDevice",
+    // 名册 / 本机配对码都要读 core 的 engine 单例 (内部 runtime().block_on)。
+    // 名册还要做一次"在线表 ∪ 信任库"的合并, 主线程调用会掉帧。
+    "rosterJson",
+    "generatePairPin",
 ];
 
 /// **间接**阻塞入口: 这些宿主方法内部会走到阻塞的 core 接口。
