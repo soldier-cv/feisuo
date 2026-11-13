@@ -3,7 +3,8 @@
   注意: 本文件不允许出现 package 属性。
   AGP 8+ 会把它视为硬错误, 包名统一由 app/build.gradle.kts 的 namespace 提供。
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Network & Multicast Permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -21,6 +22,29 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+
+    <!--
+      ## 为什么必须要「所有文件访问权限」
+
+      收件落盘是 core（Rust）用**普通文件 API** 直接写 `/sdcard/Download/feisuo`
+      的，不是走 MediaStore —— 桌面端与安卓端共用同一套 storage 代码，改成
+      MediaStore 会让"路径"这个语义在两端分叉（备份、浏览、断点续传全按路径走）。
+
+      而 targetSdk 30+ 之后，公共目录里的裸路径写入被 scoped storage 拦死：
+      `create_dir_all("/sdcard/Download/feisuo")` 返回 EACCES，core 会**静默**
+      退回 `/data/data/<pkg>/files/feisuo` —— 那个目录任何文件管理器都进不去。
+      用户看到的就是"打开接收目录，文件无法访问/根本找不到"。
+
+      这是一个自签名、不上架商店的应用，所以没有 Play policy 顾虑；用户仍需在
+      系统设置里手动打开这个开关，应用内会引导（`StorageAccess.kt`）。
+
+      ⚠️ 不要用 `requestLegacyExternalStorage` 代替它：那个开关只对
+      targetSdk ≤ 29 生效，而本项目是 35（写了也是静默忽略，比不写更坏 ——
+      它让人以为已经处理过存储了）。
+    -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
 
     <!-- Session-bound Foreground Service Permissions -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

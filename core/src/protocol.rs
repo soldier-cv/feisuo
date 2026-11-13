@@ -161,6 +161,40 @@ pub struct BeaconPacket {
     /// 应用版本（仅用于日志与诊断，**不参与互通判断**，见 [`CAPS_HINT`]）。
     #[serde(default)]
     pub app_version: String,
+    /// 这条信标的**用途**：周期广播 / 主动探测。
+    ///
+    /// 这是"UDP 乒乓风暴"的结构性修复。旧实现里收到任何信标都立刻回一包，
+    /// 而回包本身就是一条合法信标，于是两端互相回下去：实测两台设备在线就
+    /// 稳定跑到约 2700 包/秒（收 1.3 MB/s + 发 1.3 MB/s，约 20 Mbit/s），
+    /// 用户看到的就是"什么文件都没传，流量却呼呼窜"。
+    ///
+    /// 现在协议只有两种包，且**只有探测会被回答**：
+    /// - [`BeaconKind::Announce`]：周期广播、以及**所有应答**都用它，它不触发任何发送；
+    /// - [`BeaconKind::Probe`]：主动探测，收到后回一包 `Announce`。
+    ///
+    /// 于是"回信"这个概念不存在了，一条 `Announce` 引发的往返还必须由对端
+    /// 主动发起探测，机制上不可能自激。判定逻辑收在
+    /// `discovery::answers_to` 里，单测直接遍历状态机验证它会停机。
+    ///
+    /// ⚠️ 不进签名载荷：它只是一个"要不要回"的提示，被伪造的后果仅限于
+    /// "少收/多收一次单播应答"，与身份无关 —— 安全性不依赖这个字段。
+    #[serde(default)]
+    pub kind: BeaconKind,
+}
+
+/// 信标用途，见 [`BeaconPacket::kind`]。
+///
+/// `#[serde(default)]` + `Announce` 为默认值：缺少该字段的包（老版本发的，
+/// 或手工构造的）一律按"周期广播"处理 —— 也就是**不回答**。
+/// 这个默认值偏向"不说话"，是安全的方向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BeaconKind {
+    /// 周期广播 / 任何应答。收到它什么都不用发。
+    #[default]
+    Announce,
+    /// 主动探测：请对方立刻回一包（单播）。
+    Probe,
 }
 
 impl BeaconPacket {

@@ -765,3 +765,143 @@ fn self_attaching_helper_must_not_be_added_again() {
         violations.join("\n  ")
     );
 }
+
+/// 安卓端「打开接收目录」必须真的能打开到一个**文件管理器看得见**的目录。
+///
+/// 这是 v0.1.23 的真实故障：`default_receive_dir()` 在公共目录建不出来时
+/// 静默退回 `/data/data/<pkg>/files/feisuo`，而 targetSdk 35 下没有
+/// 「所有文件访问权限」就**一定**建不出来 —— 于是收到的文件全在应用沙箱里。
+/// 用户点"打开接收目录"，得到的是空目录或者一句"打不开"；文件在系统里
+/// 根本不存在。
+///
+/// 这条故障有三个环节，任何一个断掉症状都一样（"文件无法访问"），而
+/// 编译期、CI 全都不报错 —— 只能靠守卫把三处同时钉住：
+/// 1. manifest 真的申请了权限（否则设置页里连开关都找不到）；
+/// 2. 界面真的会引导授权，并在回来时续做（否则用户不知道该干什么）；
+/// 3. core 真的会把旧的私有收件目录迁回公共目录（否则"授权了也没用"）。
+#[test]
+fn android_receive_dir_must_be_reachable_from_file_manager() {
+    let dir = kotlin_dir();
+    let main = std::fs::read_to_string(dir.join("MainActivity.kt")).expect("读取 MainActivity 失败");
+    let storage = std::fs::read_to_string(dir.join("StorageAccess.kt")).unwrap_or_default();
+    let manifest = std::fs::read_to_string(
+        dir.join("..")
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("AndroidManifest.xml"),
+    )
+    .expect("读取 AndroidManifest.xml 失败");
+    let config = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("core")
+            .join("src")
+            .join("config.rs"),
+    )
+    .expect("读取 core/src/config.rs 失败");
+
+    // 1) manifest: 没有它，设置页里根本没有「所有文件访问权限」这一项。
+    assert!(
+        manifest.contains("android.permission.MANAGE_EXTERNAL_STORAGE"),
+        "AndroidManifest 缺 MANAGE_EXTERNAL_STORAGE —— targetSdk 30+ 下公共目录 \
+         一定写不进去, 收到的文件会落进文件管理器进不去的应用私有目录"
+    );
+
+    // 2) 判断权限必须用系统权威接口，不能靠"写一个文件试试"猜。
+    assert!(
+        storage.contains("Environment.isExternalStorageManager()"),
+        "StorageAccess 必须用 isExternalStorageManager() 判断「所有文件访问权限」—— \
+         那是 Android 11+ 唯一的权威开关状态"
+    );
+    // 3) 必须能跳到授权页（本应用专属入口 + 全局兜底），否则按钮等于摆设。
+    assert!(
+        storage.contains("ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION"),
+        "StorageAccess 没有跳本应用的「所有文件访问权限」页 —— 用户找不到开关"
+    );
+    assert!(
+        storage.contains("ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION"),
+        "StorageAccess 缺少全局兜底页 —— 部分 ROM 没有实现应用专属入口, 会静默失败"
+    );
+    // 4) 收件目录常量必须与 core 一致：不一致时界面会打开一个不存在的目录。
+    assert!(
+        config.contains("ANDROID_PUBLIC_RECEIVE_DIR: &str = \"/sdcard/Download/feisuo\"")
+            && storage.contains("PUBLIC_RECEIVE_DIR = \"/sdcard/Download/feisuo\""),
+        "core 与 Kotlin 的公共收件目录不一致 —— 界面会打开一个 core 根本不写的目录"
+    );
+
+    // 5) 界面: 未授权时先引导，而不是直接打开一个进不去的目录。
+    let open_at = main
+        .find("private fun openReceiveDir(")
+        .expect("MainActivity 缺少 openReceiveDir");
+    let open_body: String = main[open_at..].chars().take(900).collect();
+    assert!(
+        open_body.contains("StorageAccess.hasBroadAccess"),
+        "openReceiveDir 没有先判断存储权限 —— 未授权时会静默打开应用私有目录"
+    );
+    assert!(
+        open_body.contains("promptStorageGrant"),
+        "openReceiveDir 未授权时没有引导授权入口"
+    );
+
+    // 6) 从授权页回来必须续做，否则用户从设置回来只看到界面毫无变化。
+    assert!(
+        main.contains("awaitingStorageGrant"),
+        "MainActivity 没有记住\"被打断的授权/打开\" —— 从系统设置回来什么都不会发生"
+    );
+    let resume_at = main
+        .find("override fun onResume(")
+        .expect("MainActivity 缺少 onResume");
+    let resume_body: String = main[resume_at..].chars().take(2200).collect();
+    assert!(
+        resume_body.contains("awaitingStorageGrant"),
+        "onResume 没有收尾存储授权 —— 授权回来后接收目录不会切回公共目录"
+    );
+
+    // 7) core 侧必须真的迁移，否则"授权了还是打不开"是必然结果。
+    assert!(
+        config.contains("pub fn migrate_private_receive_dir("),
+        "core 缺少 migrate_private_receive_dir —— 已经落进私有目录的收件路径永远不会回公共目录"
+    );
+    assert!(
+        config.matches("migrate_private_receive_dir(").count() >= 2,
+        "core 的配置加载流程没有调用迁移（文件里只应出现\"定义 1 次 + 调用 1 次\"）—— \
+         迁移函数写了也白写"
+    );
+
+    // 8) 打开目录必须进**浏览模式**，不能进选择器。
+    //
+    // `ACTION_OPEN_DOCUMENT_TREE` 是"选一个文件夹"的界面：里面的文件既点不开
+    // 也不能预览，APK 更装不了 —— 它只有一个"使用此文件夹"按钮。旧实现拿它
+    // 当兜底，于是在实现该 action 的机型上，「打开接收目录」落进了这个界面，
+    // 用户看到的是"文件都在，但一个都点不动"。
+    let launch_at = main
+        .find("private fun launchFileManager(")
+        .expect("MainActivity 缺少 launchFileManager");
+    let launch_body: String = main[launch_at..].chars().take(2600).collect();
+    assert!(
+        launch_body.contains("Intent.ACTION_VIEW"),
+        "launchFileManager 没有用 ACTION_VIEW 打开目录 —— 只有浏览模式里的条目才可点、可预览"
+    );
+    assert!(
+        launch_body.contains("MIME_TYPE_DIR"),
+        "打开目录时没有声明目录类型（MIME_TYPE_DIR）—— 部分机型会退回\"无处理者\""
+    );
+    assert!(
+        !launch_body.contains("ACTION_OPEN_DOCUMENT_TREE"),
+        "launchFileManager 仍在使用 ACTION_OPEN_DOCUMENT_TREE —— 那是目录选择器, \
+         里面的文件不可点、不可预览, APK 也装不了"
+    );
+    assert!(
+        launch_body.contains("ACTION_VIEW_DOWNLOADS"),
+        "缺少「系统下载页」兜底：机型不支持 ACTION_VIEW 打开目录时，\
+         这是唯一还能让用户点到文件的入口（它本身就是 Download 目录）"
+    );
+    // 9) 预判处理者会让可见性限制把候选全部跳空。
+    assert!(
+        !launch_body.contains("resolveActivity("),
+        "launchFileManager 用 resolveActivity 预判处理者 —— targetSdk 30+ 的软件包可见性\
+         会让它对着真实存在的处理者返回 null, 结果每个候选都被跳过"
+    );
+}

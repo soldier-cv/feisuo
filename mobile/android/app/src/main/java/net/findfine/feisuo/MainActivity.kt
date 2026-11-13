@@ -3,6 +3,7 @@ package net.findfine.feisuo
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.DownloadManager
 import android.app.NotificationManager
 import android.content.ActivityNotFoundException
 import android.content.Intent
@@ -60,6 +61,15 @@ class MainActivity : Activity() {
         private const val REQUEST_POST_NOTIFICATIONS = 1001
         /** 名册轮询间隔：发现信标 3 秒一轮，5 秒足够收敛且不浪费电 */
         private const val ROSTER_POLL_MS = 5000L
+        /**
+         * 系统「文件」应用的包名（AOSP 与 GMS 两种）。
+         *
+         * 只用于**点名**优先尝试：某些 ROM 把裸 `ACTION_VIEW` 分给了别的应用
+         * （相册、压缩软件），点开目录却进不了浏览模式。取不到就抛
+         * `ActivityNotFoundException`，自然落到下一个候选。
+         */
+        private const val DOCUMENTS_UI_PACKAGE = "com.android.documentsui"
+        private const val DOCUMENTS_UI_PACKAGE_GMS = "com.google.android.documentsui"
     }
 
     /** 整页根布局：AppBar / 内容区 / 底部导航，竖排三段。 */
@@ -101,6 +111,22 @@ class MainActivity : Activity() {
     private var notificationActionButton: Button? = null
     private var updateStatusView: TextView? = null
     private var updateCheckButton: Button? = null
+    /** 我的页「存储」：权限状态行与授权入口 */
+    private var storageAccessView: TextView? = null
+    private var storageGrantButton: Button? = null
+    /** 用户被带去开「所有文件访问权限」，回到界面时要续做那件事 */
+    private var awaitingStorageGrant = false
+    /** 这次授权是为了"打开接收目录"—— 授权回来直接打开，用户不用再点一次 */
+    private var openDirAfterGrant = false
+    /**
+     * 是否已经为"配置里还指着私有目录"重启过一次引擎。
+     *
+     * core 只在 boot 时读配置，所以权限刚拿到时必须重启一次才能触发
+     * `migrate_private_receive_dir`。但若公共目录确实不可写（个别 ROM 上
+     * 「所有文件访问」也管不到 Download），迁移不会成功 —— 没有这个标志，
+     * 每次点"打开"都会重启引擎并失败一次。
+     */
+    private var storageMigrationTried = false
 
     // ---------------- 设备名册 / 自动发现 ----------------
 
@@ -158,6 +184,7 @@ class MainActivity : Activity() {
         startDaemonService()
         requestNotificationPermissionIfNeeded()
         updateNotificationStatus()
+        updateStorageAccessRow()
 
         // 启动时静默检查一次：用户不会为了"看看有没有新版"主动点按钮，
         // 而失败时**不打扰**（离线用户每次开应用都弹红条只会让人关掉通知）。
@@ -183,6 +210,16 @@ class MainActivity : Activity() {
         if (awaitingUnknownSources && ApkInstaller.canInstallPackages(this)) {
             awaitingUnknownSources = false
             pendingApk?.takeIf { it.isFile }?.let { installPendingApk(it) }
+        }
+
+        // 存储权限同理：从系统设置回来才第一次拿到真正的状态。授权成功就
+        // 重启引擎让 core 重新读配置（收件目录迁回公共下载目录），必要时
+        // 顺带把刚才被打断的"打开接收目录"做完。
+        // 没授权就保持 awaitingStorageGrant —— 用户再点一次"去授权"仍然有效。
+        updateStorageAccessRow()
+        if (awaitingStorageGrant && StorageAccess.hasBroadAccess(this)) {
+            awaitingStorageGrant = false
+            onStorageGranted()
         }
     }
 
@@ -513,6 +550,15 @@ class MainActivity : Activity() {
         configView = addRow("端口", "读取中…")
         receiveDirViewMine = addRow("接收目录", "读取中…")
 
+        // 存储：Android 11+ 没有「所有文件访问权限」时，收到的文件只能落在
+        // 应用私有空间 —— 那里文件管理器进不去。这一行把状态直说，并给一个
+        // 一键授权入口；只是弹窗提醒的话，用户永远不知道入口在哪。
+        section("存储")
+        storageAccessView = addRow("文件夹访问", "检查中…")
+        storageGrantButton = addButton("授予文件访问权限", primary = false) {
+            promptStorageGrant(openAfter = false)
+        }
+
         section("通知")
         notificationStatusView = addRow("通知栏", "检查中…")
         notificationActionButton = addButton("开启通知", primary = false) { onNotificationAction() }
@@ -677,18 +723,51 @@ class MainActivity : Activity() {
      * 写死会让这个按钮把他带到上一个位置。
      *
      * 读配置是阻塞 JNI，放后台线程；真正的 `startActivity` 回主线程做。
+     *
+     * 没有「所有文件访问权限」时**不打开**，而是先解释并引导授权：
+     * 那种情况下 core 把文件写进了应用私有目录，任何文件管理器都进不去，
+     * 打开也只会看到一个空目录 —— 那正是"文件无法访问"的来源。
      */
     private fun openReceiveDir() {
+        if (!StorageAccess.hasBroadAccess(this)) {
+            promptStorageGrant(openAfter = true)
+            return
+        }
         if (!FeisuoRuntime.isEngineRunning()) {
             toast("引擎未就绪, 请稍后重试")
             return
         }
+        readReceiveDirAndOpen()
+    }
+
+    /**
+     * 读配置里的接收目录并交给系统文件管理器。
+     *
+     * 如果权限已经有了、配置里却还指着应用私有目录（说明引擎是在授权之前
+     * 启动的），先重启一次引擎让 core 执行目录迁移 —— 否则用户会看到
+     * "我明明授权了，它还是说打不开"。
+     */
+    private fun readReceiveDirAndOpen() {
         val t = Thread({
             val dir = runCatching {
                 JSONObject(NativeBridge.configJson()).optString("receive_dir")
-            }.getOrDefault("").ifBlank { "/sdcard/Download/feisuo" }
+            }.getOrDefault("").ifBlank { StorageAccess.PUBLIC_RECEIVE_DIR }
+            // 一次都还没收到过文件时这个目录并不存在，而文件管理器的
+            // document URI 指向一个不存在的目录会直接报"找不到该项目"。
+            // 先建出来（我们已经站在后台线程上，做文件 I/O 是安全的）。
+            // 建不出来不阻断：接下来会给出一句明确的提示。
+            if (StorageAccess.isPublicPath(dir)) {
+                runCatching { File(dir).mkdirs() }
+            }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
+                if (!StorageAccess.isPublicPath(dir) && !storageMigrationTried) {
+                    storageMigrationTried = true
+                    // 引擎是进程内单例，配置只在 boot 时读一次：重启一次
+                    // 才能让 core 看到新权限并完成迁移（停机在后台线程里做）。
+                    startEngineAsync(openDirWhenReady = true, restartFirst = true)
+                    return@runOnUiThread
+                }
                 launchFileManager(dir)
             }
         }, "feisuo-open-receive-dir")
@@ -697,49 +776,140 @@ class MainActivity : Activity() {
     }
 
     /**
-     * 用系统文件管理器打开目录。
+     * 存储授权状态的展示。
      *
-     * 三种 intent 依次尝试，因为"打开一个文件夹"在 Android 上没有唯一标准：
-     * 1. 外部存储 DocumentsProvider 的**目录 document URI**（AOSP DocumentsUI 认）；
-     * 2. 外部存储**根** document URI（部分 ROM 的文件管理器只认根）；
-     * 3. `ACTION_OPEN_DOCUMENT_TREE` 并把初始位置指到该目录（任何设备都有选择器）。
-     * 三个都不行就明确告诉用户路径，而不是点了没反应。
+     * 已授权时把按钮收起来，而不是灰着：留下一个永远点不动的按钮，用户会
+     * 反复点它并怀疑功能坏了。
+     */
+    private fun updateStorageAccessRow() {
+        val granted = StorageAccess.hasBroadAccess(this)
+        storageAccessView?.text =
+            if (granted) "已授权 · 文件管理器可访问" else "未授权 · 收到的文件在应用私有空间"
+        storageAccessView?.setTextColor(
+            getColor(if (granted) R.color.feisuo_accent else R.color.feisuo_danger)
+        )
+        storageGrantButton?.visibility = if (granted) View.GONE else View.VISIBLE
+    }
+
+    /**
+     * 解释 + 跳转授权。
+     *
+     * 只说"需要权限"是不够的：用户会问"我为什么要给你这个权限"。
+     * 文案要把因果讲清楚 —— 没有它，收到的文件在文件管理器里根本找不到。
+     */
+    private fun promptStorageGrant(openAfter: Boolean) {
+        if (StorageAccess.hasBroadAccess(this)) {
+            if (openAfter) {
+                if (FeisuoRuntime.isEngineRunning()) readReceiveDirAndOpen() else toast("引擎未就绪, 请稍后重试")
+            }
+            return
+        }
+        openDirAfterGrant = openDirAfterGrant || openAfter
+        val entry = if (StorageAccess.usesSettingsPage()) {
+            "「所有文件访问权限」"
+        } else {
+            "「存储」权限"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("需要文件访问权限")
+            .setMessage(
+                "飞梭把收到的文件直接存到公共下载目录：\n${StorageAccess.PUBLIC_RECEIVE_DIR}\n\n" +
+                    "Android 11 起，写这个目录需要${entry}。没有它时文件只能存进" +
+                    "应用私有空间 —— 那里任何文件管理器都打不开，你也就找不到收到的文件。\n\n" +
+                    "授权后飞梭会自动把接收目录切回公共下载目录。已经收到的旧文件仍留在私有空间，不会丢。"
+            )
+            .setPositiveButton("去授权") { _, _ ->
+                awaitingStorageGrant = true
+                if (!StorageAccess.request(this)) {
+                    awaitingStorageGrant = false
+                    toast("无法打开授权页，请到系统设置里手动为飞梭开启${entry}")
+                }
+            }
+            .setNegativeButton("取消") { _, _ -> openDirAfterGrant = false }
+            .show()
+    }
+
+    /**
+     * 授权回来后：重启引擎让 core 重读配置，顺带把被打断的"打开目录"做完。
+     */
+    private fun onStorageGranted() {
+        storageMigrationTried = false
+        updateStorageAccessRow()
+        toast("已授予文件访问权限，正在把接收目录切回公共下载目录…")
+        // 重启引擎让 core 重新读配置并执行迁移；停止与再启动都在后台线程里，
+        // 主线程只负责一次界面刷新。
+        startEngineAsync(openDirWhenReady = openDirAfterGrant, restartFirst = true)
+        openDirAfterGrant = false
+    }
+
+    /**
+     * 用系统文件管理器**浏览**接收目录。
+     *
+     * ## 为什么这里绝对不能用 `ACTION_OPEN_DOCUMENT_TREE`
+     *
+     * 那个 action 是**选择器**：整屏只为了"选一个目录"，里面的文件既不能点开
+     * 也不能预览，APK 更是装不了 —— 它连"打开"这个动作都不存在，只有一个
+     * "使用此文件夹"按钮。旧实现把它当兜底，于是有些机型上点「打开接收目录」
+     * 落进了这个界面，用户看到的就是"文件都在，但一个都点不动"。
+     *
+     * 浏览模式只有一个正确的入口：`ACTION_VIEW` + 目录的 **document URI** +
+     * `MIME_TYPE_DIR`。系统「文件」（DocumentsUI）收到它会正常进入浏览模式，
+     * 条目的点击行为与用户在文件管理器里自己点进去完全一致 —— 文档交给对应的
+     * 查看器（临时授读权限），APK 交给安装器弹安装确认。
+     *
+     * 候选按"越具体越优先"排列，失败才退到更宽的范围：
+     * 1. 点名系统「文件」应用打开目录 document URI（`setPackage` 不弹选择器）；
+     * 2. 不点名，交给系统挑；
+     * 3. `resource/folder`（第三方文件管理器注册的老式类型）；
+     * 4. 外部存储根的 document URI（退到"内部存储"根，再点两级）；
+     * 5. 系统「下载」页面（`ACTION_VIEW_DOWNLOADS`，本来就是 Download 目录，
+     *    条目同样可点，`feisuo` 就在第一层）。
+     *
+     * 全部失败才提示路径，而不是点了没反应。
      */
     private fun launchFileManager(dir: String) {
-        val normalized = dir.trim().trimEnd('/')
+        val normalized = StorageAccess.normalize(dir).trimEnd('/')
         if (normalized.isEmpty()) {
             toast("接收目录未知, 请稍后重试")
             return
         }
-        val externalRoot = "/storage/emulated/0"
-        val onExternalStorage = normalized == externalRoot ||
-            normalized.startsWith("$externalRoot/") ||
-            normalized == "/sdcard" ||
-            normalized.startsWith("/sdcard/")
-        if (!onExternalStorage) {
-            // 无外部存储权限时 core 会退回应用私有目录（/data/...），
+        if (!StorageAccess.isPublicPath(normalized)) {
+            // core 在没有存储权限时会退回应用私有目录（/data/...）。
             // 那个路径文件管理器根本进不去 —— 说清楚比一个没反应的点击好。
-            toast("接收目录在应用私有空间, 文件管理器打不开:\n$normalized")
+            toast("接收目录在应用私有空间, 文件管理器打不开:\n$normalized\n请先授予文件访问权限")
             return
         }
-        val rel = if (normalized.startsWith("/sdcard")) {
-            normalized.removePrefix("/sdcard")
-        } else {
-            normalized.removePrefix(externalRoot)
-        }.trim('/')
+        val rel = normalized.removePrefix("/sdcard").trim('/')
 
         val authority = "com.android.externalstorage.documents"
         val folderUri = DocumentsContract.buildDocumentUri(authority, "primary:$rel")
-        val candidates = listOf(
+        val rootUri = DocumentsContract.buildRootUri(authority, "primary")
+        val dirMime = DocumentsContract.Document.MIME_TYPE_DIR
+
+        val candidates = mutableListOf(
+            // 1) 首选**点名**系统「文件」应用：`setPackage` 之后不会再弹"用哪个应用打开"
+            //    的选择器。AOSP 与 GMS 两种包名各试一次，取不到就抛异常自动往下走。
             Intent(Intent.ACTION_VIEW)
-                .setDataAndType(folderUri, DocumentsContract.Document.MIME_TYPE_DIR),
+                .setDataAndType(folderUri, dirMime)
+                .setPackage(DOCUMENTS_UI_PACKAGE),
             Intent(Intent.ACTION_VIEW)
-                .setData(DocumentsContract.buildRootUri(authority, "primary")),
-            Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
-                .putExtra(DocumentsContract.EXTRA_INITIAL_URI, folderUri),
+                .setDataAndType(folderUri, dirMime)
+                .setPackage(DOCUMENTS_UI_PACKAGE_GMS),
+            // 2) 不点名：交给系统挑（第三方文件管理器装的多的机器上可能弹选择器）
+            Intent(Intent.ACTION_VIEW).setDataAndType(folderUri, dirMime),
+            // 3) 第三方文件管理器认的老式目录类型
+            Intent(Intent.ACTION_VIEW).setDataAndType(folderUri, "resource/folder"),
+            // 4) 退到内部存储根
+            Intent(Intent.ACTION_VIEW).setDataAndType(rootUri, dirMime),
+            // 5) 退到系统「下载」页：它本身就是 Download 目录
+            Intent(DownloadManager.ACTION_VIEW_DOWNLOADS),
         )
         for (intent in candidates) {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            // 这里**不能用 resolveActivity 预判**：targetSdk 30+ 的软件包可见性
+            // 会让它对着一个明明存在的处理者返回 null，于是"每个候选都被跳过"，
+            // 用户看到的是"没有文件管理器"而系统里其实有。startActivity 不受
+            // 可见性限制，抛出的 ActivityNotFoundException 正好就是"换下一个"。
             try {
                 startActivity(intent)
                 return
@@ -1163,11 +1333,29 @@ class MainActivity : Activity() {
 
     private fun nowSecs(): Long = System.currentTimeMillis() / 1000
 
-    private fun startEngineAsync() {
+    /**
+     * 启动（或重启后启动）引擎并刷新界面。
+     *
+     * @param openDirWhenReady 引擎起来后立刻打开接收目录。用于"授权完成、
+     *        被打断的那次打开" —— 不续的话用户从设置页回来，界面什么都没发生，
+     *        只能自己再点一次（而且不知道该点哪个）。
+     * @param restartFirst 先停掉现有引擎再重新启动。core 只在 boot 时读一次
+     *        配置，所以要让它看见"刚拿到的存储权限"并迁移收件目录，就必须
+     *        重启一次。停机放在**这个后台线程里**做：`stop()` 要等后台任务
+     *        真正退出（正常是微秒级，上限 2 秒），放在主线程会掉帧。
+     */
+    private fun startEngineAsync(
+        openDirWhenReady: Boolean = false,
+        restartFirst: Boolean = false,
+    ) {
         engineStatusView?.text = "正在启动…"
         engineStatusPill?.text = "启动中"
         worker?.interrupt()
         worker = Thread {
+            if (restartFirst) {
+                runCatching { FeisuoRuntime.shutdown() }
+                    .onFailure { Log.w(TAG, "停止引擎失败(继续重启): ${it.message}") }
+            }
             // nativeInitEngine 失败返回 0, 不会抛异常;
             // 但 .so 缺失时 loadLibrary 会抛 UnsatisfiedLinkError
             val ok = try {
@@ -1211,8 +1399,18 @@ class MainActivity : Activity() {
                 localNameView?.text = deviceName.ifBlank { "—" }
                 receiveDirView?.text = receiveDir.ifBlank { "—" }
                 receiveDirViewMine?.text = receiveDir.ifBlank { "—" }
+                updateStorageAccessRow()
             }
-            if (ok) loadTrustedDevices()
+            if (ok) {
+                loadTrustedDevices()
+                if (openDirWhenReady) {
+                    // 这一次 openReceiveDir 是"授权后自动续做"的：权限已经拿到，
+                    // 走读取配置 → 拉起文件管理器那条路即可。
+                    runOnUiThread {
+                        if (!isFinishing && !isDestroyed) readReceiveDirAndOpen()
+                    }
+                }
+            }
         }.also {
             it.isDaemon = true
             it.start()
@@ -1545,6 +1743,20 @@ class MainActivity : Activity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        // Android 10 及更早走的是运行时权限（没有"所有文件访问"设置页），
+        // 结果必须在这里收尾，否则用户点了"允许"回来界面还是"未授权"。
+        if (requestCode == StorageAccess.REQUEST_LEGACY_STORAGE) {
+            updateStorageAccessRow()
+            if (StorageAccess.hasBroadAccess(this)) {
+                awaitingStorageGrant = false
+                onStorageGranted()
+            } else {
+                awaitingStorageGrant = false
+                openDirAfterGrant = false
+                toast("未授予存储权限，收到的文件只能留在应用私有空间")
+            }
+            return
+        }
         if (requestCode != REQUEST_POST_NOTIFICATIONS) return
         val granted = grantResults.isNotEmpty() &&
             grantResults[0] == PackageManager.PERMISSION_GRANTED

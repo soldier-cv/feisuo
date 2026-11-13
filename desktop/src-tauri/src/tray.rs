@@ -97,10 +97,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                         status.message
                     );
                     // 手动触发的结果统一唤窗, 托盘用户才看得到
-                    if let Some(window) = handle.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                    show_main(&handle);
                 });
             }
             "quit" => {
@@ -110,31 +107,30 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            // ❌ 这里曾经写的是 `if let Click { button: Left, .. } = event { 切换面板 }`,
-            //    **完全忽略 button_state**, 结果左键单击只会"闪一下"、面板打不开。
+            // 左键单击托盘图标 = 把主面板叫到最前面，**不再"再点一次收起"**。
             //
-            //    原因在 tray-icon 的 Windows 实现里: WM_LBUTTONDOWN 与 WM_LBUTTONUP
-            //    各自映射成一条 TrayIconEvent::Click, 只有 button_state 不同
-            //    (Down / Up)。于是**一次物理点击会进这个回调两次**:
-            //      第 1 次 Down → 窗口还隐藏着 → show_main() 把面板弹出来
-            //      第 2 次 Up   → 刚弹出来的窗口 is_visible() == true → hide()
-            //    肉眼看到的就是面板一闪即没。右键不受影响, 因为菜单是在
-            //    WM_RBUTTONUP 这一条路径上弹的(tray-icon 内部只认那一条)。
+            // 这个回调踩过两次同样的坑, 所以把结论留在代码里:
+            //   ① tray-icon 0.25 的 Windows 实现把 WM_LBUTTONDOWN 与
+            //      WM_LBUTTONUP 各映射成一条 TrayIconEvent::Click(只有
+            //      button_state 不同), 一次物理点击会进这里两次。忽略
+            //      button_state 时两次切换互相抵消, 面板一闪即没 —— 所以
+            //      只认抬起(Up), 与 Windows 任务栏"抬键才响应"的惯例一致。
+            //   ② 光靠"只认抬起 + 400ms 节流"仍然治不好本 bug: 只要多出来
+            //      的那条 Up 落在节流窗口之外(双击慢于 400ms、鼠标微动连击、
+            //      用户以为没点上再点一次), "切换"就会把刚弹出来的面板收回
+            //      去, 表现依旧是"点一下闪一下, 只有右键菜单能打开"。
             //
-            //    修法有两层: ① 只认抬起(Up), 按下不动 —— 一次物理点击 = 一次切换,
-            //    与 Windows 任务栏/托盘"抬键才响应"的惯例一致;
-            //    ② 再加 400ms 节流 —— 双击在 Windows 上的消息序列是
-            //    Down/Up/DBLCLK/Up, 两条 Up 照样会"弹出→收起"闪一下。
+            // 根子在于"切换"这个语义本身: 显示是有收益的操作, 隐藏不是 ——
+            // 用户点托盘图标永远是想看到面板。Windows 上微信/QQ 的托盘也是
+            // 点了就显示, 收起只走窗口上的关闭按钮。改成纯显示后, 多余的
+            // 事件最多重复显示同一个窗口, 不可能再把面板弄丢。
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 ..
             } = event
             {
-                if !allow_tray_toggle() {
-                    return;
-                }
-                toggle_main(tray.app_handle());
+                show_main(tray.app_handle());
             }
         })
         .build(app)?;
@@ -142,56 +138,48 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 距上一次托盘切换不足这个间隔的重复事件一律丢弃。
-/// 窗口的显示/隐藏是"有反作用"的操作, 连做两次等于什么也没做,
-/// 用户只会看到一闪 —— 所以宁可吞掉双击的后半截。
-const TRAY_TOGGLE_THROTTLE: std::time::Duration = std::time::Duration::from_millis(400);
-
-static LAST_TRAY_TOGGLE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-
-/// 本次左键事件是否值得执行切换（节流）。
-fn allow_tray_toggle() -> bool {
-    let now = std::time::Instant::now();
-    // 锁中毒说明上一次持锁的线程 panic 了, 这里没有不变量需要保护,
-    // 取回内部值继续用即可, 绝不因为中毒就永久屏蔽托盘点击。
-    let mut last = match LAST_TRAY_TOGGLE.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if let Some(prev) = *last {
-        if now.duration_since(prev) < TRAY_TOGGLE_THROTTLE {
-            return false;
-        }
-    }
-    *last = Some(now);
-    true
-}
-
-/// 左键语义: 面板在前台就收回到托盘, 否则唤出。
-fn toggle_main(app: &AppHandle) {
-    let Some(window) = app.get_webview_window("main") else {
-        return;
-    };
-    let is_visible = window.is_visible().unwrap_or(false);
-    let is_minimized = window.is_minimized().unwrap_or(false);
-    if is_visible && !is_minimized {
-        let _ = window.hide();
-    } else {
-        show_main(app);
-    }
-}
-
-/// 唤出并聚焦主窗口。
+/// 唤出主窗口并把它真正抬到最前面。
 ///
-/// 抽成函数是因为这个三行序列在托盘菜单里出现了四次 —— 而漏掉
+/// 抽成函数是因为这个序列在托盘菜单里出现了四次 —— 而漏掉
 /// `unminimize()` 的后果是"点了菜单窗口弹出来但还是最小化状态"，
 /// 这类 bug 极难从日志里看出来。
 pub(crate) fn show_main(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let _ = window.show();
+    if window.is_minimized().unwrap_or(false) {
         let _ = window.unminimize();
-        let _ = window.set_focus();
     }
+    let _ = window.set_focus();
+    ensure_foreground(app);
+}
+
+/// Windows 前台抢占的兜底。
+///
+/// 托盘图标的点击归属 explorer.exe, 我们调 `SetForegroundWindow` 时常被系统
+/// 拒绝 —— 而且拒绝是静默的: 窗口照样画出来, 只是压在别的窗口后面、键盘焦点
+/// 也不在它身上。用户看到的是"点了像没点", 于是再点一次; 只要那个版本的
+/// 左键还是"切换"语义, 面板就会被收回去, 正是"闪一下就最小化"。
+///
+/// 这里等事件循环把 show/unminimize 处理完(tao 在 Windows 上把这几步投递到
+/// 主线程执行), 再看一眼是否真的拿到焦点; 没拿到就短暂置顶再取消置顶 ——
+/// 置顶不受前台权限限制, 能把窗口抬到本层最前, 取消后也不会永久置顶。
+fn ensure_foreground(app: &AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        let Some(window) = handle.get_webview_window("main") else {
+            return;
+        };
+        // 这期间用户又把它收起了(点关闭 / 走托盘菜单), 就不要再拽回来
+        if !window.is_visible().unwrap_or(false) || window.is_focused().unwrap_or(false) {
+            return;
+        }
+        let _ = window.set_always_on_top(true);
+        let _ = window.set_always_on_top(false);
+        let _ = window.set_focus();
+    });
 }
 
 /// 通知前端打开剪贴板直发（托盘菜单触发）。

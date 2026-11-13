@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{AppConfig, DISCOVERY_MULTICAST_ADDR};
 use crate::error::{FeisuoError, Result};
-use crate::protocol::{BeaconPacket, PROTOCOL_VERSION};
+use crate::protocol::{BeaconKind, BeaconPacket, PROTOCOL_VERSION};
 use crate::security::{DeviceIdentity, TrustStore};
 // 网卡枚举：要的是操作系统**算好的**广播地址与启用状态，
 // 而不是自己按前缀长度猜。见 compute_broadcast_targets 里的长注释。
@@ -35,7 +35,7 @@ pub struct DiscoveryWindow {
     pub self_or_ver: u64,
     /// 不是合法的 BeaconPacket JSON
     pub parse_err: u64,
-    /// 回包（Ping-Pong）成功发出的次数
+    /// 收到主动探测（`BeaconKind::Probe`）并成功发出应答的次数
     pub replied: u64,
 }
 
@@ -113,6 +113,28 @@ const SUBNET_PREFIXES: [u8; 3] = [16, 20, 24];
 /// 地址变了 = 可能是攻击者，必须走完整验签。
 const BEACON_THROTTLE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// 同一个来源地址两次"探测应答"之间的最小间隔。
+///
+/// 这不是兼容闸，而是抗滥用：应答是 1:1 的单播回包，若有人伪造源地址发探测
+/// 洪水，我们就会变成反射放大器。限速后无论对方发多快，我们每秒最多回一包。
+///
+/// 正常探测来自 [`DiscoveryService::probe_ip`]（用户点一次 = 一个包），
+/// 1 秒的窗口对真人操作完全无感。
+const PROBE_REPLY_THROTTLE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// 收到一条信标后，本机应当发什么回去；`None` = 什么都不发。
+///
+/// **整个发现协议的自激性就取决于这个函数**：返回值若是 `Some(Announce)`，
+/// 那么下一次收到的那条 `Announce` 必须返回 `None` —— 即一条包最多引发
+/// 一跳。`tests::reply_state_machine_terminates_after_one_hop` 直接遍历
+/// 状态机把这条性质钉死，防止以后有人"顺手"给 `Announce` 也加一个应答。
+fn answers_to(kind: BeaconKind) -> Option<BeaconKind> {
+    match kind {
+        BeaconKind::Probe => Some(BeaconKind::Announce),
+        BeaconKind::Announce => None,
+    }
+}
+
 /// 目标清单**只在首次或变化时**该打日志。
 ///
 /// 为什么要单独一个函数：早先在 async 块里直接
@@ -132,6 +154,35 @@ fn note_plan_if_changed(state: &Mutex<Option<String>>, key: String) -> bool {
     }
     *g = Some(key);
     true
+}
+
+/// 现在能不能给这个来源回一次探测应答（每 [`PROBE_REPLY_THROTTLE`] 最多一次）。
+///
+/// 收进普通函数的原因与 [`note_plan_if_changed`] 相同：`MutexGuard`
+/// 不能跨 `await`，而这个判断发生在接收循环（async 帧）里。
+///
+/// 键只有来源 IP：应答的对象是"谁在问"，与它自报的 device_id 无关 ——
+/// 后者可以随便填，用它做键等于把限速交给攻击者控制。
+///
+/// 锁中毒时返回 `false`（**不回**）：应答只是快路径，放行则意味着可能
+/// 被当成放大器。宁可少一次应答。
+fn allow_probe_reply(state: &Mutex<HashMap<String, std::time::Instant>>, ip: &str) -> bool {
+    let now = std::time::Instant::now();
+    let mut map = match state.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    // 有界：攻击者可以用大量伪造源地址撑爆内存。
+    if map.len() > 256 {
+        map.retain(|_, at| now.duration_since(*at) < PROBE_REPLY_THROTTLE);
+    }
+    match map.get(ip) {
+        Some(at) if now.duration_since(*at) < PROBE_REPLY_THROTTLE => false,
+        _ => {
+            map.insert(ip.to_string(), now);
+            true
+        }
+    }
 }
 
 /// 把操作系统的网卡列表过滤成"值得广播的"与"跳过的"。
@@ -466,7 +517,10 @@ impl DiscoveryService {
         }
     }
 
-    /// 构造并签名本机信标
+    /// 构造并签名本机信标。
+    ///
+    /// 目前唯一的调用点是 [`DiscoveryService::probe_ip`]，所以固定为
+    /// [`BeaconKind::Probe`]：它是一条"问你一声"，对端回一包 `Announce`。
     async fn build_beacon(&self) -> BeaconPacket {
         let cfg = self.config.read().await;
         let mut packet = BeaconPacket {
@@ -488,6 +542,8 @@ impl DiscoveryService {
             // **不进签名载荷** —— 载荷随字段增减会让新旧两版互相验不过签。
             caps: crate::protocol::local_caps(),
             app_version: env!("CARGO_PKG_VERSION").to_string(),
+            // 主动探测：请对端回一包。回包是 `Announce`，不会再被回答。
+            kind: BeaconKind::Probe,
         };
         packet.signature = self.identity.sign(packet.signing_payload().as_bytes());
         packet
@@ -617,11 +673,9 @@ impl DiscoveryService {
         // - `rx == 0`：**一个包都没收到** ⇒ 网络层不通（组播被拦 /
         //   防火墙 / 不在同一网段），该查网络；
         // - `rx > 0` 但 `accepted == 0` ⇒ 包到了但全被拒（被拉黑 /
-        //   签名不过 / 版本不兼容），该查信任与版本；
-        // - `accepted > 0` 但 `replied == 0` ⇒ 认出来了却没回包，
-        //   对端会认为"没回包"从而显示离线。
+        //   签名不过 / 版本不兼容），该查信任与版本。
         //
-        // 这三种在界面上**长得一模一样**（都是"搜不到"），
+        // 这两类在界面上**长得一模一样**（都是"搜不到"），
         // 所以必须在日志里就把它们区分开。
         //
         // 声明放在两个任务之前：广播循环要读（打摘要），
@@ -730,6 +784,8 @@ impl DiscoveryService {
                     signature: String::new(),
                     caps: crate::protocol::local_caps(),
                     app_version: env!("CARGO_PKG_VERSION").to_string(),
+                    // 周期广播：不请求应答。对端看到后只更新在线状态。
+                    kind: BeaconKind::Announce,
                 };
                 packet.signature = b_identity.sign(packet.signing_payload().as_bytes());
                 let allowed_subnets = cfg.allowed_peer_subnets.clone();
@@ -869,12 +925,12 @@ impl DiscoveryService {
                         // - `rx == 0`：**一个包都没收到** ⇒ 网络层不通
                         //   （组播被拦 / 防火墙 / 不在同一网段），该查网络；
                         // - `rx > 0` 但 `accepted == 0` ⇒ 包到了但全被拒
-                        //   （被拉黑 / 签名不过 / 版本不兼容），该查信任与版本；
-                        // - `accepted > 0` 但 `replied == 0` ⇒ 认出来了却没回包，
-                        //   对端会认为"没回包"从而显示离线。
+                        //   （被拉黑 / 签名不过 / 版本不兼容），该查信任与版本。
                         //
-                        // 这三种在界面上**长得一模一样**（都是"搜不到"），
-                        // 所以必须在这里就把它们区分开。
+                        // 注意 `replied == 0` **不再是异常**：应答只发生在对端
+                        // 主动探测（`BeaconKind::Probe`）时，周期广播彼此都不回。
+                        // 早先把"回包数"当健康指标，恰恰是因为旧实现逢包必回 ——
+                        // 那个行为本身就是流量风暴的根源。
                         //
                         // 整轮只取一次快照（`take_window` 内部每个计数器
                         // swap 一次）。之后所有打印都读这份快照 ——
@@ -906,7 +962,7 @@ impl DiscoveryService {
                             // 周期往几十个广播地址各发一份，接收端按
                             // (device_id, IP) 做了节流。
                             info!(
-                                "[发现] 收 {} 包: 采纳 {}（其中重复 {} 已节流）· 拒绝 {}（签名或公钥 {} / 自身或版本 {} / 解析失败 {}）· 回包 {}",
+                                "[发现] 收 {} 包: 采纳 {}（其中重复 {} 已节流）· 拒绝 {}（签名或公钥 {} / 自身或版本 {} / 解析失败 {}）· 探测应答 {}",
                                 w.received,
                                 w.accepted,
                                 w.throttled,
@@ -958,6 +1014,11 @@ impl DiscoveryService {
         let l_stats = stats.clone();
         // 接收侧累加、广播侧读取（见上面的 src_counts 注释）
         let l_src_counts = src_counts.clone();
+        // 来源 IP -> 上次"探测应答"的时刻。见 `PROBE_REPLY_THROTTLE`：
+        // 这不是兼容闸，而是防止探测洪水把我们当成反射放大器。
+        let l_reply_at = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::<String, std::time::Instant>::new(),
+        ));
         // (device_id, 来源 IP) -> 上次做完整验签+落库的时刻。
         // 见 BEACON_THROTTLE 的注释：按 IP 一起进键，是为了让
         // "换了个地址的同一 device_id" 仍然必须走完整验签。
@@ -1216,14 +1277,40 @@ impl DiscoveryService {
                     tracing::debug!("发现事件通道无订阅者 (前端可能尚未加载)");
                 }
 
-                // ---- 即时回信 (Ping-Pong), 让双方尽快互相看见 ----
+                // ---- 应答闸门：只有"探测"会被回答 ----
+                //
+                // 这是本轮流量风暴的**结构性**修复，不再是加防御。
+                // 旧行为：收到任何信标都即时回一包。回包本身也是一条合法信标，
+                // 于是两端互相回下去 —— 实测 2700 包/秒、网卡收 1.3 MB/s +
+                // 发 1.3 MB/s（约 20 Mbit/s），而用户什么文件都没传。
+                //
+                // 新协议只有两种包（见 `BeaconKind`）：
+                //   · `Announce`（周期广播 / 所有应答）→ **什么都不发**；
+                //   · `Probe`（主动探测）→ 回一包 `Announce`。
+                // 应答永远是 `Announce`，而 `Announce` 不触发发送，所以
+                // "包引发包"最多一跳就停 —— 停止性由 `answers_to` 保证并被单测覆盖。
+                //
+                // 注意这**不依赖对端版本**：哪怕对面是旧版、仍在为我们的每条
+                // 广播回一包，我们收到的是 `Announce`（旧包没有 `kind` 字段，
+                // 默认就是 `Announce`），照样不回 —— 风暴只能由"双方都回"维持，
+                // 单方面停手就断了。
+                let Some(_) = answers_to(beacon.kind) else {
+                    continue;
+                };
+                // 探测是单播而来、量极小；但仍按来源限速，免得被伪造源地址
+                // 的探测洪水当成反射放大器。
+                if !allow_probe_reply(&l_reply_at, &ip) {
+                    continue;
+                }
+
+                // ---- 单播应答 (只回答探测) ----
                 let cfg = l_config.read().await;
-                let mut reply = BeaconPacket {
+                let mut response = BeaconPacket {
                     version: PROTOCOL_VERSION,
                     device_id: l_identity.device_id.clone(),
-                    // 同上: 回信同样是把本机名字交给对端, 必须消毒。
+                    // 同上: 应答同样是把本机名字交给对端, 必须消毒。
                     // 漏掉这一处的话, 主动探测(probe)路径会把脏名字发出去 ——
-                    // 因为它走的是回信而不是广播, 只改广播是修不干净的。
+                    // 因为它走的是应答而不是广播, 只改广播是修不干净的。
                     device_name: crate::config::sanitize_device_name(&cfg.device_name),
                     os_type: std::env::consts::OS.to_string(),
                     transfer_port: cfg.transfer_port,
@@ -1232,10 +1319,12 @@ impl DiscoveryService {
                     signature: String::new(),
                     caps: crate::protocol::local_caps(),
                     app_version: env!("CARGO_PKG_VERSION").to_string(),
+                    // 应答统一用 `Announce`：它不触发任何发送，链路到此为止。
+                    kind: BeaconKind::Announce,
                 };
                 drop(cfg);
-                reply.signature = l_identity.sign(reply.signing_payload().as_bytes());
-                if let Ok(reply_bytes) = serde_json::to_vec(&reply) {
+                response.signature = l_identity.sign(response.signing_payload().as_bytes());
+                if let Ok(reply_bytes) = serde_json::to_vec(&response) {
                     // 回包必须发到对端的**源端口**，也就是 `peer_addr.port()`。
                     //
                     // 早先用 `reply_port`（**本机**的绑定端口）。UDP 的源端口
@@ -1812,5 +1901,77 @@ mod tests {
                 "定向广播落到了白名单外的网卡: {name} {addr}"
             );
         }
+    }
+
+    /// **协议必须停机**：一条包最多引发一跳，然后就再没有下一跳。
+    ///
+    /// 这就是"没传文件、流量却呼呼窜"的根因所在：旧实现里收到任何信标都会
+    /// 回一包，而回包本身是一条合法信标，于是两端无限互回。实测两台设备
+    /// 在线时稳定约 2700 包/秒（收 1.3 MB/s + 发 1.3 MB/s，约 20 Mbit/s），
+    /// 用户什么文件都没传；日志里「收 N 包」一度到 43 万/30 秒。
+    ///
+    /// 这条测试遍历的是**状态机本身**，而不是源码字符串：给某种包加上
+    /// "收到就回"之后，只要它还回同一个能自激的包，这里立刻红。
+    #[test]
+    fn reply_state_machine_terminates_after_one_hop() {
+        for kind in [BeaconKind::Announce, BeaconKind::Probe] {
+            let Some(response) = answers_to(kind) else {
+                continue;
+            };
+            assert_eq!(
+                answers_to(response),
+                None,
+                "收到 {:?} 回了 {:?}，而 {:?} 又会被回答 —— 这就是乒乓风暴",
+                kind,
+                response,
+                response
+            );
+        }
+        assert_eq!(
+            answers_to(BeaconKind::Announce),
+            None,
+            "周期广播不能触发任何发送：两端各发一包就够互相看见了"
+        );
+        assert_eq!(
+            answers_to(BeaconKind::Probe),
+            Some(BeaconKind::Announce),
+            "主动探测必须得到应答，否则 probe_ip 只能等超时"
+        );
+    }
+
+    /// 应答按**来源地址**限速：同一来源窗口内只回一次，不同来源互不影响。
+    ///
+    /// 键必须是 IP 而不是 device_id —— 后者由对方自报，用它可以绕过限速，
+    /// 把本机变成反射放大器。
+    #[test]
+    fn probe_reply_is_rate_limited_per_source() {
+        let state = Mutex::new(HashMap::new());
+        assert!(allow_probe_reply(&state, "10.0.0.2"));
+        assert!(
+            !allow_probe_reply(&state, "10.0.0.2"),
+            "同一来源在窗口内的第二次探测必须被拦下，否则可被当成放大器"
+        );
+        assert!(
+            allow_probe_reply(&state, "10.0.0.3"),
+            "换一个来源应当重新放行：限速键必须是来源地址"
+        );
+    }
+
+    /// 缺少 `kind` 字段的包（老版本发的、或手工构造的）一律当成周期广播。
+    ///
+    /// 默认值偏向"不回答"：认错方向的代价只是少一次单播应答，而默认成
+    /// `Probe` 会让任何一个包都换来一包回程流量。
+    #[test]
+    fn beacon_without_kind_field_counts_as_announce() {
+        let json = r#"{"version":1,"device_id":"feisuo-old","device_name":"old",
+            "os_type":"windows","transfer_port":42100,"timestamp":1,
+            "nonce":"n","signature":"s","caps":0,"app_version":"0.1.23"}"#;
+        let packet: BeaconPacket = serde_json::from_str(json).expect("老信标必须仍可解析");
+        assert_eq!(
+            packet.kind,
+            BeaconKind::Announce,
+            "缺少 kind 必须默认成 Announce（不触发应答）"
+        );
+        assert_eq!(answers_to(packet.kind), None, "老信标不得换来我们的回包");
     }
 }

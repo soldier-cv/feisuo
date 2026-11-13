@@ -258,6 +258,26 @@ impl AppConfig {
                             );
                             cfg.transfer_bind = default_transfer_bind();
                         }
+                        // Android: 收件目录若落在应用私有目录里，说明当初没拿到
+                        // 存储权限。那种目录文件管理器进不去，用户看到的是
+                        // "打开文件夹，文件无法访问"。现在有权限了就迁回公共目录，
+                        // 并立刻落盘 —— 只在真的迁移时写一次配置。
+                        #[cfg(target_os = "android")]
+                        {
+                            if let Some(fixed) = migrate_private_receive_dir(
+                                &cfg.receive_dir,
+                                app_dir,
+                                Path::new(ANDROID_PUBLIC_RECEIVE_DIR),
+                            ) {
+                                tracing::info!(
+                                    "收件目录已从应用私有空间迁回公共目录: {} -> {}",
+                                    cfg.receive_dir.display(),
+                                    fixed.display()
+                                );
+                                cfg.receive_dir = fixed;
+                                let _ = cfg.save_in(app_dir);
+                            }
+                        }
                         return cfg;
                     }
                     Err(e) => {
@@ -393,13 +413,18 @@ pub fn sanitize_device_name(raw: &str) -> String {
 fn default_receive_dir() -> PathBuf {
     #[cfg(target_os = "android")]
     {
-        // Android 公共下载目录: 用户能在文件管理器里直接找到
-        let dir = PathBuf::from("/sdcard/Download/feisuo");
-        if std::fs::create_dir_all(&dir).is_ok() {
+        // Android 公共下载目录: 用户能在文件管理器里直接找到。
+        //
+        // 判断用 `directory_is_writable` 而不是 `create_dir_all` 的返回值:
+        // 目录已存在时后者直接返回 Ok, 哪怕我们一点写权限都没有 —— 那样
+        // 收件目录会指向一个"看起来存在、写进去全失败"的地方。
+        let dir = PathBuf::from(ANDROID_PUBLIC_RECEIVE_DIR);
+        if directory_is_writable(&dir) {
             return dir;
         }
-        // 无外部存储权限时退回应用私有目录(一定能建)
-        return PathBuf::from("/data/data/net.findfine.feisuo/files/feisuo");
+        // 无外部存储权限时退回应用私有目录(一定能建)。
+        // 见 `migrate_private_receive_dir`: 拿到权限后会自动迁回去。
+        return PathBuf::from(ANDROID_PRIVATE_RECEIVE_DIR);
     }
 
     #[cfg(not(target_os = "android"))]
@@ -407,5 +432,196 @@ fn default_receive_dir() -> PathBuf {
         dirs::home_dir()
             .map(|h| h.join("feisuo"))
             .unwrap_or_else(|| PathBuf::from("./feisuo"))
+    }
+}
+
+/// Android 公共下载目录 —— 文件管理器能直接打开的那个。
+pub const ANDROID_PUBLIC_RECEIVE_DIR: &str = "/sdcard/Download/feisuo";
+
+/// Android 兜底用的应用私有目录。
+///
+/// ⚠️ 这个目录**任何第三方文件管理器都进不去**（Android 11+ 连
+/// `/sdcard/Android/data` 都不许浏览）。它只适合"暂时先收下来别丢"，
+/// 不能当成正常落盘位置 —— 见 [`migrate_private_receive_dir`]。
+pub const ANDROID_PRIVATE_RECEIVE_DIR: &str = "/data/data/net.findfine.feisuo/files/feisuo";
+
+/// 把"落在应用私有目录里"的收件目录迁回公共目录。
+///
+/// ## 这条修复回答的是"安卓端打开文件夹，文件无法访问"
+///
+/// `default_receive_dir()` 在**没有存储权限**时会静默退回应用私有目录。
+/// 那是应用沙箱内部，文件管理器根本进不去 —— 用户点「打开接收目录」，
+/// 要么只看到一句"打不开"，要么打开一个空目录。更糟的是这个路径会
+/// **落盘**：等用户后来授予了「所有文件访问权限」，配置里的旧路径不会
+/// 自己变回来，于是"权限给了，文件还是找不到"。
+///
+/// 所以每次加载配置都校正一次（只在 Android 上调用）。三条约束：
+/// - `current` 必须确实在 `app_dir` 之内 —— 用户显式指定的其他目录
+///   （外置 SD 卡等）不能被覆盖；
+/// - `public_default` 必须**真的可写** —— 没权限时硬搬过去等于把文件
+///   写丢，宁可继续用私有目录；
+/// - 纯函数 + 参数化，桌面端也能跑它的单测。
+pub fn migrate_private_receive_dir(
+    current: &Path,
+    app_dir: &Path,
+    public_default: &Path,
+) -> Option<PathBuf> {
+    if !is_app_private_dir(current, app_dir) {
+        return None;
+    }
+    if current == public_default {
+        return None;
+    }
+    if !directory_is_writable(public_default) {
+        return None;
+    }
+    Some(public_default.to_path_buf())
+}
+
+/// `current` 是否就是（或位于）应用的私有数据目录。
+///
+/// 只写 `is_within(current, app_dir)` 是不够的，原因是 Android 上一个目录
+/// 有两个名字：`/data/data/<pkg>/...` 与 `/data/user/0/<pkg>/...`。而
+/// `is_within` 依赖 `canonicalize`，**目录还不存在时会失败** ——
+/// 恰恰是"全新安装、还没收到过任何文件"的一刻才会走到私有兜底，那一刻
+/// 这个私有目录往往真的还不存在。于是 `is_within` 返回 false，迁移永远
+/// 不发生，而症状仍是"权限给了，文件还是找不到"。
+///
+/// 所以再按路径别名比一次：把 `/data/data/` 视同 `/data/user/0/`。
+/// `cfg(test)` 也编译这一段，好让桌面端能直接测这条判据。
+fn is_app_private_dir(current: &Path, app_dir: &Path) -> bool {
+    if crate::storage::is_within(current, app_dir) {
+        return true;
+    }
+    if crate::storage::is_within(&android_path_alias(current), &android_path_alias(app_dir)) {
+        return true;
+    }
+    false
+}
+
+/// 把 `/data/data/<pkg>/...` 换成 `/data/user/0/<pkg>/...`（两者是同一处）。
+///
+/// 非该前缀的路径原样返回。
+fn android_path_alias(path: &Path) -> PathBuf {
+    const LEGACY: &str = "/data/data/";
+    const MODERN: &str = "/data/user/0/";
+    let s = path.to_string_lossy();
+    match s.strip_prefix(LEGACY) {
+        Some(rest) => PathBuf::from(format!("{}{}", MODERN, rest)),
+        None => path.to_path_buf(),
+    }
+}
+
+/// 目录是否真的能写。
+///
+/// ⚠️ `create_dir_all` 成功**不等于**能写：目录已存在时它直接返回 Ok，
+/// 哪怕我们对它一点写权限都没有。真正可信的判据是写一个探针文件再删掉 ——
+/// 迁移目录是"把收件位置换个地方"，判断错了会让之后收到的文件全部写失败。
+fn directory_is_writable(dir: &Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".feisuo-write-probe");
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// 私有目录里那条收件路径必须能迁回公共目录。
+    ///
+    /// 真实故障链：Android 11+ 没有「所有文件访问权限」→ 公共目录建不出来
+    /// → 退回 `/data/data/<pkg>/files/feisuo`（文件管理器进不去）→ 用户
+    /// 后来授予权限，配置里那条私有路径**不会自己变回来**。这条测试钉住
+    /// "再次加载配置时会迁回去"。
+    #[test]
+    fn private_receive_dir_is_migrated_to_public() {
+        let base = std::env::temp_dir().join(format!("feisuo-cfg-migrate-{}", std::process::id()));
+        let app_dir = base.join("app");
+        let public = base.join("public-download");
+        let private = app_dir.clone();
+        fs::create_dir_all(&app_dir).unwrap();
+
+        assert_eq!(
+            migrate_private_receive_dir(&private, &app_dir, &public),
+            Some(public.clone()),
+            "私有目录里的收件路径在有写权限时必须迁回公共目录"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// 用户自己指定的、不在应用私有目录里的收件路径不能被改写。
+    ///
+    /// 迁移的判据是"这条路径当初是不是被逼到私有目录的"，而不是
+    /// "界面想不想用默认值"。拿走用户选的外置 SD 卡路径会直接改变落盘位置。
+    #[test]
+    fn user_chosen_receive_dir_is_left_alone() {
+        let base = std::env::temp_dir().join(format!("feisuo-cfg-keep-{}", std::process::id()));
+        let app_dir = base.join("app");
+        let public = base.join("public-download");
+        let chosen = base.join("sdcard-2").join("feisuo");
+        fs::create_dir_all(&app_dir).unwrap();
+
+        assert_eq!(
+            migrate_private_receive_dir(&chosen, &app_dir, &public),
+            None,
+            "不在应用私有目录里的路径绝不能迁移"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// 公共目录不可写时必须保持原样。
+    ///
+    /// 硬搬到一个写不进去的目录，结果是**之后收到的文件全部失败** ——
+    /// 比"文件在私有目录里"更糟：至少后者还能从应用内拿到。
+    #[test]
+    fn unwritable_public_dir_is_not_adopted() {
+        let base = std::env::temp_dir().join(format!("feisuo-cfg-unwritable-{}", std::process::id()));
+        let app_dir = base.join("app");
+        // 用一个**普通文件**占据目标路径：create_dir_all 必然失败。
+        let blocker = base.join("not-a-dir");
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::create_dir_all(&base).unwrap();
+        fs::write(&blocker, b"x").unwrap();
+
+        assert_eq!(
+            migrate_private_receive_dir(&app_dir, &app_dir, &blocker),
+            None,
+            "目标目录建不出来时不能迁过去"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// `/data/data/<pkg>` 与 `/data/user/0/<pkg>` 必须被认成同一处。
+    ///
+    /// 这条不是理论推演：Android 上这两个前缀指向同一个目录，而
+    /// `is_within` 依赖 `canonicalize`，**目录还不存在时会失败** —— 恰恰
+    /// 是全新安装、还没收到过任何文件的一刻才会走到私有兜底，那一刻这个
+    /// 目录往往真的不存在。漏掉别名比较的后果是迁移永远不发生，症状仍是
+    /// "权限给了，文件还是找不到"。
+    #[test]
+    fn private_dir_is_recognized_through_the_data_data_alias() {
+        let base = std::env::temp_dir().join(format!("feisuo-cfg-alias-{}", std::process::id()));
+        let public = base.join("public-download");
+        fs::create_dir_all(&base).unwrap();
+
+        // 两个都不在磁盘上：真实场景就是"还没收到过文件"。
+        let legacy = Path::new("/data/data/net.findfine.feisuo/files/feisuo");
+        let modern = Path::new("/data/user/0/net.findfine.feisuo/files/feisuo");
+
+        assert_eq!(
+            migrate_private_receive_dir(legacy, modern, &public),
+            Some(public.clone()),
+            "旧前缀写下的私有收件路径必须仍能被认出并迁回公共目录"
+        );
+        let _ = fs::remove_dir_all(&base);
     }
 }

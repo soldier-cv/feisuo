@@ -19,6 +19,8 @@ mod update_guard;
 #[cfg(test)]
 mod wiring_guard;
 mod tray;
+#[cfg(test)]
+mod tray_guard;
 mod updater;
 
 use std::sync::Arc;
