@@ -15,12 +15,30 @@
 
 use std::path::Path;
 
+/// 把 CRLF 统一成 LF。
+///
+/// 守卫测试是**读源码做文本匹配**，而源码在工作区里的换行符取决于 checkout
+/// 时的 `core.autocrlf` —— 同一份提交，本机可能是 LF、GitHub 的
+/// windows runner 是 CRLF。`"\n}\n"` 这种"行尾必须是裸换行"的模式在 CRLF
+/// 下永远匹配不到，于是守卫在本机绿、在 CI 红（实测：v0.1.24 的 CI 就是
+/// 在 `showing_the_window_must_force_it_to_the_front` 上挂的，本机全绿）。
+///
+/// 结论：**守卫读进来的源码必须先归一化**，断言只描述代码本身，不描述
+/// 谁在哪个平台上 clone 的。
+fn normalize_newlines(s: &str) -> String {
+    // 先配对消掉 `\r\n`，再把残留的孤立 `\r` 去掉 —— 切片刚好切在 `\n` 上时，
+    // 末尾会留下一个没有后续 `\n` 的 `\r`（`&body[..i]` 就是这样切的），
+    // 它同样是换行编码的产物，不该参与比较。
+    s.replace("\r\n", "\n").replace('\r', "")
+}
+
 fn tray_src() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src")
         .join("tray.rs");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("读取 {} 失败: {}", path.display(), e))
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("读取 {} 失败: {}", path.display(), e));
+    normalize_newlines(&raw)
 }
 
 /// 取 `on_tray_icon_event(...)` 到 `.build(app)` 之间的回调体。
@@ -66,17 +84,35 @@ fn tray_must_never_hide_the_main_window() {
     );
 }
 
-#[test]
-fn showing_the_window_must_force_it_to_the_front() {
-    let src = tray_src();
+/// 取 `show_main` 的函数体（含签名行）。
+///
+/// 用"行首的 `}`"当结束标记，而不是"`\n}\n`"—— 后者把**行尾的换行符**也写进了
+/// 匹配条件，CRLF 下必然失配。
+fn show_main_body(src: &str) -> &str {
     let start = src
         .find("pub(crate) fn show_main(")
         .expect("找不到 show_main —— 唤出入口改名了?");
-    let body_end = src[start..]
-        .find("\n}\n")
-        .map(|i| start + i)
+    let rest = &src[start..];
+    // 跳过签名行本身：签名行里不会出现行首 `}`，但这样写更直白。
+    let end = rest
+        .match_indices("\n}")
+        .map(|(i, _)| i)
+        .find(|&i| {
+            // 只认"整行只有一个 `}`"（允许行尾空格），函数体内部不会有这种行。
+            rest[i + 2..]
+                .split('\n')
+                .next()
+                .map(|tail| tail.trim().is_empty())
+                .unwrap_or(true)
+        })
         .expect("show_main 函数体没有正常结束");
-    let body = &src[start..body_end];
+    &rest[..end]
+}
+
+#[test]
+fn showing_the_window_must_force_it_to_the_front() {
+    let src = tray_src();
+    let body = show_main_body(&src);
     for needed in [".show()", "unminimize()", "set_focus()", "ensure_foreground("] {
         assert!(
             body.contains(needed),
@@ -88,5 +124,31 @@ fn showing_the_window_must_force_it_to_the_front() {
         src.contains("set_always_on_top(true)") && src.contains("set_always_on_top(false)"),
         "前台兜底缺少\"短暂置顶再取消置顶\": SetForegroundWindow 被系统拒绝时, \
          这是唯一不依赖前台权限的抬窗手段"
+    );
+}
+
+/// 回归测试：v0.1.24 的 CI 在 windows runner 上挂掉，本机全绿，差别只是
+/// checkout 出来的换行符（CRLF vs LF）。断言必须对两者给出**同一个**结论。
+#[test]
+fn line_endings_must_not_change_the_verdict() {
+    let lf = tray_src();
+    // 模拟 GitHub windows runner 的 checkout：autocrlf 把 LF 变成 CRLF。
+    let crlf = lf.replace('\n', "\r\n");
+    assert_ne!(lf, crlf, "构造 CRLF 样本失败");
+
+    // 归一化之后两者逐字节相同 —— 这才是守卫该看到的东西。
+    assert_eq!(normalize_newlines(&lf), normalize_newlines(&crlf));
+
+    // 没归一化时，CRLF 版函数体尾部会多一个 `\r`；归一化后必须逐字节相同，
+    // 也就是说 CRLF 只影响"换行怎么写"，不影响"守卫读到了什么"。
+    assert_eq!(
+        normalize_newlines(show_main_body(&lf)),
+        normalize_newlines(show_main_body(&crlf))
+    );
+
+    // 归一化之前，"`\n}\n`"在 CRLF 文本里根本不存在 —— 这就是当初失败的根因。
+    assert!(
+        !crlf.contains("\n}\n"),
+        "CRLF 样本里居然出现了裸 LF 结尾的函数括号, 样本构造有问题"
     );
 }

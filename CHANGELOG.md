@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **CI 在 Windows runner 上误报失败（`desktop/src-tauri/src/tray_guard.rs`）**：守卫测试是读源码做文本匹配，而函数体的结束标记写成了 `"\n}\n"` —— 这把**行尾换行符**也放进了匹配条件。GitHub 的 windows runner 在 checkout 时 `core.autocrlf=true`，同一份提交在那边落地成 CRLF，`"\n}\n"` 永远不存在，于是断言在本机全绿、在 CI 红（0.1.24 的 `CI` 就挂在这里）。现在源码读入后先归一化换行符（并去掉切片留下的孤立 `\r`），结束标记改为"行首的 `}`"，另加回归测试 `line_endings_must_not_change_the_verdict`：直接构造 CRLF 样本，要求两种换行下守卫读到的东西逐字节相同。
+
 ## [0.1.24] — 2026-11-13
 
 ### 修复
