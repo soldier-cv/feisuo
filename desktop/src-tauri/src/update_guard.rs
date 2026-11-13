@@ -944,6 +944,31 @@ fn android_update_pipeline_must_be_fully_wired() {
         "更新包的落点与 update_paths.xml 不一致 —— getUriForFile 会报 \
          \"Failed to find configured root\""
     );
+
+    // 6) 每次拿到新结论都要丢掉上一轮下载的包。
+    //    `downloadAndInstall` 开头就是"有 pendingApk 就直接装"，这跟桌面端
+    //    "本地包冒充检查结论"是同一个缺陷：上次下到 v0.1.24 没装、这次查出
+    //    v0.1.25，界面写着 0.1.25，点下去装的却是 0.1.24 的包。
+    let apply_body = kotlin_fn_body(&activity, "private fun applyCheckResult(");
+    let newer_at = apply_body
+        .find("is UpdateChecker.CheckResult.Newer")
+        .expect("applyCheckResult 里找不到 Newer 分支");
+    // 只取 Newer 这一支: 后面的 Failed 分支本来就会清 pendingApk,
+    // 不切干净的话这条断言可以被别处的清理"顶包"通过。
+    let tail = &apply_body[newer_at..];
+    let branch_end = tail
+        .find("is UpdateChecker.CheckResult.Failed")
+        .unwrap_or(tail.len());
+    let newer_branch = &tail[..branch_end];
+    assert!(
+        newer_branch.contains("pendingApk = null"),
+        "applyCheckResult 的 Newer 分支没有清掉 pendingApk —— \
+         上一轮下载的旧 APK 会顶替这次检查出的版本被安装"
+    );
+    assert!(
+        activity.contains("if (ready != null && ready.isFile)"),
+        "downloadAndInstall 不再优先复用已下载的包 —— 本条守卫的前提失效, 需要重新审视"
+    );
 }
 
 /// 装之前必须校验：包名、版本更高、签名与已安装版本**完全一致**。
@@ -2006,6 +2031,96 @@ fn publish_must_not_nest_the_status_lock() {
         updater.contains("let snapshot = self.status.lock().await.clone();"),
         "publish_from 必须先在**独立语句**里取快照（分号结束即释放锁），\
          不能在调用 publish 的同一句里展开"
+    );
+}
+
+/// 本地已下载的包**不能**冒充"检查结论"。
+///
+/// ## 这条守卫钉的是真实事故（2026-11-13，用户实测）
+///
+/// 用户盘上躺着一个上次没装的 `v0.1.23`。点「检查更新」时后端根本没联网 ——
+/// `check_and_download` 开头那段"已有就绪的包且比当前版本新 ⇒ 直接返回 ready"
+/// 把**缓存**当成了**结论**，于是界面显示"v0.1.23 已下载就绪"，用户装完重启，
+/// 才发现 v0.1.24 早就发布了，只好再下一遍、再装一遍、再重启一遍。
+///
+/// 修复后的三条规则缺一不可：
+/// 1. 检查永远以**远端**为准；只有远端版本与本地包**版本相同**时才复用文件；
+/// 2. 启动恢复只恢复**文件**，不发布 `Ready`（`Ready` 只能由真实检查发布）；
+/// 3. 已经装上的包（版本 ≤ 当前）在启动时**删掉**，别让它留着冒充"待安装"。
+#[test]
+fn local_package_must_not_impersonate_a_check_result() {
+    let updater = updater_src();
+
+    // 1) 旧的短路逻辑必须彻底消失（连注释一起，否则下次有人照着注释写回来）。
+    assert!(
+        !updater.contains("不必重新走网络"),
+        "check_and_download 又出现了\"本地有包就不联网\"的短路 —— \
+         这正是\"提示 0.1.23 已下载、装完重启才发现 0.1.24\"的根因"
+    );
+
+    // 1b) 结构性判据：网络检查必须**先于**任何对本地待安装包的取用。
+    //     只查文案会被注释绕过，这里按调用位置钉死顺序。
+    let check_at = updater
+        .find("pub async fn check_and_download(")
+        .expect("找不到 check_and_download");
+    let check_body: String = updater[check_at..].chars().take(9000).collect();
+    let network_at = check_body
+        .find("self.check_for_update()")
+        .expect("check_and_download 没有调用 check_for_update —— 检查更新不联网?");
+    let pending_at = check_body
+        .find("self.pending.lock()")
+        .expect("check_and_download 完全不看本地包 —— 下载过的包会被重复下载");
+    assert!(
+        network_at < pending_at,
+        "check_and_download 先取本地待安装包、后联网 —— 本地缓存又变成了检查结论：\
+         残留的旧包会挡住真正的更新，用户装完重启才发现还有新版"
+    );
+
+    // 2) 复用本地包的条件必须是**版本号相等**，不是"比当前新"。
+    assert!(
+        updater.contains("p.version == release.version"),
+        "复用本地安装包时必须比对**远端版本**（p.version == release.version）—— \
+         只比\"比当前版本新\"会让过时的包一直挡在真正的更新前面"
+    );
+
+    // 3) 启动恢复只放文件，不发布结论。
+    let restore_at = updater
+        .find("pub async fn restore_pending(")
+        .expect("找不到 restore_pending");
+    let restore_body: String = updater[restore_at..].chars().take(2200).collect();
+    assert!(
+        !restore_body.contains("UpdatePhase::Ready"),
+        "restore_pending 不得发布 Ready —— 磁盘上那份包的版本不是远端结论，\
+         用户会被告知\"v0.1.23 已下载就绪\"而实际上 v0.1.24 早已发布"
+    );
+
+    // 4) 已经装上的包要在启动时删掉（否则每次启动都重新出现一次）。
+    let scan_at = updater
+        .find("async fn scan_pending_dir(")
+        .expect("找不到 scan_pending_dir");
+    let scan_body: String = updater[scan_at..].chars().take(2000).collect();
+    assert!(
+        scan_body.contains("pending_package_version("),
+        "scan_pending_dir 必须用统一的文件名解析（两个前缀各写一遍必然写歪一处）"
+    );
+    assert!(
+        scan_body.contains("remove_file(&path)"),
+        "scan_pending_dir 遇到\"版本不比当前新\"的包必须删除 —— \
+         那个包已经装上了，留着只会让下次启动再把它当成待安装更新"
+    );
+
+    // 5) 断网时的兜底：本地包仍可安装，但文案必须说明"没连上服务器"。
+    assert!(
+        check_body.contains("本地已下载"),
+        "检查失败时必须告诉用户\"本地已下载 vX，可直接安装\" —— \
+         否则断网 + 已下载的包会变成一条走不通的路"
+    );
+
+    // 6) 界面在失败态也要给出安装入口（后端把 pending_path 带出来了）。
+    let app = read(&ui_src().join("App.vue"));
+    assert!(
+        app.contains("updateStatus.phase === 'failed' && updateStatus.pendingPath"),
+        "失败态下没有渲染「安装已下载的版本」按钮 —— 后端说可以装，界面却不给入口"
     );
 }
 

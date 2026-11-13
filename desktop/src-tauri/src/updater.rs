@@ -376,30 +376,27 @@ impl UpdateService {
     ///
     /// 必须在启动时调用: 用户点「立即更新」后如果安装失败(比如被占用),
     /// 更新包还在磁盘上, 不恢复的话界面上会退回"无更新可用"。
+    ///
+    /// ## 只恢复**文件**, 不恢复**结论**
+    ///
+    /// 早先这里恢复完直接发布 `Ready`（"新版本 vX 已下载就绪"）。问题是这个
+    /// `vX` 是**磁盘上那份包**的版本, 不是远端的结论: 用户盘上躺着上次没装的
+    /// v0.1.23, 一启动就被告知"v0.1.23 已下载就绪", 而 v0.1.24 早就发布了。
+    /// 用户照着装一遍、重启, 才发现还得再下一遍再装一遍（实测日志 2026-11-13
+    /// 17:37:53 → 17:38:32 连续两次安装重启）。
+    ///
+    /// 所以这里只把包放回 `pending`（它仍然能装, 也不会丢）, 界面上的 `Ready`
+    /// 一律由**一次真实的检查**发布 —— 那时的版本号才是远端的结论。
+    /// 检查失败（断网）时会带着"本地已下载 vX, 可直接安装"的提示与安装入口,
+    /// 离线可用性没有丢。
     pub async fn restore_pending(&self) {
-        if let Some(found) = self.scan_pending_dir().await {
-            // 不在 `pending` 锁内 await `publish`：那把锁会一直握到整个
-            // if 块结束，而 publish 内部虽然不碰 pending，却会因为
-            // 持锁跨 await 让并发的 `apply_pending` 白等。
-            let mut p = self.pending.lock().await;
-            let already = p.is_some();
-            if !already {
-                *p = Some(found.clone());
-            }
-            drop(p);
-            if !already {
-                tracing::info!("恢复已下载的更新: {}", found.local_path.display());
-                self.publish(UpdateStatus {
-                    phase: UpdatePhase::Ready,
-                    message: format!("新版本 {} 已下载就绪", found.tag_name),
-                    latest_version: found.version.clone(),
-                    tag_name: found.tag_name.clone(),
-                    pending_path: found.local_path.to_string_lossy().to_string(),
-                    release_page: GITEE_RELEASES_PAGE.to_string(),
-                    ..UpdateStatus::idle()
-                })
-                .await;
-            }
+        let Some(found) = self.scan_pending_dir().await else {
+            return;
+        };
+        let mut p = self.pending.lock().await;
+        if p.is_none() {
+            tracing::info!("恢复已下载的更新包（待检查确认版本）: {}", found.local_path.display());
+            *p = Some(found);
         }
     }
 
@@ -426,29 +423,21 @@ impl UpdateService {
             }
         };
 
-        // 已经有就绪的更新包, 且确实比当前版本新 —— 不必重新走网络。
+        // ## 本地已下载的包**不能**代替一次检查
         //
-        // ⚠️ 必须先把快照取到变量再判。写成 `if let Some(p) = self.pending.lock().await.clone()`
-        // 时，那个 `MutexGuard` 是临时量，存活到**整个 if let 块**结束 ——
-        // 块里还有 `publish(...).await`，于是持着 `pending` 锁跨 await，
-        // 并发的 `apply_pending`（用户点「立即更新」）会白等这把锁。
-        let ready_pending = self.pending.lock().await.clone();
-        if let Some(p) = ready_pending {
-            if p.local_path.exists() && is_newer(&p.version, &current_version()) {
-                let st = self
-                    .publish(UpdateStatus {
-                        phase: UpdatePhase::Ready,
-                        message: format!("新版本 {} 已下载就绪", p.tag_name),
-                        latest_version: p.version.clone(),
-                        tag_name: p.tag_name.clone(),
-                        pending_path: p.local_path.to_string_lossy().to_string(),
-                        busy: false,
-                        ..UpdateStatus::idle()
-                    })
-                    .await;
-                return st;
-            }
-        }
+        // 这里原先有一段"已有就绪的包且比当前版本新 ⇒ 直接返回 ready，
+        // 连远端都不问"。它把**缓存**当成了**结论**：
+        //
+        //   用户盘上躺着一个上次没装的 v0.1.23 → 点「检查更新」→ 立刻看到
+        //   "v0.1.23 已下载就绪"（根本不问远端）→ 装完重启 → 才发现
+        //   v0.1.24 早就发布了 → 再下一遍、再装一遍、再重启一遍。
+        //
+        // 实测日志（2026-11-13 17:37:53 → 17:38:32）：一轮操作里连续装了
+        // 两次，中间那次重启完全白费。版本号越落后，用户被推去装的包就越旧，
+        // 而界面上写的还是"已下载就绪"——看不出任何异常。
+        //
+        // 现在只在**远端最新版本与本地包版本相同时**才复用本地文件（省掉
+        // 重复下载），见下方 `Some(release)` 分支。检查动作永远以远端为准。
 
         self.publish_from(|cur| UpdateStatus {
             phase: UpdatePhase::Checking,
@@ -483,10 +472,31 @@ impl UpdateService {
             Err(e) => {
                 tracing::warn!("检查更新失败: {e}");
                 self.bump_failure().await;
+                // 断网时已经下载好的包仍然能装, 但**不能**把它包装成"已下载
+                // 就绪" —— 那会让界面看起来像检查成功过, 用户就不知道
+                // "这个版本没经过确认"。保持失败态, 只把本地包写进文案与
+                // `pending_path`, 界面据此在旁边给出「安装已下载的版本」入口。
+                let local = {
+                    let snapshot = self.pending.lock().await.clone();
+                    snapshot.filter(|p| {
+                        p.local_path.exists() && is_newer(&p.version, &current_version())
+                    })
+                };
+                let (message, pending_path) = match &local {
+                    Some(p) => (
+                        format!(
+                            "无法连接更新服务器（{e}）。本地已下载 {}，可直接安装",
+                            p.tag_name
+                        ),
+                        p.local_path.to_string_lossy().to_string(),
+                    ),
+                    None => (e, String::new()),
+                };
                 let st = self
                     .publish_from(|cur| UpdateStatus {
                         phase: UpdatePhase::Failed,
-                        message: e,
+                        message,
+                        pending_path,
                         busy: false,
                         ..cur.clone()
                     })
@@ -510,6 +520,41 @@ impl UpdateService {
                 .await
             }
             Some(release) => {
+                // 本地已有**同一版本**的安装包 ⇒ 复用文件，不重复下载。
+                //
+                // 只认版本号相等。版本不同就说明本地那份已经过时（用户上次
+                // 没装，而远端又发了新版），必须走下载 —— 下载完成后
+                // `cleanup_old_updates` 会把旧包删掉，目录里只留最新的一份。
+                let reusable = {
+                    // ⚠️ 快照必须先绑到变量再判（与 `publish` 那条死锁同一个
+                    // 教训）：写成 `self.pending.lock().await.clone().filter(..)`
+                    // 时 guard 活到整条语句结束，任何后续 await 都会持锁。
+                    let snapshot = self.pending.lock().await.clone();
+                    snapshot.filter(|p| {
+                        p.version == release.version
+                            // 与 `download()` 同一条体积底线: 半截文件不是安装包
+                            && p.local_path
+                                .metadata()
+                                .map(|m| m.len() > 1024 * 1024)
+                                .unwrap_or(false)
+                    })
+                };
+                if let Some(p) = reusable {
+                    tracing::info!("复用已下载就绪的更新包: {}", p.local_path.display());
+                    self.cleanup_old_updates(&p.local_path).await;
+                    return self
+                        .publish_from(|cur| UpdateStatus {
+                            phase: UpdatePhase::Ready,
+                            message: format!("新版本 {} 已下载就绪", release.tag_name),
+                            latest_version: release.version.clone(),
+                            tag_name: release.tag_name.clone(),
+                            pending_path: p.local_path.to_string_lossy().to_string(),
+                            busy: false,
+                            ..cur.clone()
+                        })
+                        .await;
+                }
+
                 let tag = release.tag_name.clone();
                 let version = release.version.clone();
                 self.publish_from(|cur| UpdateStatus {
@@ -1099,14 +1144,18 @@ impl UpdateService {
             let path = entry.path();
             let name = path.file_name()?.to_string_lossy().to_string();
             // 命名规则: Feisuo-Setup-x64-<version>.exe 或 Feisuo-win-x64-<version>.exe
-            let rest = name
-                .strip_prefix("Feisuo-Setup-x64-")
-                .or_else(|| name.strip_prefix("Feisuo-win-x64-"))
-                .and_then(|s| s.strip_suffix(".exe"));
-            let Some(rest) = rest else {
+            let Some(rest) = pending_package_version(&name) else {
                 continue;
             };
-            if rest.is_empty() || !is_newer(rest, &current_version()) {
+            // 版本不比当前新 ⇒ 这个包**已经装上了**（安装成功后我们没法立刻删,
+            // 安装器还在读它）。留着它只会被下次启动当成"已下载就绪", 把用户
+            // 推去重装一个旧版本 —— 直接删。
+            //
+            // 这条判据天然区分"装成功了"与"没装上": 安装失败时当前版本还是
+            // 旧的, 包比它新, 不会被删, 恢复逻辑照常生效。
+            if !is_newer(rest, &current_version()) {
+                tracing::info!("清理已安装过的更新包: {}", path.display());
+                let _ = std::fs::remove_file(&path);
                 continue;
             }
             // 1MB 以下不可能是真实安装包或绿色版 exe, 多半是网络截断或错误页
@@ -1694,6 +1743,19 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
     false
 }
 
+/// 从更新包文件名里取版本号。
+///
+/// 下载时的命名规则是 `Feisuo-Setup-x64-<version>.exe`（安装版）或
+/// `Feisuo-win-x64-<version>.exe`（绿色版）。两个前缀都在这里认，
+/// 别处不要各写一遍 —— 写歪一处就会把真实安装包当成"不认识的杂文件"跳过。
+fn pending_package_version(file_name: &str) -> Option<&str> {
+    file_name
+        .strip_prefix("Feisuo-Setup-x64-")
+        .or_else(|| file_name.strip_prefix("Feisuo-win-x64-"))
+        .and_then(|s| s.strip_suffix(".exe"))
+        .filter(|s| !s.is_empty())
+}
+
 fn parse_version(text: &str) -> Option<[u64; 3]> {
     let core = text
         .trim()
@@ -2063,5 +2125,41 @@ mod tests {
                 dto.tag_name, asset.name, asset.size, asset.browser_download_url
             );
         });
+    }
+
+    /// 更新包文件名的解析：两个前缀都认，半截文件与杂文件一律不认。
+    ///
+    /// 这个函数被"启动清理"与"恢复待安装"共用。写歪一处的后果是**真实安装包
+    /// 被当成杂文件跳过**（界面永远"无更新"），或者反过来把下载中的 `.part`
+    /// 当成可安装的包。
+    #[test]
+    fn pending_package_name_parsing() {
+        assert_eq!(
+            pending_package_version("Feisuo-Setup-x64-0.1.24.exe"),
+            Some("0.1.24")
+        );
+        assert_eq!(
+            pending_package_version("Feisuo-win-x64-0.1.24.exe"),
+            Some("0.1.24")
+        );
+        // 下载中的半截文件绝不能被当成可安装包
+        assert_eq!(pending_package_version("Feisuo-Setup-x64-0.1.24.exe.part"), None);
+        // 没有版本号 / 空版本 / 别家文件
+        assert_eq!(pending_package_version("Feisuo-Setup-x64-.exe"), None);
+        assert_eq!(pending_package_version("Feisuo-Setup-x64.exe"), None);
+        assert_eq!(pending_package_version("other-0.1.24.exe"), None);
+    }
+
+    /// "版本不比当前新" ⇒ 这个包**已经装上了**。
+    ///
+    /// 启动清理靠这条判据删残留包。判反了会删掉还没装上的包（安装失败后重启
+    /// 就再也装不了），或者永远不删（每次启动都把旧包当"待安装"提示一遍）。
+    #[test]
+    fn stale_package_means_already_installed() {
+        // 已装：包版本 ≤ 当前版本
+        assert!(!is_newer("0.1.23", "0.1.23"));
+        assert!(!is_newer("0.1.23", "0.1.24"));
+        // 还没装：包比当前新 —— 必须保留，恢复逻辑才有效
+        assert!(is_newer("0.1.24", "0.1.23"));
     }
 }

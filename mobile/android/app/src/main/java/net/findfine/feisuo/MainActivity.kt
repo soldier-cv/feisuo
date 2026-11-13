@@ -1475,6 +1475,14 @@ class MainActivity : Activity() {
 
             is UpdateChecker.CheckResult.Newer -> {
                 pendingRelease = result.release
+                // 每份新结论都丢掉上一轮下载的包 —— 和桌面端同一条教训：
+                // 本地已下载的文件只是**缓存**，不能冒充这次检查的结论。
+                // 不清的话，上一次检查下到 v0.1.24（没装）、这次查出 v0.1.25，
+                // 界面写着「下载并安装 v0.1.25」，点下去 `downloadAndInstall`
+                // 却直接把 v0.1.24 的包丢给系统安装器。
+                // 清掉不浪费流量：`UpdateChecker.download` 对同版本、同体积的
+                // 文件直接复用，只有版本真的变了才会重新下载。
+                pendingApk = null
                 updateStatusView?.text = "发现新版本 ${result.release.tagName}"
                 updateStatusView?.setTextColor(getColor(R.color.feisuo_accent))
                 updateActionButton?.apply {

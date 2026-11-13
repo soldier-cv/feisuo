@@ -1973,11 +1973,12 @@
                   {{ updateStatus.busy ? '进行中…' : '检查更新' }}
                 </button>
                 <button
-                  v-if="updateStatus.phase === 'ready'"
+                  v-if="updateStatus.phase === 'ready' || (updateStatus.phase === 'failed' && updateStatus.pendingPath)"
                   class="btn-fluent-primary"
                   @click="applyUpdate"
                 >
-                  <i class="ph ph-download"></i> 立即更新
+                  <i class="ph ph-download"></i>
+                  {{ updateStatus.phase === 'ready' ? '立即更新' : '安装已下载的版本' }}
                 </button>
               </div>
             </div>
