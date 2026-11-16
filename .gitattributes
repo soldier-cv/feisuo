@@ -1,0 +1,32 @@
+# Auto detect text files and normalize line endings to LF
+* text=auto eol=lf
+
+# Windows specific scripts & setup files require CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.iss text eol=crlf
+*.isl text eol=crlf
+
+# Shell scripts require LF
+*.sh text eol=lf
+gradlew text eol=lf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.jar binary
+*.so binary
+*.dll binary
+*.exe binary
+*.apk binary
+*.aab binary
+*.jks binary
+*.keystore binary
+*.db binary
+*.db-wal binary
+*.db-shm binary

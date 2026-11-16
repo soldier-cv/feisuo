@@ -34,7 +34,7 @@
 
 ## 🛠️ 技术框架选型与落地方案
 
-飞梭的技术方案白皮书已整理至 [FRAMEWORK_DESIGN.md](file:///d:/dev/agent-repos/feisuo/FRAMEWORK_DESIGN.md)。
+飞梭的技术方案白皮书已整理至 [FRAMEWORK_DESIGN.md](FRAMEWORK_DESIGN.md)。
 
 ### 推荐技术选型：**Tauri v2 + Rust 核心网络传输 + 响应式现代 Web 界面**
 - **内存占用极小**：常驻后台仅约 **20MB ~ 35MB**（相比 Electron 节省 85% 内存），自启毫无性能负担；
@@ -44,7 +44,7 @@
 > ⚠️ **关于吞吐**：没有 QUIC、没有零拷贝、没有多路复用。数据通道是
 > `tokio::net::TcpStream` + 4 MiB 分块，**端到端吞吐从未实测过**，
 > 网上流传的「110MB/s+」没有任何数据支撑。详见
-> [FRAMEWORK_DESIGN.md 第 6 节](file:///d:/dev/agent-repos/feisuo/FRAMEWORK_DESIGN.md) 的实现状态对照表。
+> [FRAMEWORK_DESIGN.md 第 6 节](FRAMEWORK_DESIGN.md) 的实现状态对照表。
 
 ### 核心机制
 - **开机自启**：Windows 任务计划/注册表 `--daemon` 静默启动；Android `BOOT_COMPLETED` 广播拉起前台服务；
@@ -118,7 +118,7 @@ cargo tauri build --no-bundle
 & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" desktop\setup\Feisuo.iss
 ```
 
-### 发布产物命名与双形态分发
+## 📦 部署与分发（发布产物命名与双端形态）
 
 `release.yml` 发布三项正式产物，客户端 `updater.rs` **按名精确匹配**（AGENTS.md 规则 7）：
 1. `Feisuo-Setup-x64.exe`：Windows 官方推荐安装版（自动放行局域网防火墙、含桌面/开始菜单快捷方式、支持静默升级）；
@@ -347,6 +347,18 @@ $env:FEISUO_KEY_PASSWORD = "..."
 「指定落点」在 Android 上是**能力缺失**而不是 bug：Android 端的发送入口
 只有"系统分享到飞梭"一条，而分享没有"对方地址栏当前在哪一层"这个概念。
 补它需要先做穿梭界面 —— 那是另一个决定，不该由分享链路顺带打开。
+
+---
+
+## ⚙️ 配置与存储说明
+
+飞梭客户端采用开箱即用免配置设计，核心参数通过客户端 UI（系统设置）实时调整并持久化，不依赖环境变量：
+
+- **应用配置**：`config.json`（持久化于本地应用数据目录：Windows 为 `%LOCALAPPDATA%\feisuo\config.json`，Android 为应用私有目录）。
+- **默认收件落盘目录**：Windows 为 `%USERPROFILE%\feisuo\`，Android 为 `/sdcard/Download/feisuo/`。
+- **证书与信任名册**：SQLite `trust_store.db`（开启 WAL 模式），存储配对设备公钥与双向签名信任关系。
+- **设备私钥**：`device_identity.key`（Ed25519 32 字节私钥，本机生成，绝对不出设备且不入库）。
+- **核心网络端口**：文件传输监听 TCP `42100`，设备发现监听 UDP `42101`（局域网组播地址 `239.255.42.100`）。
 
 ---
 

@@ -40,9 +40,11 @@ Desktop.ini
 .DS_Store
 $RECYCLE.BIN/
 
-# --- Python 字节码（脚本跑过就会生成，不入库）---
+# --- Python 虚拟环境与字节码 ---
 __pycache__/
 *.pyc
+.venv/
+venv/
 
 # --- 日志与临时文件 ---
 *.log
@@ -51,9 +53,16 @@ build.log
 *.bak
 *.orig
 *.rej
-.env
-.env.local
 .openchamber/
+
+# --- 凭据与敏感文件（最重要：绝不入库）---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+*.token
 
 # --- Tauri 自动生成的 schema ---
 # 这些由 `tauri build` 每次构建时按当前 Tauri 版本 + capabilities 重新生成，
