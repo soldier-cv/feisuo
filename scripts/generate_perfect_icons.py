@@ -2,7 +2,8 @@
 #  图标生成器（**可重复运行**，与 migrations/ 下的一次性脚本不同）
 # ==============================================================
 # 改设计后重跑本脚本即可重新生成全部尺寸的 PNG/ICO/SVG，产物直接覆盖
-# `desktop/src-tauri/icons/` 与 `ui/public/`、`ui/dist/`。
+# `desktop/src-tauri/icons/`、`ui/public/`、`ui/dist/`，以及仓库根
+# `favicon.ico` / `favicon.svg`（架构原型 index.html 的静态文档根）。
 #
 # 依赖 Pillow（`pip install pillow`）。它**不参与**任何 CI 检查：
 # 图标是二进制产物，不适合用文本规则校验。
@@ -168,6 +169,8 @@ if __name__ == "__main__":
     resized[32].save("ui/public/favicon.ico", format="ICO")
     resized[128].save("ui/dist/favicon.png")
     resized[32].save("ui/dist/favicon.ico", format="ICO")
+    # 架构原型以仓库根为文档根，浏览器请求的是 /favicon.ico。
+    resized[32].save("favicon.ico", format="ICO")
 
     # 4. 生成极简纯粹矢量 SVG (无模糊毛糙光晕，无碎线，干净利落)
     svg_content = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
@@ -188,7 +191,7 @@ if __name__ == "__main__":
     <polygon points="394.2,117.8 148.5,363.5 245.8,302.1" fill="#00dc82" />
   </g>
 </svg>"""
-    for svg_dest in ["ui/public/favicon.svg", "ui/dist/favicon.svg", "desktop/src-tauri/icons/icon.svg"]:
+    for svg_dest in ["ui/public/favicon.svg", "ui/dist/favicon.svg", "favicon.svg", "desktop/src-tauri/icons/icon.svg"]:
         with open(svg_dest, "w", encoding="utf-8") as f:
             f.write(svg_content)
     print("Synchronized UI favicons and SVGs successfully.")
