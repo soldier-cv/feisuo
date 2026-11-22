@@ -136,8 +136,6 @@
   --success-border: rgba(95, 208, 138, 0.32);
   --warn-border: rgba(230, 162, 60, 0.45);
 
-  /* 「按下」档的填充, 比 --bg-hover-soft 更实一档。 */
-  --bg-press-strong: rgba(255, 255, 255, 0.24);
   /* 弹窗内部的下沉区（剪贴板预览正文）, 比 --bg-inset 更暗一档。 */
   --bg-inset-strong: rgba(0, 0, 0, 0.28);
 
@@ -310,7 +308,6 @@
   --success-border: rgba(47, 158, 95, 0.3);
   --warn-border: rgba(181, 118, 26, 0.4);
 
-  --bg-press-strong: rgba(15, 30, 55, 0.16);
   --bg-inset-strong: rgba(15, 30, 55, 0.05);
 
   --danger: #d13b3b;
