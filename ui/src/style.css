@@ -92,7 +92,7 @@
    * 99px / 999px。相邻容器差 1px 时用户看不出"这是有意的层级"，
    * 只看出"这个界面圆角不一致" —— 5px 与 6px 差的那 1px 不传达任何信息。
    *
-   * 之前 5px 与 6px 混用（`.undo-toast-btn` 5px、`.btn-clean-primary` 6px），
+   * 之前 5px 与 6px 混用（小徽标 5px、`.btn-clean-primary` 6px），
    * 7px 单独存在（`.scope-mode`，只出现一次）、9px 只出现在
    * `.scope-foot` 的"只有下两角圆"里。这些都是随手写的痕迹。
    */
@@ -491,12 +491,11 @@ button:active:disabled,
   .radar-pulse-ring {
     animation: none;
   }
-  /* 拖放时的"上浮 / 放大"同理：晃动的列表在前庭敏感的人群里
-   * 会直接引起眩晕，而它表达的信息（"这张能接"）完全可以由
-   * 描边与底色承担 —— 所以这里**只去掉位移**，高亮全部保留。 */
+  /* 拖放时只有命中那张卡片放大：晃动在前庭敏感的人群里会直接引起眩晕，
+   * 而它表达的信息（"松手发给谁"）完全可以由描边与底色承担 ——
+   * 所以这里**只去掉位移**，高亮全部保留。 */
   .device-card-row,
-  .device-card-row.drop-target,
-  .device-card-row.drag-armed {
+  .device-card-row.drop-target {
     transform: none;
     transition: none;
   }

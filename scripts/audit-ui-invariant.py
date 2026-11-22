@@ -7,7 +7,6 @@
 
 - 准入检查（信任等级 / 阻止 / 离线 / 探测）四份拷贝，其中两份不完整
 - 落点 `dest_sub_path` 三条路径各带各的，有一条压根没带
-- 5 秒撤销窗口只有一条路径有
 - 直发成功无条件清空整个待发清单，把用户另一批排队文件一起弄丢
 
 这些都不会报错、不会崩、编译期完全无感 —— 界面照样显示"发送成功"，
@@ -17,10 +16,13 @@
 
 1. **准入统一**：四条发送/取回入口必须都走 `canDirectSendTo`，
    不得再有裸的 `targetEndpoint` 判空（那只是判空，不是准入）。
-2. **撤销窗口统一**：三条直发路径都必须 `openUndoWindow`。
+2. **撤销入口唯一**：5 秒撤销 toast 已于 2026-11 按用户要求移除；
+   撤销/取消只有任务列表一个入口（`cancelActiveTransfer`）。
+   守卫钉死 toast 的状态与函数不得回来。
 3. **落点统一**：凡是 `sendFiles` 调用，要么带 `destSubPath` / `dest.path`，
    要么紧邻注释说明为何不带。
-4. **不谎报**：撤销窗口打开后，失败分支必须 `closeUndoWindow`。
+4. **不谎报**：失败分支必须识别 `undoneTransferIds`（任务列表取消造成的
+   失败是预期结果，不该再弹红色报错）。
 5. **只清本次**：清空待发清单必须用 `filter(...)` 按路径精确删，
    不允许裸的 `stagedFiles.value = []`（除了发送成功那一处）。
 
@@ -177,7 +179,7 @@ def function_body(src: str, name: str) -> str:
 
 
 SEND_PATHS = [
-    # (函数名, 为什么这条入口必须有撤销窗口)
+    # (函数名, 入口说明)
     ("directSendTo", "拖进窗口 / 拖到设备卡片的直发"),
     ("sendPathsIntoRemote", "穿梭框拖拽与「发送到对方」按钮"),
     ("startSendTransfer", "待发清单的「发送」按钮"),
@@ -238,47 +240,41 @@ def check(raw: str) -> list[str]:
                 "那只是判空, 不看信任等级也不探测; 应改用 canDirectSendTo"
             )
 
-    # 2) 撤销窗口统一
+    # 2) 撤销入口唯一
     #
-    # ⚠️ 必须**同时**检查"有没有调"和"在哪里调"。
+    # 5 秒 toast 撤销已于 2026-11 按用户要求移除。撤销统一走任务列表的
+    # `cancelActiveTransfer`，它调用同一条 `MSG_CANCEL` 链路。
+    # 这里钉死 toast 的状态与函数不得回来：它们一旦重新出现，界面上就会
+    # 同时有两个"撤销"入口（一个会自己消失的横幅 + 任务列表），
+    # 用户不知道该点哪个 —— 这正是移除它的原因。
+    for token in (
+        "undoableSend",
+        "openUndoWindow",
+        "closeUndoWindow",
+        "undoDirectSend",
+        "undo-toast",
+    ):
+        if token in raw:
+            problems.append(
+                f"App.vue 里仍有 `{token}` —— 5 秒撤销 toast 已移除，"
+                "撤销/取消只有任务列表一个入口（cancelActiveTransfer）"
+            )
+
+    # 4) 失败不谎报
     #
-    # 早先只查 `openUndoWindow` 是否出现，于是放错位置也通过 ——
-    # 而 `sendFiles` 是 `await` 到**传输结束**才返回的，窗口开在它之后时：
-    # 传输已完成 → 窗口才弹出 → 紧接着 `committed = true` →
-    # 横幅写着「已开始传输」、撤销按钮**永远不出现**。
-    # 那个 5 秒撤销对那条路径等于不存在，界面上却看不出任何异常。
+    # 任务列表取消后，飞行中的 sendFiles 必然失败；那不是新问题，
+    # catch 必须认出 `undoneTransferIds` 并不弹红色报错，否则用户会以为
+    # 取消没生效，于是再取消一次甚至重发。
     for fn, why in SEND_PATHS:
         body = function_body(raw, fn)
         if not body:
             continue
-        if "openUndoWindow(" not in body:
-            problems.append(
-                f"{fn}：{why}没有开 5 秒撤销窗口 —— "
-                "三条直发入口里只有它没有, 用户从这条路发错就完全无法挽回"
-            )
-        else:
-            at_open = body.find("openUndoWindow(")
-            at_send = body.find("FeisuoBridge.sendFiles(")
-            if at_send >= 0 and at_open > at_send:
-                problems.append(
-                    f"{fn}：openUndoWindow 在 sendFiles **之后** —— "
-                    "sendFiles 是 await 到传输结束才返回的, 那样窗口弹出时传输已完成, "
-                    "紧接着 committed=true, 撤销按钮永远不出现, "
-                    "等于没有撤销。必须在发送前开窗。"
-                )
-        # 4) 失败必须关窗口
-        #
-        # 必须限定在 **catch 块**里，不能只看"函数体里有没有 closeUndoWindow"。
-        # 第一版就是只搜整段体，于是成功路径那一处 `closeUndoWindow()`
-        # 把"catch 里忘了关"完全掩盖过去 —— 而那正是要抓的缺陷。
-        # （自测第 6 项就是靠这一点变红的。）
         catch_at = body.rfind("catch")
         tail = body[catch_at:] if catch_at >= 0 else ""
-        if "closeUndoWindow()" not in tail and "undoneTransferIds" not in tail:
+        if "undoneTransferIds" not in tail:
             problems.append(
-                f"{fn}：catch 块里没有 closeUndoWindow —— "
-                "发送失败时横幅上仍写着『已发起发送 · N 个文件』, 而一个字节都没发。"
-                "注意不能只看函数体里有没有它：成功路径那处会掩盖掉 catch 里的遗漏"
+                f"{fn}：catch 块里没有识别 undoneTransferIds —— "
+                "任务列表取消造成的失败是预期结果，再弹红色报错会让人以为取消没生效"
             )
 
     # 5) 只清本次
@@ -368,7 +364,7 @@ def check(raw: str) -> list[str]:
                 f"缺 {', '.join(missing)}。用户明确要求「要确认的只有文件夹和"
                 "剪切板内容」，而这个入口会**把文件夹直接发走**："
                 "onDeviceDrop 整个漏掉目录判定，拖一个项目目录到设备卡片上"
-                "当场发出去，5 秒撤销根本来不及；同一份内容拖进窗口却会等确认。"
+                "当场发出去，任务列表里的取消根本来不及；同一份内容拖进窗口却会等确认。"
             )
         # 直发前必须先取 preview（判定的数据来源）
         if "previewSendPaths(" not in body and "routeDroppedPaths" in DISPATCH_ENTRIES[0][0]:
@@ -392,28 +388,22 @@ def check(raw: str) -> list[str]:
 #
 GOOD_TPL = """
 async function directSendTo(dev, endpoint, files) {
-  openUndoWindow(dev, files.length);
   try {
     await FeisuoBridge.sendFiles(dev.device_id, endpoint.ip, endpoint.port, dev.device_name, files);
-    closeUndoWindow();
-  } catch (e) { closeUndoWindow(); }
+  } catch (e) { const undone = undoneTransferIds.delete(dev.device_id); }
 }
 async function sendPathsIntoRemote(paths) {
   const preview = await FeisuoBridge.previewSendPaths(paths);
   if (preview.hasDirectory) { await previewAndStage(paths, preview); return; }
   const gate = await canDirectSendTo(dev);
-  openUndoWindow(dev, paths.length);
   try {
     await FeisuoBridge.sendFiles(dev.device_id, gate.endpoint.ip, gate.endpoint.port, dev.device_name, paths, "", dest.path);
-    closeUndoWindow();
-  } catch (e) { closeUndoWindow(); }
+  } catch (e) { const undone = undoneTransferIds.delete(dev.device_id); }
 }
 async function startSendTransfer() {
-  openUndoWindow(dev, files.length);
   try {
     await FeisuoBridge.sendFiles(dev.device_id, gate.endpoint.ip, gate.endpoint.port, dev.device_name, files, "", destSub);
-    closeUndoWindow();
-  } catch (e) { closeUndoWindow(); }
+  } catch (e) { const undone = undoneTransferIds.delete(dev.device_id); }
   stagedFiles.value = [];
 }
 async function shuttleFetch(paths) {
@@ -442,27 +432,24 @@ def selftest() -> int:
         # (用例名, 源码, 期望是否报出问题, 期望命中的关键词)
         ("基线：全部满足", GOOD_TPL, False, ""),
         (
-            "穿梭拖拽没有撤销窗口",
+            "5 秒撤销 toast 被重新引入",
             GOOD_TPL.replace(
-                "  openUndoWindow(dev, paths.length);\n  try {",
-                "  try {",
+                "async function directSendTo(dev, endpoint, files) {\n  try {",
+                "async function directSendTo(dev, endpoint, files) {\n"
+                "  openUndoWindow(dev, files.length);\n  try {",
             ),
             True,
-            "没有开 5 秒撤销窗口",
+            "openUndoWindow",
         ),
         (
-            "撤销窗口开在 sendFiles 之后（等于没有撤销）",
+            "失败分支没有识别任务列表取消",
             GOOD_TPL.replace(
-                "  openUndoWindow(dev, paths.length);\n  try {\n"
-                "    await FeisuoBridge.sendFiles(dev.device_id, gate.endpoint.ip,"
-                " gate.endpoint.port, dev.device_name, paths, \"\", dest.path);",
-                "  try {\n"
-                "    await FeisuoBridge.sendFiles(dev.device_id, gate.endpoint.ip,"
-                " gate.endpoint.port, dev.device_name, paths, \"\", dest.path);\n"
-                "    openUndoWindow(dev, paths.length);",
+                "  } catch (e) { const undone = undoneTransferIds.delete(dev.device_id); }",
+                "  } catch (e) { showToast(String(e), true); }",
+                1,
             ),
             True,
-            "之后",
+            "undoneTransferIds",
         ),
         (
             "穿梭漏传落点（第 7 个参数）",
@@ -480,22 +467,20 @@ def selftest() -> int:
             "",
         ),
         (
-            "直发失败不关撤销窗口（横幅谎报）",
-            # 只改 directSendTo 的 catch：从 `closeUndoWindow()` 变成空。
-            # 用 count=1 精确替换它那一处，否则会把别的函数也改掉。
+            "重新引入 undoDirectSend（第二个撤销入口）",
             GOOD_TPL.replace(
-                "  } catch (e) { closeUndoWindow(); }",
-                "  } catch (e) { showToast(String(e), true); }",
-                1,
+                "async function directSendTo(dev, endpoint, files) {",
+                "async function undoDirectSend() {}\n"
+                "async function directSendTo(dev, endpoint, files) {",
             ),
             True,
-            "closeUndoWindow",
+            "undoDirectSend",
         ),
         (
-            "直发成功整体清空待发清单（丢掉用户另一批文件）",
+            "按路径精确清空待发清单（不该误报）",
             GOOD_TPL.replace(
-                "  }\n  stagedFiles.value = [];\n}",
-                "  }\n  stagedFiles.value = stagedFiles.value.filter((f) => !files.includes(f.path));\n}",
+                "  stagedFiles.value = [];",
+                "  stagedFiles.value = stagedFiles.value.filter((f) => !files.includes(f.path));",
             ),
             False,
             "",
@@ -503,10 +488,9 @@ def selftest() -> int:
         (
             "用裸 targetEndpoint 判空冒充准入",
             GOOD_TPL.replace(
-                "  const gate = await canDirectSendTo(dev);\n"
-                "  openUndoWindow(dev, paths.length);",
-                "  if (!targetEndpoint.value) return;\n"
-                "  openUndoWindow(dev, paths.length);",
+                "  const gate = await canDirectSendTo(dev);\n",
+                "  if (!targetEndpoint.value) return;\n",
+                1,
             ),
             True,
             "targetEndpoint",
@@ -587,7 +571,7 @@ def main() -> int:
         return 1
     print()
     print(
-        "全部满足：准入、撤销窗口（含位置）、落点传递、失败不谎报、"
+        "全部满足：准入、撤销入口唯一（仅在任务列表）、落点传递、失败不谎报、"
         "只清本次、三个直发入口都按 hasDirectory 分派。"
     )
     return 0

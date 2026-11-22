@@ -83,13 +83,14 @@
 
         <div class="devices-scroll-area">
           <!--
-            原生拖放期间的反馈**只有卡片动效**（`.drag-armed` 上浮 + 边框高亮）。
+            原生拖放期间，可见反馈只在**光标正对的那张卡片**上（放大 + 描边）。
+            其余卡片保持原样 —— 整列一起上浮只会让列表在拖拽时晃动，
+            既不指明落点，也放大了误投的概率。
 
-            早先这里还有一条绿底提示「松手即发到光标下的设备」。删掉的原因：
-            「拖到目标上松手」是系统级约定，卡片已经整体上浮、指针下那张
-            还额外描了边 —— 动作本身说完了，再补一行字属于把约定俗成的
-            操作解释一遍，读者反而要停下来确认"是不是有什么特别的地方"。
-            提示条还占掉列表顶部一行，把设备卡片往下推，拖放时列表在动。
+            这里曾有一条绿底提示「松手即发到光标下的设备」。删掉的原因：
+            「拖到目标上松手」是系统级约定，卡片高亮已经把动作说完了，
+            再补一行字属于把约定俗成的操作解释一遍；提示条还占掉列表顶部
+            一行，把设备卡片往下推，拖放时列表在动。
 
             `role="status"` 保留，但只做**视觉隐藏**：屏幕阅读器拿不到
             "卡片放大了"这个视觉信号，需要一句话替代；看得见的用户不需要。
@@ -113,13 +114,9 @@
             :class="{
               active: dev.device_id === store.selectedDeviceId && currentTab !== 'settings',
               offline: dev.presence !== 'online',
-              // §5.1 目标即动作：拖到卡片上高亮, 松手直接发
+              // §5.1 目标即动作：只有光标正对的卡片才高亮, 松手直接发
               'drop-target': dragOverDeviceId === dev.device_id && canDropTo(dev),
               'drop-blocked': dragOverDeviceId === dev.device_id && !canDropTo(dev),
-              // 原生拖放进窗口时，可用设备整体上浮一点：告诉用户
-              // 这些卡片是能接住的，而不是只有指针正对的那一张有反应。
-              'drag-armed': isNativeFileDrag && canDropTo(dev),
-              'drag-armed-blocked': isNativeFileDrag && !canDropTo(dev),
             }"
 
             v-key-activate
@@ -925,7 +922,7 @@
               <i class="ph-bold ph-arrow-fat-lines-up"></i>
             </div>
             <h3>{{ isConcurrencyFull ? '并发传输已满，请稍候' : (runningCount > 0 ? '正在传输中 · 可继续添加或拖放' : '拖放文件或文件夹到此处') }}</h3>
-            <p class="drop-sub-tip" title="文件松手即发，5秒内可撤销；文件夹递归展开；剪贴板支持预览确认">
+            <p class="drop-sub-tip" title="文件夹会递归展开；剪贴板内容支持先预览再发送">
               <i class="ph ph-info"></i> 可拖放文件，或点击下方按钮选择
             </p>
 
@@ -2476,29 +2473,6 @@
         </div>
       </div>
     </div>
-
-    <!-- 7.6 直发撤销（D4：5 秒撤销窗口） -->
-    <transition name="toast-fade">
-      <div
-        v-if="undoableSend"
-        class="fluent-toast undo-toast"
-        :class="{ committed: undoableSend.committed }"
-      >
-        <i class="ph-fill ph-paper-plane-tilt"></i>
-        <span class="undo-toast-text">
-          {{ undoableSend.committed ? "已开始传输" : "已发起发送" }} ·
-          {{ undoableSend.deviceName }} · {{ undoableSend.fileCount }} 个文件
-          <template v-if="!undoableSend.committed">，5 秒内可撤销</template>
-        </span>
-        <button
-          v-if="!undoableSend.committed"
-          class="undo-toast-btn"
-          @click="undoDirectSend"
-        >
-          撤销
-        </button>
-      </div>
-    </transition>
 
     <!-- 7.7 传输记录：文件完整路径清单弹窗 -->
     <div v-if="showPathsModal && selectedLogForPaths" class="fluent-modal-overlay" @click.self="showPathsModal = false">
@@ -5045,14 +5019,6 @@ function handleTransferProgress(p: TransferProgress) {
   const { kind, reason } = parseTransferStatus(p.status);
   const id = p.transfer_id || (p.peer_device_id ? `dev-${p.peer_device_id}` : "default");
 
-  // 回填 transfer_id：撤销必须带它，而它只能从进度事件里拿到
-  if (p.direction === "Send" && p.transfer_id) {
-    const u = undoableSend.value;
-    if (u && !u.transferId && u.deviceId === p.peer_device_id) {
-      u.transferId = p.transfer_id;
-    }
-  }
-
   const existing = activeTransfers.value.get(id);
   const settled =
     kind === "Completed" ? "ok" : kind === "Failed" ? "failed" : kind === "Cancelled" ? "cancelled" : null;
@@ -5195,12 +5161,11 @@ async function cancelActiveTransfer(transferId?: string) {
   if (targets.length === 0) return;
 
   showToast(targets.length > 1 ? `已取消 ${targets.length} 个传输任务` : "已取消传输", true);
-  closeUndoWindow();
 
   for (const t of targets) {
     t.settled = "cancelled";
     t.speedFormatted = "—";
-    const devId = t.peer_device_id || undoableSend.value?.deviceId || store.selectedDevice?.device_id || "";
+    const devId = t.peer_device_id || store.selectedDevice?.device_id || "";
     if (devId) {
       undoneTransferIds.add(devId);
       FeisuoBridge.cancelIncomingTransfer(
@@ -5401,45 +5366,15 @@ const dragOverDeviceId = ref("");
  */
 const isNativeFileDrag = ref(false);
 
-/** 直发撤销窗口内的最近一次发送（用于 toast 的「撤销」按钮） */
 /**
- * 5 秒撤销窗口的状态。
+ * 撤销统一收敛到任务列表（`cancelActiveTransfer`）。
  *
- * ## 这里刻意**只有**四个字段
- *
- * 早先还有 `totalSize` / `paths` / `tempPaths` 三个，只被赋值、从不被读 ——
- * 而其中两个还**取错了来源**：`totalSize` 与 `tempPaths` 取自
- * `stagedFiles`（待发清单），而 `fileCount` / `paths` 取自本次实际发送的
- * `files`。在"直发"路径出现之前这两者恰好一致（直发只用清单里的文件），
- * 所以看不出问题；一旦文件不是从清单来的（拖进窗口直发、穿梭拖拽），
- * 它们就描述的是**另一批文件**。
- *
- * 留着它们的真实风险不是"占内存"，而是**下一个人会顺着去用**：
- * "撤销时顺便把剪贴板暂存文件清掉"是个很自然的后续需求，而
- * `u.tempPaths` 里装的是清单里**与本次传输无关**的临时文件 ——
- * 照着删就是静默丢数据（用户会以为那个剪贴板内容还在待发清单里）。
- *
- * 死字段 + 取错来源，比字段不存在更危险。所以删掉：以后真需要时再加，
- * 届时类型会逼着人先想清楚"这个值该从哪来"。
+ * 早先这里有一套 5 秒 toast 撤销：状态、计时器、进度事件回填 transfer_id，
+ * 四个发送入口各开一次窗口。它只在"传输还没产生进度事件"的极短窗口里有用，
+ * 却让界面多出一个会自己消失的提示，并与任务列表的「取消」形成两个
+ * 语义相近的入口。按用户要求撤掉后，唯一入口就是任务列表 ——
+ * 取消链路（`MSG_CANCEL` 帧）原样保留，任务列表点「取消」仍会真正中断传输。
  */
-interface UndoableSend {
-  deviceId: string;
-  deviceName: string;
-  /** 本次**实际发送**的条目数（不是清单里的总数） */
-  fileCount: number;
-  /** 传输真正开始后置 true —— 那时已无法撤回（§5.2 的诚实约束） */
-  committed: boolean;
-  /**
-   * 本次传输的 `transfer_id`，撤销时必须带上。
-   *
-   * 对端按它匹配暂存目录，而它是**内容哈希**、不是设备 id ——
-   * 拿设备 id 去撤销永远匹配不上，表现为"撤销成功但文件照收"。
-   * 由第一条进度事件回填（`handleTransferProgress`）。
-   */
-  transferId?: string;
-}
-const undoableSend = ref<UndoableSend | null>(null);
-const undoTimer = ref<any>(null);
 
 /** 该设备能否作为拖放直发目标 */
 function canDropTo(dev: DeviceRosterEntry): boolean {
@@ -5519,7 +5454,7 @@ async function onDeviceDrop(e: DragEvent, dev: DeviceRosterEntry) {
   // ⚠️ 早先这里是 `stagedFiles.length > 0 ? stagedFiles : 本次拖入的`，
   // 于是**清单非空时会忽略用户这次拖的东西**：想发一个文件、清单里躺着
   // 50 个，就发出那 50 个。界面上完全看不出差别（横幅只写"N 个文件"），
-  // 而"发错"的方向恰好是"发得更多"—— 5 秒撤销根本来不及反应。
+  // 而"发错"的方向恰好是"发得更多"—— 任务列表里的取消根本来不及反应。
   //
   // 「拖到设备卡片」没有地址栏概念，所以这里恒为收件根。
   const dropped = await collectDroppedFiles(dt);
@@ -5598,51 +5533,12 @@ async function probeDeviceEndpoint(
   return null;
 }
 
-/**
- * 开启 5 秒撤销窗口。
- *
- * 抽出来是因为**两个入口**都要开，而它们早先各写一份 ——
- * 于是"拖拽直发有撤销、穿梭拖拽没有"这种不一致就出现了，
- * 而两个入口在界面上是并列的（同一个穿梭框里，一个点按钮一个拖）。
- * 用户从穿梭框拖错一个文件时完全无法挽回。
- *
- * 撤销本身不需要知道路径：`cancel_incoming_transfer(deviceId, transferId)`
- * 按**对端**匹配暂存目录，而 `transferId` 由第一条进度事件按 deviceId
- * 回填（见 `handleTransferProgress`）。所以这里只记设备与条数。
- */
-function openUndoWindow(dev: DeviceRosterEntry, fileCount: number) {
-  undoableSend.value = {
-    deviceId: dev.device_id,
-    deviceName: dev.device_name,
-    fileCount,
-    committed: false,
-    // 撤销必须带**真实的 transfer_id**（对端按它匹配暂存目录）。
-    // 先留空，收到第一条进度事件后由 onTransferProgress 回填。
-    transferId: undefined,
-  };
-  if (undoTimer.value) clearTimeout(undoTimer.value);
-  undoTimer.value = setTimeout(() => {
-    undoableSend.value = null;
-    undoTimer.value = null;
-  }, 5000);
-}
-
-/** 立即关掉撤销窗口（发送失败时用）。 */
-function closeUndoWindow() {
-  if (undoTimer.value) clearTimeout(undoTimer.value);
-  undoTimer.value = null;
-  undoableSend.value = null;
-}
-
-/** 直发并开 5 秒撤销窗口 */
+/** 直发：松手即发，无确认弹窗；取消统一在任务列表里做 */
 async function directSendTo(
   dev: DeviceRosterEntry,
   endpoint: { ip: string; port: number },
   files: string[]
 ) {
-  // 立即开启撤销窗口
-  openUndoWindow(dev, files.length);
-
   try {
     const outcome = await FeisuoBridge.sendFiles(
       dev.device_id,
@@ -5655,13 +5551,7 @@ async function directSendTo(
     // 由 promptGrantCode() 弹码后重新调用本函数。
     if (abortedSend(outcome)) return;
     if (outcome.grantCodeRequired) {
-      // 协商回合里一个字节都还没传。撤销窗口留着会让用户点一个
-      // 此刻对不上任何传输的「撤销」。弹码期间关掉，重试成功再开。
-      closeUndoWindow();
-      const retried = await promptGrantCodeAndRetry(
-        dev, endpoint, files, outcome.message
-      );
-      if (retried) openUndoWindow(dev, files.length);
+      await promptGrantCodeAndRetry(dev, endpoint, files, outcome.message);
       return;
     }
     showSendResult(dev.device_name, files.length, outcome);
@@ -5674,13 +5564,8 @@ async function directSendTo(
     //
     // 正确做法：只清掉本次真正发出去的那些条目，其余原样保留。
     stagedFiles.value = stagedFiles.value.filter((f) => !files.includes(f.path));
-    const u = undoableSend.value;
-    if (u) u.committed = true;
   } catch (e) {
-    if (undoTimer.value) clearTimeout(undoTimer.value);
-    undoTimer.value = null;
     const undone = undoneTransferIds.delete(dev.device_id);
-    undoableSend.value = null;
     settleTransfersForDevice(dev.device_id, isLocalAbort(e) ? "cancelled" : "failed");
     if (activeProgress.value && !activeProgress.value.settled) {
       activeProgress.value.settled = isLocalAbort(e) ? "cancelled" : "failed";
@@ -5772,13 +5657,12 @@ async function promptGrantCodeAndRetry(
 }
 
 /**
- * 本机撤销走的是成功返回，不能再落到「已发送」。
+ * 本机取消走的是成功返回，不能再落到「已发送」。
  *
- * 待发清单、暂存文件、选中项都留给调用方不动。这里只关撤销窗口并提示。
+ * 待发清单、暂存文件、选中项都留给调用方不动。这里只结单并提示。
  */
 function abortedSend(outcome: import("./api/feisuoBridge").SendOutcome, deviceId?: string): boolean {
   if (!outcome.locallyAborted) return false;
-  closeUndoWindow();
   if (deviceId) {
     settleTransfersForDevice(deviceId, "cancelled");
   }
@@ -6033,17 +5917,6 @@ async function sendPathsIntoRemote(paths: string[]) {
       true
     );
   }
-  // 撤销窗口必须在 `sendFiles` **之前**开。
-  //
-  // sendFiles 是 await 到**传输结束**才返回的（core 侧
-  // send_files_to_dest_with_code 一路 await 到分块跑完）。
-  // 早先把 openUndoWindow 放在它之后，于是：传输已完成 -> 窗口才弹出 ->
-  // 紧接着 committed = true -> 横幅写着「已开始传输」、撤销按钮**永远不出现**。
-  // 那个 5 秒撤销对穿梭这条路等于不存在。
-  //
-  // 正确顺序：开窗 -> 发 -> 传输中由进度事件回填 transferId -> 成功后置 committed。
-  // 与 directSendTo 完全一致。
-  openUndoWindow(dev, paths.length);
   try {
     // 用 **gate.endpoint**（刚探测过的那个），不是 `targetEndpoint`。
     // 两者可能不是同一个地址：UI 的端点来自信标与端点表，探测是当场
@@ -6053,8 +5926,7 @@ async function sendPathsIntoRemote(paths: string[]) {
     //
     // ⚠️ 落点 `dest.path` 必须在**每一轮**都带上，包括匹配码重试。
     // 带落点的发送与不带落点的发送，接收端 `compute_resume_key` 算出
-    // 不同的 `transfer_id` —— 少带一次就等于换了另一笔传输，
-    // 撤销窗口里回填的 id 也会对不上。
+    // 不同的 `transfer_id` —— 少带一次就等于换了另一笔传输，断点续传会失效。
     const outcome = await FeisuoBridge.sendFiles(
       dev.device_id,
       gate.endpoint.ip,
@@ -6066,14 +5938,10 @@ async function sendPathsIntoRemote(paths: string[]) {
     );
     if (abortedSend(outcome, dev.device_id)) return;
     if (outcome.grantCodeRequired) {
-      closeUndoWindow();
       const retried = await promptGrantCodeAndRetry(
         dev, gate.endpoint, paths, outcome.message, dest.path
       );
-      if (retried) {
-        openUndoWindow(dev, paths.length);
-        selectedLocalNames.value.clear();
-      }
+      if (retried) selectedLocalNames.value.clear();
       return;
     }
     showSendResult(dev.device_name, paths.length, outcome);
@@ -6086,11 +5954,7 @@ async function sendPathsIntoRemote(paths: string[]) {
     // 放在函数末尾而不是调用方：两个调用方都会漏掉其中一个。
     selectedLocalNames.value.clear();
   } catch (e) {
-    // 撤销窗口已经开了：发送失败时必须**关掉**它，否则用户会看到一个
-    // "已发起发送 N 个文件" 的横幅，而实际上一个都没发出去，
-    // 5 秒后自行消失 —— 界面上在说一件没发生的事。
     const undone = undoneTransferIds.delete(dev.device_id);
-    closeUndoWindow();
     settleTransfersForDevice(dev.device_id, isLocalAbort(e) ? "cancelled" : "failed");
     if (activeProgress.value && !activeProgress.value.settled) {
       activeProgress.value.settled = isLocalAbort(e) ? "cancelled" : "failed";
@@ -6324,56 +6188,6 @@ watch(
   { immediate: true },
 );
 
-/** 撤销直发 */
-async function undoDirectSend() {
-  const u = undoableSend.value;
-  if (!u) return;
-  closeUndoWindow();
-  if (u.committed) {
-    showToast("传输已开始，无法撤回；如需删除请在目标设备的收件目录操作", true);
-    return;
-  }
-  // 即使还没拿到 transfer_id 也必须去问后端。
-  //
-  // 进度事件要等第一个分块发出去才有。用户在「正在算哈希 / 等对方点允许」
-  // 这几秒里点撤销，是这个 5 秒窗口最常见的用法。早先这里直接弹
-  // 「已撤销（尚未开始传输）」然后返回 —— 发送任务完全不知道，
-  // 文件照样传完。绿横幅 + 文件落地，比没有撤销更糟。
-  //
-  // 后端在编号还没出来时会先停本机发送，等编号一算出来再补发取消。
-  // 通知对端丢弃该暂存传输。
-  //
-  // ⚠️ 必须**看对端的回答**，不能一律显示"已撤销"。
-  // `cancel_incoming_transfer` 返回 false = 对端已开始落盘、撤不掉。
-  // 早先这里忽略返回值直接弹绿色提示，于是用户看到"已撤销"，
-  // 而文件几秒后照样出现在收件目录里 —— 比不提供撤销更糟，
-  // 因为用户会把那个文件从"待办"里划掉。
-  try {
-    const ok = await FeisuoBridge.cancelIncomingTransfer(
-      u.deviceId,
-      u.transferId
-    );
-    if (ok) {
-      // 撤销成功后，正在飞行的 sendFiles 会以"对方撤销了本次传输"失败。
-      // 那不是新问题，别再弹一个红色报错吓人 —— 标记一下让 catch 识别。
-      undoneTransferIds.add(u.deviceId);
-      showToast(`已撤销发送给 ${u.deviceName} 的请求`);
-    } else {
-      showToast(
-        `${u.deviceName} 已经开始落盘，无法撤销；` +
-          "如需删除请到那台设备的收件目录里处理",
-        true
-      );
-    }
-  } catch (e) {
-    showToast(
-      `撤销请求未送达（${FeisuoBridge.describeError(e, "对方可能已开始接收")}）；` +
-        "若对方已收到文件，请在目标设备收件目录删除",
-      true
-    );
-  }
-}
-
 /**
  * 本次会话内已被成功撤销的传输，按设备记。
  *
@@ -6419,20 +6233,35 @@ function deviceCardAtPoint(position: { x: number; y: number } | undefined): stri
   return card.dataset.deviceId || "";
 }
 
-/** 光标下的设备卡片 id（用于高亮） */
+/**
+ * 光标是否落在发送页的拖拽大框上。
+ *
+ * 与 `deviceCardAtPoint` 共用同一套物理像素 → CSS 像素换算。两者互斥：
+ * 命中设备卡片时大框不亮，命中大框时卡片不亮 —— 一次拖放只高亮一个落点，
+ * 用户才能从界面上判断松手会落到哪里。
+ */
+function dropCardAtPoint(position: { x: number; y: number } | undefined): boolean {
+  if (!position) return false;
+  const ratio = window.devicePixelRatio || 1;
+  const el = document.elementFromPoint(position.x / ratio, position.y / ratio);
+  return !!el?.closest?.(".drag-drop-card");
+}
+
+/** 光标下的设备卡片 id（用于高亮）；同时更新大框高亮 */
 function updateDragHoverTarget(position: { x: number; y: number } | undefined) {
   const overId = deviceCardAtPoint(position);
-  if (overId === dragOverDeviceId.value) return;
   dragOverDeviceId.value = overId;
-  // 侧栏被折叠 / 卡片在滚动区外时，elementFromPoint 也拿不到 —— 那是
+  // 侧栏被折叠 / 卡片在滚动区外时 elementFromPoint 拿不到卡片 —— 那是
   // "拖到空白处"，此时不该有任何卡片保持高亮（否则用户以为还指着它）。
+  // 大框同理：只有真正悬停在它上面才亮。
+  isDragOver.value = !overId && dropCardAtPoint(position);
 }
 
 /**
  * 原生拖放事件的唯一入口。
  *
  * 三种状态各司其职：
- * - `enter` / `over`：只做**反馈**（高亮光标下那台设备），不发文件；
+ * - `enter` / `over`：只做**反馈**（高亮光标正对的那张卡片或大框），不发文件；
  * - `drop`：若光标下有可用设备，**直接发给它**；否则走原来的分派
  *   （进待发清单 / 发给当前选中设备）；
  * - `leave`：清掉所有拖放态。不清理的话，用户把文件拖出窗口后
@@ -6452,10 +6281,9 @@ function handleNativeDrag(ev: NativeDragEvent) {
       isNativeFileDrag.value = true;
       FeisuoBridge.ensureWindowVisible().catch(() => {});
     }
-    isDragOver.value = true;
+    // 高亮完全交给命中测试（updateDragHoverTarget），不再"文件一进窗口
+    // 就把左侧整列卡片和右侧大框一起点亮"。
     updateDragHoverTarget(ev.position);
-    // 拖放停留在窗口内时，"发送"页那个大框也不该抢焦点：
-    // 它只在当前页签就是"发送"时才有意义。
     return;
   }
   // ---- drop ----
@@ -6831,16 +6659,6 @@ async function startSendTransfer() {
   // 走「穿梭里拖文件夹」这条路时它是对方地址栏当前那一层；
   // 走剪贴板 / 拖进窗口那条路时是空串 = 对方收件根。
   const destSub = pendingDestSubPath.value;
-    // 待发清单的「发送」按钮也开撤销窗口。
-    //
-    // 三个发送入口里只有这一个没有：拖进窗口有、穿梭拖拽有（上一轮补上），
-    // 而这个是**用户主动点了「发送」之后**才发出的 —— 恰恰是最该给
-    // 反悔机会的一步。用户填错了落点、传错了设备，点下去的一瞬间
-    // 就想撤回，而界面上没有这个选项。
-    //
-    // 拖放区那句「文件松手即发，5 秒内可撤销」也是这么写的：
-    // 规则对**所有**直发路径成立，不只是松手那一种。
-    openUndoWindow(dev, files.length);
   try {
     const outcome = await FeisuoBridge.sendFiles(
       dev.device_id,
@@ -6853,34 +6671,16 @@ async function startSendTransfer() {
     );
     if (abortedSend(outcome, dev.device_id)) return;
     if (outcome.grantCodeRequired) {
-      // 「每次匹配码」是**协商回合**，不是发送失败。
-      //
-      // 此时**必须先关掉撤销窗口**再弹码：协商回合里一个字节都还没传，
-      // 横幅上却写着「已发起发送 · N 个文件」并给一个「撤销」按钮。
-      // 用户点它只会得到"对方已经开始落盘，无法撤销"（transfer_id 还没回填），
-      // 而真相是"什么都没发"。谎报比不给撤销更糟。
-      //
-      // 弹码期间也不该有撤销窗口：那时候用户要做的决定是"念码还是取消"，
-      // 不是"撤回传输"。给他两个都在变化的按钮只会让人犹豫。
-      closeUndoWindow();
-      // 保留队列与暂存文件: 用户可能只是暂时不方便
-      const retried = await promptGrantCodeAndRetry(
+      // 「每次匹配码」是**协商回合**，不是发送失败：一个字节都还没传。
+      // 保留队列与暂存文件，用户可能只是暂时不方便。
+      await promptGrantCodeAndRetry(
         dev, gate.endpoint, files, outcome.message, destSub
       );
-      if (retried) {
-        // 重试成功：这时才真的发出去了，重开一次撤销窗口。
-        // 暂存文件由 `promptGrantCodeAndRetry` 按本次发出去的路径清掉。
-        openUndoWindow(dev, files.length);
-      }
       return;
     }
     showSendResult(dev.device_name, files.length, outcome);
     // 发送成功: 清空暂存队列
     stagedFiles.value = [];
-    // 撤销窗口转为"已开始传输"：进度条已经在跑，撤不掉了，
-    // 横幅必须如实说，而不是继续给一个点不动的「撤销」按钮。
-    const u = undoableSend.value;
-    if (u) u.committed = true;
     if (tempPaths.length > 0) {
       // 两条清理路径都调：旧的在收件目录（.feisuo-staging），
       // 新的在 app 私有目录（clipboard-staging）。都必须**按路径精确删**,
@@ -6889,10 +6689,7 @@ async function startSendTransfer() {
       FeisuoBridge.cleanupClipboardStaging(tempPaths).catch(() => undefined);
     }
   } catch (e) {
-    // 撤销窗口已经开了：发送失败时必须**关掉**它，否则横幅上写着
-    // 「已发起发送 · N 个文件」，而一个字节都没发出去。
     const undone = undoneTransferIds.delete(dev.device_id);
-    closeUndoWindow();
     settleTransfersForDevice(dev.device_id, isLocalAbort(e) ? "cancelled" : "failed");
     if (activeProgress.value && !activeProgress.value.settled) {
       activeProgress.value.settled = isLocalAbort(e) ? "cancelled" : "failed";
@@ -8379,23 +8176,8 @@ function getFileIcon(name: string) {
 .device-card-row:hover { background: var(--bg-hover-soft); }
 .device-card-row.active { background: var(--bg-active); border-color: var(--accent); }
 
-/* ---- 原生拖放进行中：可用设备轻微上浮 ----
- *
- * 为什么不是只有指针下那张放大：用户拖着文件在列表上扫过时，
- * 需要先**看见有哪些**能接（整个列表给出可接的信号），
- * 才能瞄准其中一张。只让指针下的动，其余毫无变化，
- * 用户会以为只有那一张"碰巧"有反应。
- */
-.device-card-row.drag-armed {
-  transform: scale(1.015);
-  border-color: var(--accent-border);
-  background: var(--bg-hover-soft);
-}
-/* 不能接的设备（离线 / 未配对）在拖放期间淡出，不参与缩放：
- * "缩小 + 变淡"是同一句话的两种说法，混用会让用户以为它在动 */
-.device-card-row.drag-armed-blocked {
-  opacity: 0.4;
-}
+/* 原生拖放期间不给所有卡片加动效：整列一起上浮既晃眼，又不指明落点。
+ * 可放置性只由光标正对的那张卡片的 `.drop-target` 表达。 */
 .os-icon-box {
   width: 32px;
   height: 32px;
@@ -8801,7 +8583,7 @@ function getFileIcon(name: string) {
 
 /* 拖到设备卡片：目标即动作（§5.1）
  *
- * 这是**光标正对着**的那一张，必须比周围的 `drag-armed` 更明确：
+ * 这是**光标正对着**的那一张，也是拖放期间唯一放大的元素：
  * 放大、实心描边、投影抬起。三件事叠加而不是只换颜色 ——
  * 用户此刻要做的判断是"松手会发给谁"，只改底色在深色主题下
  * 几乎看不出来（--accent-soft 的透明度只有 0.16）。
@@ -8830,38 +8612,6 @@ function getFileIcon(name: string) {
  * 一行 —— 拖放时列表本身在动，那条提示反而成了干扰。
  * 屏幕阅读器仍需要文字替代视觉信号，改用 `.view-heading-sr` 视觉隐藏。
  */
-
-/* 直发撤销 toast（D4：5 秒窗口） */
-.undo-toast {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  pointer-events: auto;
-}
-.undo-toast-text { flex: 1; }
-.undo-toast-btn {
-  /* 底色用 --bg-elevated 而不是半透明叠层。
-   *
-   * 撤销 toast 浮在**窗口底色**上（不是卡片上），而 `--bg-press-soft`
-   * 是"亮色叠在卡片上"那个量级：浅色主题下它叠在 #f3f5f9 上得到
-   * 接近白的浅灰，`--text-on-solid`（纯白）压上去只有 1.33:1 ——
-   * 按钮上的字**完全看不见**。而这是 5 秒内唯一能挽回误发的入口。
-   *
-   * 用实心的 --bg-elevated（两套主题都是卡片白 / 深灰）后，
-   * 文字改用 --text-primary，两套主题分别是 15.9:1 与 12.6:1。
-   * 代价是按钮从"半透明"变成"实心"——而它本来就需要比周围更实，
-   * 否则用户不会认为它可点。 */
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-strong);
-  color: var(--text-primary);
-  border-radius: var(--radius-md);
-  padding: 4px 10px;
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 600;
-}
-.undo-toast-btn:hover { background: var(--bg-press-strong); }
-.undo-toast.committed { opacity: 0.85; }
 
 /* 地址栏（§7.2）：卷下拉 + 完整路径 */
 .pane-address-bar {
