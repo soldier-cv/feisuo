@@ -203,6 +203,7 @@
    * 注意 toast > overlay 是**有意**的: 弹窗打开时用户仍需看到
    * "传输完成"这类与弹窗无关的通知。
    */
+  --z-drop-focus: 10;
   --z-titlebar: 100;
   --z-titlebar-caption: 200;
   --z-overlay: 300;
@@ -342,6 +343,7 @@
 
   /* 层级刻度与主题无关(见 :root 里的说明), 但仍要在这里重写一遍:
    * 未定义的 var() 会让声明**直接失效**(不是回落到默认值)。 */
+  --z-drop-focus: 10;
   --z-titlebar: 100;
   --z-titlebar-caption: 200;
   --z-overlay: 300;

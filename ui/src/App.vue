@@ -33,7 +33,7 @@
         <button class="caption-btn" @click.stop="toggleMaximize" title="最大化 / 还原">
           <i class="ph ph-square"></i>
         </button>
-        <button class="caption-btn close-caption" @click.stop="requestClose" title="关闭（最小化到托盘）">
+        <button class="caption-btn close-caption" @click.stop="requestClose" title="关闭">
           <i class="ph ph-x"></i>
         </button>
       </div>
@@ -83,9 +83,9 @@
 
         <div class="devices-scroll-area">
           <!--
-            原生拖放期间，可见反馈只在**光标正对的那张卡片**上（放大 + 描边）。
-            其余卡片保持原样 —— 整列一起上浮只会让列表在拖拽时晃动，
-            既不指明落点，也放大了误投的概率。
+            原生拖放期间，按光标位置自动聚焦最近的一张卡片（放大 + 描边），
+            其余卡片淡化。窗口被遮挡时用户未必看得到光标压在哪张卡片上；
+            聚焦跟随光标上下移动，松手即发给聚焦的那台，落点始终明确。
 
             这里曾有一条绿底提示「松手即发到光标下的设备」。删掉的原因：
             「拖到目标上松手」是系统级约定，卡片高亮已经把动作说完了，
@@ -114,9 +114,11 @@
             :class="{
               active: dev.device_id === store.selectedDeviceId && currentTab !== 'settings',
               offline: dev.presence !== 'online',
-              // §5.1 目标即动作：只有光标正对的卡片才高亮, 松手直接发
+              // §5.1 目标即动作：按光标位置就近聚焦, 松手发给聚焦的那台
               'drop-target': dragOverDeviceId === dev.device_id && canDropTo(dev),
               'drop-blocked': dragOverDeviceId === dev.device_id && !canDropTo(dev),
+              // 拖拽期间非聚焦卡片淡化，让当前目标一眼可辨
+              'drag-dimmed': isNativeFileDrag && !!dragOverDeviceId && dragOverDeviceId !== dev.device_id,
             }"
 
             v-key-activate
@@ -1492,8 +1494,10 @@
                 <div class="log-body-info">
                   <div class="entry-title-wrap">
                     <span class="entry-title">{{ log.file_name }}</span>
+                    <!-- 只有接收记录才有"文件在哪"的问题；发送记录的 file_paths 是本机源文件，
+                         给它一个"定位"按钮只会让人以为能看对方收到哪儿（实际不能） -->
                     <button
-                      v-if="log.file_paths && log.file_paths.length > 0"
+                      v-if="log.direction === 'recv' && log.file_paths && log.file_paths.length > 0"
                       class="btn-view-paths-badge"
                       @click.stop="openPathsModal(log)"
                       :title="log.file_paths.length === 1 ? '查看完整路径并在文件夹中定位' : `查看全部 ${log.file_paths.length} 个文件的完整路径`"
@@ -1511,6 +1515,14 @@
                       title="经覆盖网（ZeroTier / Tailscale 的 100.64/10）"
                       >经虚拟网卡</span
                     >
+                  </div>
+                  <!-- 接收记录直接显示落盘目录，回答"文件存哪了"，不必点开弹窗 -->
+                  <div
+                    v-if="log.direction === 'recv' && log.file_paths && log.file_paths.length > 0 && getDirName(log.file_paths[0])"
+                    class="entry-sub dimmed"
+                    :title="getDirName(log.file_paths[0])"
+                  >
+                    保存到 {{ getDirName(log.file_paths[0]) }}
                   </div>
                   <!-- 慢的时候说清"时间花在哪"：审批等待 vs 数据流 -->
                   <div
@@ -2964,6 +2976,16 @@ function getBasename(path: string): string {
   return segs[segs.length - 1] || path;
 }
 
+/** 取路径所在目录：接收记录把它直接显示出来，回答"文件存哪了" */
+function getDirName(path: string): string {
+  if (!path) return "";
+  const normalized = path.replace(/\\/g, "/");
+  const idx = normalized.lastIndexOf("/");
+  // 老记录可能只存了相对文件名，没有目录信息 —— 那就别显示一行空话
+  if (idx <= 0) return "";
+  return normalized.slice(0, idx).replace(/\//g, "\\");
+}
+
 async function copySinglePath(path: string, index: number) {
   try {
     await navigator.clipboard.writeText(path);
@@ -3184,7 +3206,8 @@ const activeProgress = computed(() => {
     transferredBytes += t.bytes_transferred;
     totalSpeed += t.speed_bytes_per_sec;
   }
-  const pct = totalBytes > 0 ? Math.min(100, Math.round((transferredBytes / totalBytes) * 100)) : 0;
+  // 保留一位小数：整数台阶会让进度条一格一格跳（scaleX 本身支持小数）
+  const pct = totalBytes > 0 ? Math.min(100, Number(((transferredBytes / totalBytes) * 100).toFixed(1))) : 0;
   return {
     transfer_id: "aggregate",
     current_file: `${running.length} 个传输任务并行中`,
@@ -4976,8 +4999,11 @@ function formatBytes(bytes: number): string {
   return bytes + " B";
 }
 
+/** 局域网/Wi-Fi 再快也有上限；超过 10GB/s 必是脏数据，宁可显示"—"（§9.6.5） */
+const MAX_PLAUSIBLE_SPEED = 10 * 1024 ** 3;
+
 function formatSpeed(bytesPerSec: number): string {
-  if (bytesPerSec <= 0) return "—";
+  if (bytesPerSec <= 0 || bytesPerSec > MAX_PLAUSIBLE_SPEED) return "—";
   return formatBytes(bytesPerSec) + "/s";
 }
 
@@ -5029,13 +5055,22 @@ function handleTransferProgress(p: TransferProgress) {
   const isNewRound = !!existing && existing.settled !== null && settled === null;
   const inherited = existing && !isNewRound ? existing : undefined;
 
+  // core 已带 100ms 样本门槛，这里再做一次 EWMA 抹掉逐分块抖动：
+  // 数字不再每 4MiB 跳一次，进度条观感才连续。撞号重传是新的一轮，不继承旧值；
+  // raw=0（样本不足或已收尾）如实显示"—"，不用旧值把"没有速度"伪装成有速度。
+  const rawSpeed = p.speed_bytes_per_sec || 0;
+  const prevSpeed = isNewRound ? 0 : existing?.speed_bytes_per_sec || 0;
+  const smoothSpeed = rawSpeed > 0 && prevSpeed > 0
+    ? prevSpeed * 0.75 + rawSpeed * 0.25
+    : rawSpeed;
+
   const item: ActiveTransferItem = {
     transfer_id: id,
     current_file: p.current_file || inherited?.current_file || (p.total_files > 1 ? `${p.total_files} 个文件` : "文件"),
     direction: p.direction,
     progress_percent: Math.max(0, Math.min(100, Number(p.progress_percent) || 0)),
-    speed_bytes_per_sec: p.speed_bytes_per_sec || 0,
-    speedFormatted: formatSpeed(p.speed_bytes_per_sec),
+    speed_bytes_per_sec: smoothSpeed,
+    speedFormatted: formatSpeed(smoothSpeed),
     bytes_transferred: p.bytes_transferred || 0,
     total_bytes: p.total_bytes || 0,
     peer_device_id: p.peer_device_id,
@@ -6235,10 +6270,7 @@ function deviceCardAtPoint(position: { x: number; y: number } | undefined): stri
 
 /**
  * 光标是否落在发送页的拖拽大框上。
- *
- * 与 `deviceCardAtPoint` 共用同一套物理像素 → CSS 像素换算。两者互斥：
- * 命中设备卡片时大框不亮，命中大框时卡片不亮 —— 一次拖放只高亮一个落点，
- * 用户才能从界面上判断松手会落到哪里。
+ * 与设备聚焦互斥：大框亮时不聚焦设备，聚焦设备时大框不亮。
  */
 function dropCardAtPoint(position: { x: number; y: number } | undefined): boolean {
   if (!position) return false;
@@ -6247,21 +6279,60 @@ function dropCardAtPoint(position: { x: number; y: number } | undefined): boolea
   return !!el?.closest?.(".drag-drop-card");
 }
 
-/** 光标下的设备卡片 id（用于高亮）；同时更新大框高亮 */
+/**
+ * 按光标位置吸附到**最近的可发送设备**，而不是要求精确命中。
+ *
+ * 窗口常被别的程序遮挡，用户把文件拖到设备列表时未必看得清光标正压在
+ * 哪张卡片上。这里按**纵向距离优先**吸附：光标在列表下方就聚焦排序靠后
+ * 的那台，往上移就逐台往上 —— 聚焦卡片会跟着放大，用户松手前就能确认
+ * "松手会发给谁"。
+ *
+ * 只考虑可发送（在线、已配对、非本机）的设备：聚焦一台离线设备只会让人
+ * 以为能发，松手却弹一个"离线"提示，反而不如不聚焦。
+ */
+function focusDeviceAtPoint(position: { x: number; y: number } | undefined): string {
+  if (!position || isConcurrencyFull.value) return "";
+  const ratio = window.devicePixelRatio || 1;
+  const x = position.x / ratio;
+  const y = position.y / ratio;
+  const cards = document.querySelectorAll<HTMLElement>(".device-card-row[data-device-id]");
+  let best = "";
+  let bestDist = Infinity;
+  for (const card of cards) {
+    const id = card.dataset.deviceId || "";
+    const dev = store.myDevices.find((d) => d.device_id === id);
+    if (!dev || !canDropTo(dev)) continue;
+    const r = card.getBoundingClientRect();
+    if (r.height === 0) continue; // 折叠或未渲染的卡片不参与聚焦
+    const cy = r.top + r.height / 2;
+    const cx = r.left + r.width / 2;
+    // 纵向优先：用户判断的是"上面那台还是下面那台"。横向只给很小的权重，
+    // 否则光标停在窗口中间时会被右侧空白拉开，聚焦到最上面那台。
+    const dist = Math.abs(y - cy) + Math.abs(x - cx) * 0.2;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = id;
+    }
+  }
+  return best;
+}
+
+/** 更新拖放聚焦：大框与设备卡片互斥，设备按光标位置就近吸附 */
 function updateDragHoverTarget(position: { x: number; y: number } | undefined) {
-  const overId = deviceCardAtPoint(position);
-  dragOverDeviceId.value = overId;
-  // 侧栏被折叠 / 卡片在滚动区外时 elementFromPoint 拿不到卡片 —— 那是
-  // "拖到空白处"，此时不该有任何卡片保持高亮（否则用户以为还指着它）。
-  // 大框同理：只有真正悬停在它上面才亮。
-  isDragOver.value = !overId && dropCardAtPoint(position);
+  if (dropCardAtPoint(position)) {
+    dragOverDeviceId.value = "";
+    isDragOver.value = true;
+    return;
+  }
+  dragOverDeviceId.value = focusDeviceAtPoint(position);
+  isDragOver.value = false;
 }
 
 /**
  * 原生拖放事件的唯一入口。
  *
  * 三种状态各司其职：
- * - `enter` / `over`：只做**反馈**（高亮光标正对的那张卡片或大框），不发文件；
+ * - `enter` / `over`：只做**反馈**（按光标位置聚焦最近的设备或大框），不发文件；
  * - `drop`：若光标下有可用设备，**直接发给它**；否则走原来的分派
  *   （进待发清单 / 发给当前选中设备）；
  * - `leave`：清掉所有拖放态。不清理的话，用户把文件拖出窗口后
@@ -6281,13 +6352,15 @@ function handleNativeDrag(ev: NativeDragEvent) {
       isNativeFileDrag.value = true;
       FeisuoBridge.ensureWindowVisible().catch(() => {});
     }
-    // 高亮完全交给命中测试（updateDragHoverTarget），不再"文件一进窗口
-    // 就把左侧整列卡片和右侧大框一起点亮"。
+    // 高亮交给 updateDragHoverTarget：设备按光标位置就近吸附，
+    // 大框只在光标真的落在它上面时亮。
     updateDragHoverTarget(ev.position);
     return;
   }
   // ---- drop ----
-  const targetId = deviceCardAtPoint(ev.position);
+  // 发给当前聚焦的那台，保证"放大的是谁就发给谁"；没有聚焦目标
+  // （例如光标在大框上）时才退回精确命中兜底。
+  const targetId = dragOverDeviceId.value || deviceCardAtPoint(ev.position);
   isNativeFileDrag.value = false;
   dragOverDeviceId.value = "";
   isDragOver.value = false;
@@ -7226,23 +7299,15 @@ async function toggleMaximize() {
 }
 
 /**
- * 关闭主窗口: 一律最小化到托盘。
+ * 关闭主窗口：主窗口始终显示，关窗即退出应用（标准桌面行为）。
  *
- * 「关闭窗口时」的三选项 (每次询问 / 最小化 / 退出) 已移除 ——
- * 用户选「直接退出」后整个引擎停摆, 局域网对端表现为"设备突然失联",
- * 而这本该是托盘菜单里一次显式操作才对的行为。彻底退出只走托盘菜单。
+ * 早先是"关窗最小化到托盘"：窗口隐藏后任务栏没有按钮，拖文件到任务栏
+ * 不会有任何反应；而拖放/审批/传输完成又不得不靠 ensureWindowVisible
+ * 把窗口唤回来。改成始终显示小窗后，这套"隐藏→唤出"链路整体退化为
+ * no-op，关闭就按用户直觉走：真的关掉。
  */
 function requestClose() {
-  closeToTray();
-}
-
-async function closeToTray() {
-  try {
-    await FeisuoBridge.hideWindow();
-    showToast("已最小化到托盘");
-  } catch (e) {
-    showToast(FeisuoBridge.describeError(e, "最小化到托盘失败"), true);
-  }
+  void FeisuoBridge.closeWindow();
 }
 
 // =======================================================================
@@ -8169,15 +8234,15 @@ function getFileIcon(name: string) {
   /* transform 加进 transition 才能让"拖放时放大"是渐变而不是瞬间跳一格。
    * 只动 transform / opacity / border-color / background：都是合成层属性，
    * 拖动过程中每帧 elementFromPoint 都在跑，重排会直接把反馈拖成卡顿。 */
-  transition: background 0.15s, border-color 0.15s, transform 0.16s ease, box-shadow 0.16s ease;
+  transition: background 0.15s, border-color 0.15s, transform 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
   border: 1px solid transparent;
-  will-change: transform;
+  will-change: transform, opacity;
 }
 .device-card-row:hover { background: var(--bg-hover-soft); }
 .device-card-row.active { background: var(--bg-active); border-color: var(--accent); }
 
-/* 原生拖放期间不给所有卡片加动效：整列一起上浮既晃眼，又不指明落点。
- * 可放置性只由光标正对的那张卡片的 `.drop-target` 表达。 */
+/* 原生拖放期间，聚焦目标由 `.drop-target` 放大描边表达，其余卡片淡化；
+ * 不做整列上浮 —— 那只会让列表晃动，反而不指明落点。 */
 .os-icon-box {
   width: 32px;
   height: 32px;
@@ -8583,7 +8648,7 @@ function getFileIcon(name: string) {
 
 /* 拖到设备卡片：目标即动作（§5.1）
  *
- * 这是**光标正对着**的那一张，也是拖放期间唯一放大的元素：
+ * 这是按光标位置**就近吸附**的那一张，也是拖放期间唯一放大的元素：
  * 放大、实心描边、投影抬起。三件事叠加而不是只换颜色 ——
  * 用户此刻要做的判断是"松手会发给谁"，只改底色在深色主题下
  * 几乎看不出来（--accent-soft 的透明度只有 0.16）。
@@ -8594,9 +8659,14 @@ function getFileIcon(name: string) {
   outline-offset: -2px;
   background: var(--accent-soft);
   border-radius: var(--radius-md);
-  transform: scale(1.03);
+  transform: scale(1.06);
   box-shadow: 0 6px 18px var(--accent-glow);
   cursor: copy;
+  z-index: var(--z-drop-focus);
+}
+/* 非聚焦卡片淡化：聚焦目标在视觉上"浮"出来，松手发给谁一眼可辨 */
+.device-card-row.drag-dimmed {
+  opacity: 0.42;
 }
 .device-card-row.drop-blocked {
   opacity: 0.5;
@@ -8607,7 +8677,7 @@ function getFileIcon(name: string) {
 
 /* 拖放期间的侧栏提示**已删除**。
  *
- * 见模板里的注释：卡片上浮 + 边框高亮已经把"这里能接、松手就发"说完了，
+ * 见模板里的注释：聚焦卡片放大 + 边框高亮 + 其余淡化已经把"松手发给谁"说完了，
  * 再加一条绿底提示条既是把约定俗成的操作解释一遍，也把设备列表往下推
  * 一行 —— 拖放时列表本身在动，那条提示反而成了干扰。
  * 屏幕阅读器仍需要文字替代视觉信号，改用 `.view-heading-sr` 视觉隐藏。
@@ -10779,7 +10849,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   background: var(--accent);
   transform-origin: left center;
   transform: scaleX(0);
-  transition: transform 0.18s linear;
+  transition: transform 0.12s linear;
 }
 .desktop-speed-dock.failed .speed-dock-fill { background: var(--danger); }
 
@@ -11561,7 +11631,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
    * 圆角留在 track 上，由它的 overflow:hidden 裁出胶囊。 */
   transform-origin: left center;
   transform: scaleX(0);
-  transition: transform 0.2s ease;
+  transition: transform 0.12s linear;
 }
 .card-footer-row {
   display: flex;

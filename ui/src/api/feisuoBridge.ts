@@ -1351,6 +1351,13 @@ export class FeisuoBridge {
     await invokeSafe<void>("hide_window");
   }
 
+  /** 关闭主窗口：主窗口始终显示，关窗即退出应用（标准桌面行为）。 */
+  static async closeWindow(): Promise<void> {
+    if (notInTauri()) return;
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().close();
+  }
+
   static async startWindowDragging(): Promise<void> {
     if (notInTauri()) return;
     const { getCurrentWindow } = await import("@tauri-apps/api/window");

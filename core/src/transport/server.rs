@@ -14,6 +14,7 @@ use crate::security::{
 };
 use crate::storage::{ChunkStore, PathManager};
 use crate::transport::client::TransferClient;
+use crate::transport::diagnostics::SpeedWindow;
 use crate::transport::session::{TransferDirection, TransferProgress, TransferStatus};
 
 /// 拒绝一条连接时, 用来"偷看"消息类型那 1 个字节的上限（毫秒）。
@@ -1746,6 +1747,8 @@ impl TransferServer {
 
         let started_at = Instant::now();
         let mut total_transferred = 0u64;
+        // 速度只统计本次会话新落盘的字节；total_transferred 供进度百分比使用。
+        let mut speed_window = SpeedWindow::new();
         // 失败也要进传输记录，而且必须用用户设的保留条数。
         // 写死 500 的话，用户把上限调高之后，一次失败就会把更早的记录删掉。
         let history_limits = {
@@ -2159,8 +2162,9 @@ impl TransferServer {
                     file_transferred,
                 );
 
-                let elapsed = started_at.elapsed().as_secs_f64().max(0.001);
-                let speed = (total_transferred as f64 / elapsed) as u64;
+                // 不用 total_transferred / elapsed：首片 4MiB 在 1ms 内落盘
+                // 会算出 4GiB/s 的假尖峰。速度窗口带 100ms 样本门槛。
+                let speed = speed_window.observe(chunk_data.len() as u64);
                 // 逐块采样吞吐 + 记录停顿（区分"链路慢"与"磁盘写阻塞"）
                 diag.sample_throughput(
                     chunk_data.len() as u64,
@@ -2431,7 +2435,8 @@ impl TransferServer {
         if let Ok(mut s) = committed_transfers.lock() {
             s.insert(manifest.transfer_id.clone());
         }
-        let elapsed = started_at.elapsed().as_secs_f64().max(0.001);
+        // 终态速度用诊断里的"纯数据流时间"口径（不含 BLAKE3 复核），
+        // 样本不足 100ms 时 avg_speed_bps() 返回 None → 0 → 前端显示"—"。
         let _ = progress_tx.send(TransferProgress {
             transfer_id: manifest.transfer_id.clone(),
             direction: TransferDirection::Receive,
@@ -2443,7 +2448,7 @@ impl TransferServer {
             bytes_transferred: total_transferred,
             total_bytes: manifest.total_size,
             progress_percent: 100.0,
-            speed_bytes_per_sec: (total_transferred as f64 / elapsed) as u64,
+            speed_bytes_per_sec: diag.avg_speed_bps().unwrap_or(0),
             status: TransferStatus::Completed,
         });
 

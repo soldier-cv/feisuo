@@ -11,7 +11,7 @@ use crate::error::{FeisuoError, Result};
 use crate::protocol::*;
 use crate::security::{BindOutcome, DeviceIdentity, TrustLevel, TrustStore, TrustedDevice};
 use crate::storage::ChunkStore;
-use crate::transport::diagnostics::TransferDiagnostics;
+use crate::transport::diagnostics::{SpeedWindow, TransferDiagnostics};
 use crate::transport::server::{read_json_frame, write_json_frame};
 use crate::transport::session::{TransferDirection, TransferProgress, TransferStatus};
 use crate::transport::with_io_timeout;
@@ -894,8 +894,11 @@ impl TransferClient {
 
         // 6. 流式发送分块（支持异步预读流水线与分块断点续传）
         let started_at = Instant::now();
-        // 初始已传字节数累加已跳过的分块量，确保断点续传进度平滑无缝
+        // 初始已传字节数累加已跳过的分块量，确保断点续传进度平滑无缝。
+        // ⚠️ bytes_sent 含**历史续传字节**，只用于进度百分比与 bytes_transferred；
+        //    速度必须只看本次会话新增字节（speed_window），否则续传会算出 20GB/s。
         let mut bytes_sent: u64 = file_resume_map.values().map(|(_, b)| *b).sum();
+        let mut speed_window = SpeedWindow::new();
         let mut last_chunk_at = started_at;
         // 本次传输是否已经尝试过二次调大（只试一次, 避免反复换手柄）
         let mut bdp_regrow_tried = false;
@@ -994,13 +997,13 @@ impl TransferClient {
                     super::write_with_timeout(&mut stream, &chunk_data, "发送分块数据").await?;
                 }
 
-                bytes_sent += chunk_data.len() as u64;
+                let chunk_len = chunk_data.len() as u64;
+                bytes_sent += chunk_len;
                 // 逐块采样吞吐 + 记录停顿
                 let now_instant = Instant::now();
                 let gap_ms = now_instant.duration_since(last_chunk_at).as_millis() as u64;
                 last_chunk_at = now_instant;
-                diag.sample_throughput(chunk_data.len() as u64, gap_ms);
-                let elapsed = started_at.elapsed().as_secs_f64().max(0.001);
+                diag.sample_throughput(chunk_len, gap_ms);
                 let _ = self.progress_tx.send(TransferProgress {
                     transfer_id: transfer_id.clone(),
                     direction: TransferDirection::Send,
@@ -1017,7 +1020,7 @@ impl TransferClient {
                     } else {
                         (bytes_sent as f64 / total_size as f64 * 100.0).min(100.0) as f32
                     },
-                    speed_bytes_per_sec: (bytes_sent as f64 / elapsed) as u64,
+                    speed_bytes_per_sec: speed_window.observe(chunk_len),
                     status: TransferStatus::Transferring,
                 });
 

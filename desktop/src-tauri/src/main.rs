@@ -24,14 +24,11 @@ mod tray_guard;
 mod updater;
 
 use std::sync::Arc;
-use tauri::{Emitter, Manager, WindowEvent};
+use tauri::{Emitter, Manager};
 use tracing::{info, warn};
 use feisuo_core::{AppConfig, FeisuoEngine};
 use crate::commands::AppState;
 use crate::updater::UpdateService;
-
-/// 原生关闭事件 (Alt+F4 / 标题栏 ×) 转发给前端的事件名
-const WINDOW_CLOSE_REQUESTED: &str = "feisuo://window-close-requested";
 
 #[tokio::main]
 async fn main() {
@@ -166,18 +163,11 @@ async fn main() {
                 if let Ok(icon) = tauri::image::Image::from_bytes(include_bytes!("../icons/128x128@2x.png")) {
                     let _ = window.set_icon(icon);
                 }
-                if is_daemon {
-                    // tauri.conf.json 里窗口是 `visible: false`, 自启时**根本不会**
-                    // 创建出可见窗口。旧配置是 `visible: true` + 这里再 hide(),
-                    // 中间那一瞬窗口已经画出来了 —— 表现为每次登录都闪一下窗口。
-                    // 这里仍显式 hide 一次是双保险(防止配置被改回 true)。
-                    let _ = window.hide();
-                } else {
-                    // 手动启动: 此时才把窗口显示出来
-                    let _ = window.show();
-                    let _ = window.unminimize();
-                    let _ = window.set_focus();
-                }
+                // 主窗口始终显示小窗：自启与手动启动一致，都直接显示。
+                // 不再有"关窗进托盘"的形态，也就不需要按 is_daemon 分流。
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
             } else {
                 tracing::warn!("Main window 'main' not found in setup!");
             }
@@ -232,18 +222,6 @@ async fn main() {
             });
 
             Ok(())
-        })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                // 一律拦截原生关闭: 交给前端执行"最小化到托盘"。
-                // 关闭窗口 = 最小化到托盘（设置项已移除，不再有"直接退出"），
-                // 彻底退出只走托盘菜单。拦在这里而不是直接 hide()，
-                // 是为了让前端能给出"已最小化到托盘"的 toast 反馈。
-                api.prevent_close();
-                if let Err(e) = window.emit(WINDOW_CLOSE_REQUESTED, ()) {
-                    warn!("无法向前端发送关闭请求: {}", e);
-                }
-            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_local_info,

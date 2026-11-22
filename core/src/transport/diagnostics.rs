@@ -38,6 +38,46 @@ use crate::security::format_bytes;
 /// 低于此门槛一律显示"—"，不显示数字。
 pub const MIN_SPEED_SAMPLE_MS: u64 = 100;
 
+/// 实时进度事件的速度窗口：只统计**本次会话新增字节**，带样本门槛。
+///
+/// 解决两个真实事故：
+/// - 发送侧 `bytes_sent` 含断点续传的历史字节，计入速度分子会算出 20GB/s；
+/// - 首片 4MiB 在 1ms 内落盘，`max(0.001)` 的分母下限会算出 4GiB/s。
+///
+/// 样本不足 `MIN_SPEED_SAMPLE_MS` 时沿用上一次有效速度（首次为 0 → 前端显示
+/// "—"），窗口每秒滚动一次但用 `last` 兜底，避免速度每隔一秒闪一下"—"。
+#[derive(Default)]
+pub struct SpeedWindow {
+    start: Option<Instant>,
+    bytes: u64,
+    last: u64,
+}
+
+impl SpeedWindow {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 喂入本次会话**新增**的字节，返回当前窗口内的平均速度（B/s）。
+    pub fn observe(&mut self, bytes: u64) -> u64 {
+        let now = Instant::now();
+        let start = *self.start.get_or_insert(now);
+        self.bytes = self.bytes.saturating_add(bytes);
+        let elapsed_ms = now.duration_since(start).as_millis() as u64;
+        if elapsed_ms < MIN_SPEED_SAMPLE_MS {
+            return self.last;
+        }
+        self.last = self.bytes.saturating_mul(1000) / elapsed_ms;
+        // 窗口滚动：最多累计 1 秒，避免长期平均掩盖瞬时降速；
+        // last 兜底使得滚动瞬间速度不会跳成 0。
+        if elapsed_ms >= 1_000 {
+            self.start = Some(now);
+            self.bytes = 0;
+        }
+        self.last
+    }
+}
+
 /// 相邻分块间隔超过该值即记为一次 **stall**（传输途中的停顿）。
 ///
 /// 正常情况下两块之间只隔着网络传输与落盘时间；出现秒级间隔通常意味着
