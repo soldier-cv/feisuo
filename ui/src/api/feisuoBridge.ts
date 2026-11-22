@@ -1346,11 +1346,6 @@ export class FeisuoBridge {
     await invokeSafe<void>("toggle_maximize_window");
   }
 
-  static async hideWindow(): Promise<void> {
-    if (notInTauri()) return;
-    await invokeSafe<void>("hide_window");
-  }
-
   /** 关闭主窗口：主窗口始终显示，关窗即退出应用（标准桌面行为）。 */
   static async closeWindow(): Promise<void> {
     if (notInTauri()) return;
@@ -1663,13 +1658,6 @@ export class FeisuoBridge {
   }
 
   /**
-   * 确保主窗口可见。
-   *
-   * 飞梭是托盘常驻应用, 关窗后窗口隐藏; 而 Tauri 的原生拖放在窗口隐藏时
-   * 照样触发。不唤出窗口的话, 用户把文件拖到看不见的地方, 文件进了清单
-   * 却毫无反馈 —— 表现为"拖了没反应"。
-   */
-  /**
    * 引擎的真实健康状态。
    *
    * 必须查这个而**不能**靠"设备列表调用没抛异常"来推断在线:
@@ -1681,12 +1669,6 @@ export class FeisuoBridge {
     if (notInTauri()) return { running: false, error: null };
     const { invoke } = await import("@tauri-apps/api/core");
     return await invoke<{ running: boolean; error: string | null }>("get_engine_status");
-  }
-
-  static async ensureWindowVisible(): Promise<void> {
-    if (notInTauri()) return;
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("ensure_window_visible");
   }
 
   static describeError(e: unknown, fallback: string): string {

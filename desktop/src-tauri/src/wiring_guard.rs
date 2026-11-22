@@ -1,8 +1,9 @@
 //! 桌面端「Rust 命令 ↔ 前端调用」双向对照守卫。
 //!
-//! 起因: 拖放到托盘常驻应用的隐藏窗口时, 文件进了发送清单却毫无可见反馈。
-//! 修复方式是新增一个 `ensure_window_visible` 命令并在前端接上。
-//! 这类"后端加了能力 / 前端忘了调"的失配, 编译期完全无感 —— Rust 侧
+//! 起因: 曾经为"托盘常驻隐藏窗口"新增 `ensure_window_visible` 唤窗命令。
+//! 那套形态已废除（主窗口始终显示、关窗即退出），命令与全部调用点已移除。
+//! 这里守的是命令注册与前端调用的双向一致 —— 这类"后端加了能力 /
+//! 前端忘了调"的失配, 编译期完全无感 —— Rust 侧
 //! `generate_handler!` 只是多一项, TS 侧类型也不会报错, 运行时才表现为
 //! "功能没反应"。
 //!
@@ -302,14 +303,6 @@ fn engine_health_must_be_queried_not_inferred() {
         "syncEngineStatus 里不得无条件清空 engineError —— 引擎失败时那正是 \
          唯一让用户看见问题的线索"
     );
-    // 唤窗必须放在**状态查询**这条路径上, 不能只放在事件回调里:
-    // 事件实测比前端挂载监听器早 8ms, 必被丢弃。
-    assert!(
-        body.contains("ensureWindowVisible"),
-        "syncEngineStatus 必须在引擎未启动时调用 ensureWindowVisible —— \
-         事件路径会丢, 状态查询才是可靠兜底, 唤窗也必须在这里"
-    );
-
     // 4) refreshDevices 必须改用 syncEngineStatus
     let at = app
         .find("async function refreshDevices(")
@@ -330,203 +323,104 @@ fn engine_health_must_be_queried_not_inferred() {
     );
 }
 
-/// 用户必须知晓的外部事件, 必须把隐藏的窗口唤出来。
+/// 主窗口始终显示：关窗即退出，不再有"隐藏→唤出"形态。
 ///
-/// 飞梭是**托盘常驻**应用(关窗不退出), 窗口经常处于隐藏状态。
-/// 而"应用内 toast"在窗口隐藏时用户根本看不到, 于是会出现两类静默故障:
-/// 1. 传输完成/失败只有 toast —— 无人值守场景下用户永远不知道文件已到;
-/// 2. 审批弹窗看不见 —— core 只等 60 秒, 于是静默等满再被拒,
-///    对方以为传成功、本机什么都没发生, 双方对不上账。
+/// 曾经的 `ensure_window_visible` 命令及前端全部调用点已移除；主窗口配置
+/// 必须是 `visible: true`，且不再拦截原生关闭请求。任何一边回退都会让
+/// "拖到任务栏按钮没反应"那类问题以另一种形式复现。
 #[test]
-fn user_visible_events_must_surface_the_hidden_window() {
-    let app = read(&ui_src().join("App.vue"));
-
-    // 1) 审批请求
-    let at = app
-        .find("onApprovalRequest(")
-        .expect("App.vue 必须订阅审批事件");
-    let seg: String = app[at..].chars().take(700).collect();
+fn main_window_must_always_be_visible_and_close_must_exit() {
+    // desktop_src() 指向 src-tauri/src，配置文件在其上一级 src-tauri/
+    let conf_path = desktop_src()
+        .parent()
+        .expect("src-tauri/src 的父目录不存在?")
+        .join("tauri.conf.json");
+    let conf = read(&conf_path);
     assert!(
-        seg.contains("ensureWindowVisible"),
-        "审批请求必须调用 ensureWindowVisible —— 窗口隐藏时弹窗不可见, \
-         core 只等 60 秒, 用户会静默等满再被拒"
+        conf.contains("\"visible\": true"),
+        "主窗口必须 visible: true —— 隐藏窗口在 Windows 上没有任务栏按钮，\
+         拖文件到任务栏不会有任何反应"
     );
 
-    // 1b) 引擎启动失败: 同类问题里最严重的一处 —— 引擎挂了意味着**所有**传输
-    // 都不工作, 而托盘图标照常显示, 是最难自查的一类故障。
-    let at = app
-        .find("onEngineError(")
-        .expect("App.vue 必须订阅引擎错误事件");
-    let seg: String = app[at..].chars().take(700).collect();
-    assert!(
-        seg.contains("ensureWindowVisible"),
-        "引擎启动失败必须调用 ensureWindowVisible —— 托盘常驻下引擎挂掉是 \
-         完全静默的: 图标在、功能无, 用户无从察觉"
-    );
-
-    // 2) 传输完成 / 失败
-    let at = app
-        .find("function handleTransferProgress(")
-        .expect("找不到 handleTransferProgress");
-    let body_start = app[at..].find('{').map(|i| at + i).unwrap();
-    let chars: Vec<(usize, char)> = app[body_start..]
-        .char_indices()
-        .map(|(i, c)| (body_start + i, c))
-        .collect();
-    let mut depth = 0i32;
-    let mut end = None;
-    for (idx, &(_, c)) in chars.iter().enumerate() {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = Some(chars[idx].0);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let body = &app[body_start..end.expect("handleTransferProgress 函数体没有闭合")];
-
-    assert!(
-        body.contains("ensureWindowVisible"),
-        "传输完成/失败必须调用 ensureWindowVisible —— 托盘常驻时应用内 toast \
-         用户看不到, 等于白等"
-    );
-    let hits = body.matches("ensureWindowVisible").count();
-    assert!(
-        hits >= 2,
-        "完成与失败两条分支都应唤出窗口, 实际只找到 {} 处",
-        hits
-    );
-}
-
-/// 拖放必须先把窗口唤出来。
-///
-/// 飞梭是托盘常驻应用, 窗口常处于隐藏状态, 而 Tauri 原生拖放在隐藏时照样触发。
-/// 不唤出窗口的话, 用户把文件拖到看不见的地方, 文件进了清单却零反馈,
-/// 表现为"拖了没反应"。
-#[test]
-fn native_drop_must_surface_the_hidden_window() {
-    let bridge = read(&ui_src().join("api").join("feisuoBridge.ts"));
-    let app = read(&ui_src().join("App.vue"));
-
-    assert!(
-        bridge.contains("onNativeDragDrop"),
-        "必须有原生拖放监听 —— 浏览器 File 对象在 WebView2 下拿不到真实磁盘路径"
-    );
-    assert!(
-        bridge.contains("\"ensure_window_visible\""),
-        "桥接层必须暴露 ensure_window_visible"
-    );
-
-    // 找到 handleNativeDrop 的函数体, 确认里面真的调了它
-    let at = app
-        .find("function handleNativeDrop(")
-        .expect("App.vue 里找不到 handleNativeDrop");
-    let body_start = app[at..]
-        .find('{')
-        .map(|i| at + i)
-        .expect("handleNativeDrop 缺少函数体");
-    let chars: Vec<(usize, char)> = app[body_start..]
-        .char_indices()
-        .map(|(i, c)| (body_start + i, c))
-        .collect();
-    let mut depth = 0i32;
-    let mut end = None;
-    for (idx, &(_, c)) in chars.iter().enumerate() {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = Some(chars[idx].0);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let body = &app[body_start..end.expect("handleNativeDrop 函数体没有闭合")];
-
-    assert!(
-        body.contains("ensureWindowVisible"),
-        "handleNativeDrop 必须调用 ensureWindowVisible —— 托盘常驻时窗口是隐藏的, \
-         不唤出的话拖放完全静默"
-    );
-
-    // 后端命令必须真的存在
     let main_rs = read(&desktop_src().join("main.rs"));
     assert!(
-        registered_commands(&main_rs).contains("ensure_window_visible"),
-        "ensure_window_visible 没有在 generate_handler! 里注册"
+        !main_rs.contains("prevent_close"),
+        "main.rs 不得再拦截 CloseRequested —— 关窗应真正退出，而不是隐藏到托盘"
     );
+
+    let app = read(&ui_src().join("App.vue"));
+    let bridge = read(&ui_src().join("api").join("feisuoBridge.ts"));
+    for token in ["ensureWindowVisible", "closeToTray", "hideWindow"] {
+        assert!(
+            !app.contains(token) && !bridge.contains(token),
+            "前端不得再出现 `{token}` —— 那是'关窗隐藏→拖放唤出'旧形态的残留"
+        );
+    }
+
     let commands = read(&desktop_src().join("commands.rs"));
-    assert!(
-        commands.contains("pub fn ensure_window_visible"),
-        "commands.rs 里缺少 ensure_window_visible 的实现"
-    );
+    for token in ["ensure_window_visible", "hide_window"] {
+        assert!(
+            !commands.contains(token),
+            "commands.rs 不得再出现 `{token}` 命令 —— 旧形态已废除"
+        );
+    }
 }
 
-/// 拖到设备卡片上松手，必须发给**光标下那台**设备。
+/// 拖放落点必须跟随光标的**就近聚焦**，且"放大的是谁就发给谁"。
 ///
-/// ## 这条守卫守的是一个「在浏览器里好、在产物里不存在」的交互
-///
-/// Tauri 在原生层接管文件拖放（`dragDropEnabled` 默认开），WebView2
-/// 因此**收不到 HTML 的 `dragover` / `drop`**。模板里那些
-/// `@dragover` / `@drop` 只在 `vite dev` 的浏览器里触发 ——
-/// 真实的 Windows 产物上一次都不会跑。
-///
-/// 后果不是报错，而是**发错设备**：用户拖到 FIND-H 卡片上，代码走
-/// `routeDroppedPaths` → `store.selectedDevice`，文件去了旁边那台。
-/// 界面上看不出任何异常，用户要等到对端说"没收到"才发现。
-///
-/// 判据（三条必须同时成立）：
-/// 1. 原生拖放事件把 `position` 转出来了（否则前端无从做命中测试）；
-/// 2. App.vue 用 `elementFromPoint` + `data-device-id` 找出目标卡片；
-/// 3. 落盘时把命中的设备 id 传给 `handleNativeDrop`，而不是无视它。
+/// Tauri 在原生层接管文件拖放，WebView2 收不到 HTML 的 `dragover`；加上窗口
+/// 可能被遮挡，用户未必看得清光标压在哪张卡片上。因此按**纵向距离优先**
+/// 吸附最近的可发送设备，聚焦卡片放大、其余淡化，松手发给聚焦的那台。
 #[test]
-fn native_drop_must_target_the_device_under_the_cursor() {
+fn native_drop_must_target_the_focused_device() {
     let bridge = read(&ui_src().join("api").join("feisuoBridge.ts"));
     let app = read(&ui_src().join("App.vue"));
 
-    // 1. 位置必须被转出来。物理像素是 Tauri 的定义，这里只确认字段在。
+    // 1. 原生事件必须把物理像素坐标转出来。
     assert!(
         bridge.contains("position: { x: p.position.x, y: p.position.y }"),
-        "onNativeDragDrop 没有把 position 转给前端 —— 没有坐标就永远只能发给\
-         「最后一次选中的设备」，而用户是照着光标下的卡片拖的"
+        "onNativeDragDrop 没有把 position 转给前端 —— 没有坐标就无法做就近聚焦"
     );
 
-    // 2. 命中测试必须存在，且必须按 devicePixelRatio 换算。
-    assert!(
-        app.contains("elementFromPoint("),
-        "App.vue 里没有 elementFromPoint 命中测试 —— 原生拖放拿不到 HTML 的 \
-         dragover，卡片高亮与目标判定都必须自己做"
-    );
+    // 2. 命中测试按 devicePixelRatio 换算（Tauri 物理像素 → CSS 像素）。
+    assert!(app.contains("elementFromPoint("), "缺少 elementFromPoint 命中测试");
     assert!(
         app.contains("window.devicePixelRatio"),
-        "命中测试没有按 devicePixelRatio 换算：Tauri 给的是物理像素，\
-         elementFromPoint 要 CSS 像素。125% 缩放下会偏到隔壁那台设备"
+        "命中测试没有按 devicePixelRatio 换算：125% 缩放下会偏到隔壁那台设备"
+    );
+    assert!(app.contains("data-device-id"), "设备卡片缺少可识别标记");
+
+    // 3. 就近聚焦函数：按卡片实际位置 + 只考虑可发送设备。
+    let f = app
+        .find("function focusDeviceAtPoint(")
+        .expect("缺少 focusDeviceAtPoint：拖放不再按光标就近聚焦");
+    // 用 chars 截断，不能按字节切：中文一个字占 3 字节，按字节切会切在字符中间
+    let fbody: String = app[f..].chars().take(900).collect();
+    assert!(
+        fbody.contains("getBoundingClientRect()"),
+        "聚焦必须基于卡片实际位置，否则光标上下移动时高亮不会跟随"
     );
     assert!(
-        app.contains("data-device-id") || app.contains("deviceCardAtPoint"),
-        "设备卡片没有可被命中测试识别的标记"
+        fbody.contains("canDropTo("),
+        "聚焦只能落在可发送设备上：聚焦一台离线设备会让人以为能发"
     );
 
-    // 3. 落盘必须用命中的设备，而不是无脑走「当前选中」。
+    // 4. 松手发给聚焦的那台（高亮与落点一致），而不是当前选中设备。
+    assert!(
+        app.contains("const targetId = dragOverDeviceId.value || deviceCardAtPoint(ev.position)"),
+        "drop 必须用当前聚焦的设备作为目标，否则会出现'放大的是 A、发出去的是 B'"
+    );
     let drop_fn = app
         .find("async function handleNativeDrop(")
         .expect("App.vue 里找不到 handleNativeDrop");
-    let fn_body = &app[drop_fn..drop_fn + 2000.min(app.len() - drop_fn)];
+    let fn_body: String = app[drop_fn..].chars().take(2000).collect();
     assert!(
         fn_body.contains("explicitDeviceId") && fn_body.contains("routeDroppedPathsToDevice"),
-        "handleNativeDrop 没有使用松手处的设备 id —— 拖到哪张卡片上都会发给\
-         当前选中的设备，这正是本改动要修的那个 bug"
+        "handleNativeDrop 必须使用松手处的设备 id 分派"
     );
-    assert!(
-        app.contains("function routeDroppedPathsToDevice("),
-        "缺少「发给指定设备」的分派函数"
-    );
+
+    // 5. 聚焦的视觉反馈必须在模板和样式里都接上。
+    for token in ["'drop-target'", "'drag-dimmed'"] {
+        assert!(app.contains(token), "缺少聚焦视觉类 {token}：用户无法确认松手发给谁");
+    }
 }

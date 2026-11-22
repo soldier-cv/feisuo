@@ -66,12 +66,16 @@ async fn main() {
     let builder = tauri::Builder::default()
         // 单实例保护：拦截二次启动，防止多开造成端口占用与多窗口混乱。
         // 二次启动时该插件会向首个实例发送通知并在 setup 前直接 exit(0) 退出，
-        // 绝不会走到后面的 setup() 和引擎端口监听。首个实例接收到信号后，自动唤出并聚焦已有主窗口。
+        // 绝不会走到后面的 setup() 和引擎端口监听。首个实例接收到信号后聚焦已有窗口。
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
             info!("检测到二次启动请求, 参数: {:?}, 工作目录: {}", argv, cwd);
             let is_daemon = argv.iter().any(|arg| arg == "--daemon");
             if !is_daemon {
-                tray::show_main(app);
+                // 主窗口始终显示，不再需要"唤出"；只需把它聚焦到前台。
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
             }
         }))
         .manage(app_state)
@@ -252,12 +256,6 @@ async fn main() {
             commands::get_preferred_endpoint,
             commands::minimize_window,
             commands::toggle_maximize_window,
-            commands::hide_window,
-            // ❌ 原本这里还有 commands::quit_app ——
-            // 它唯一的前端调用方是「关闭窗口时」三选项里的"直接退出"确认框，
-            // 该选项已随设置项一并移除（关闭窗口一律最小化到托盘）。
-            // 彻底退出只剩托盘菜单的「退出飞梭」，由 tray.rs 直接 app.exit(0)。
-            commands::ensure_window_visible,
             commands::get_engine_status,
             commands::probe_device,
             commands::respond_approval,

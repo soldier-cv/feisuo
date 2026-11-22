@@ -727,12 +727,6 @@ pub fn toggle_maximize_window(window: tauri::WebviewWindow) {
     }
 }
 
-/// 前端已自行决定"最小化到托盘", 这里只做一次隐藏 (不再二次弹确认框)
-#[tauri::command]
-pub fn hide_window(window: tauri::WebviewWindow) {
-    let _ = window.hide();
-}
-
 /// 引擎的**真实**健康状态。
 ///
 /// 为什么必须有这个命令: 引擎启动失败时(端口被占用是最常见原因),
@@ -756,31 +750,6 @@ pub fn get_engine_status(state: State<'_, AppState>) -> EngineStatus {
         running: state.engine.is_started(),
         error: state.engine.start_error(),
     }
-}
-
-/// 确保窗口可见 (已可见时为空操作)。
-///
-/// 飞梭是**托盘常驻**应用, 关窗后窗口处于隐藏状态, 而下列事件在隐藏时
-/// 照样会发生, 且都需要用户知情或决定:
-/// - 原生拖放: 文件进了发送清单, 但用户看不到, 表现为"拖了没反应";
-/// - 传输完成 / 失败: 无人值守场景下用户永远不知道文件已到;
-/// - 人工审批: 弹窗不可见 → core 只等 60 秒 → 静默等满后被拒;
-/// - 引擎启动失败: 托盘图标在、功能全无, 是最难自查的一类故障。
-///
-/// 只把窗口唤出来并聚焦, 不代替用户做任何决定。
-#[tauri::command]
-pub fn ensure_window_visible(window: tauri::WebviewWindow) {
-    let visible = window.is_visible().unwrap_or(false);
-    if visible {
-        return;
-    }
-    if let Err(e) = window.show() {
-        tracing::warn!("拖放后显示窗口失败: {}", e);
-        return;
-    }
-    let _ = window.unminimize();
-    let _ = window.set_focus();
-    tracing::info!("窗口处于隐藏状态, 已主动唤出主界面");
 }
 
 /// 主动探测对端 IP: 真正等待应答, 失败时给出可读原因

@@ -3976,11 +3976,6 @@ onMounted(async () => {
   unlisteners.push(
     await FeisuoBridge.onTransferProgress(handleTransferProgress),
     await FeisuoBridge.onApprovalRequest((req) => {
-      // 审批弹窗是**必须由人决定**的事件, 而 core 侧只等 60 秒。
-      // 窗口隐藏时这个弹窗用户看不见, 结果就是静默等满 60 秒然后被拒 ——
-      // 对方以为传输成功, 本机什么都没发生, 双方都对不上账。
-      // 所以这里必须把窗口唤出来。
-      FeisuoBridge.ensureWindowVisible().catch(() => {});
       // 同一个 approval_id 再次到达 = core 检测到**对方出示的码**不匹配，
       // 在同一窗口里要求重试（§2.3）。本机码不变，用户只需再念一遍。
       // 判定要跟"上次提交的 id"比而不是跟 `pendingApproval` 比 ——
@@ -4003,11 +3998,7 @@ onMounted(async () => {
       await loadLocalInfo();
     }),
     await FeisuoBridge.onEngineError((msg) => {
-      // 这是同类问题里最严重的一处: 引擎启动失败意味着**所有**传输都不会工作。
-      // 托盘常驻 + 开机自启下, 窗口根本不显示, 用户只看到一个托盘图标,
-      // 以为程序在正常运行 —— 直到某天需要传文件才发现永远传不了。
-      // 托盘图标在、功能全无, 是最难自查的一类故障, 必须主动告知。
-      FeisuoBridge.ensureWindowVisible().catch(() => {});
+      // 引擎启动失败意味着所有传输都不会工作，必须明确告知用户。
       engineError.value = msg;
       engineOnline.value = false;
       showToast("局域网守护引擎启动失败", true);
@@ -4185,14 +4176,6 @@ async function syncEngineStatus() {
     const st = await FeisuoBridge.getEngineStatus();
     engineOnline.value = st.running;
     engineError.value = st.error ?? "";
-    // 引擎没起来时必须主动唤出窗口。
-    // 这里才是**可靠**的那条路径: 事件 `feisuo://engine-error` 是在 setup()
-    // 里 spawn 出去的引擎报错时发出的, 实测比前端挂载监听器早 8ms,
-    // 事件必被丢弃。所以不能只依赖事件 —— 状态查询才是兜底,
-    // 唤窗也必须放在这里, 否则事件一丢就又变成静默故障。
-    if (!st.running) {
-      FeisuoBridge.ensureWindowVisible().catch(() => {});
-    }
   } catch {
     // 命令本身调不通(例如后端在重启): 保守地标为离线, 但不要覆盖已有错误文案
     engineOnline.value = false;
@@ -5147,10 +5130,8 @@ function handleTransferProgress(p: TransferProgress) {
     }, lingerMs);
 
     if (kind === "Completed") {
-      FeisuoBridge.ensureWindowVisible().catch(() => {});
       showToast(`${item.current_file} ${p.direction === "Send" ? "发送完成" : "接收完成"}`);
     } else if (kind === "Failed") {
-      FeisuoBridge.ensureWindowVisible().catch(() => {});
       showToast(`${item.current_file} 传输失败: ${reason || "未知原因"}`, true);
     } else if (kind === "Cancelled") {
       showToast(`${item.current_file} 传输已取消`, true);
@@ -6346,11 +6327,8 @@ function handleNativeDrag(ev: NativeDragEvent) {
     return;
   }
   if (ev.type === "enter" || ev.type === "over") {
-    // 拖进窗口就唤出窗口：托盘常驻下窗口可能是隐藏的，
-    // 而原生拖放在隐藏时照样触发 —— 不唤出的话用户不知道拖到了哪。
     if (ev.type === "enter") {
       isNativeFileDrag.value = true;
-      FeisuoBridge.ensureWindowVisible().catch(() => {});
     }
     // 高亮交给 updateDragHoverTarget：设备按光标位置就近吸附，
     // 大框只在光标真的落在它上面时亮。
@@ -6378,11 +6356,6 @@ function handleNativeDrag(ev: NativeDragEvent) {
 async function handleNativeDrop(paths: string[], explicitDeviceId = "") {
   isDragOver.value = false;
   if (paths.length === 0) return;
-  // 必须先把窗口唤出来: 关窗后窗口处于隐藏状态, 而 Tauri 的原生拖放在
-  // 隐藏时照样触发 —— 不唤出的话文件确实进了发送清单, 但用户完全看不到,
-  // 表现为"把文件拖过去, 什么都没发生"。托盘常驻是本产品的核心形态,
-  // 所以这条路径必须自己保证可见性。
-  FeisuoBridge.ensureWindowVisible().catch(() => {});
   if (isConcurrencyFull.value) {
     showToast(`当前已有 ${runningCount.value} 个传输任务在运行，请等部分完成后再添加`, true);
     return;
@@ -7302,9 +7275,9 @@ async function toggleMaximize() {
  * 关闭主窗口：主窗口始终显示，关窗即退出应用（标准桌面行为）。
  *
  * 早先是"关窗最小化到托盘"：窗口隐藏后任务栏没有按钮，拖文件到任务栏
- * 不会有任何反应；而拖放/审批/传输完成又不得不靠 ensureWindowVisible
- * 把窗口唤回来。改成始终显示小窗后，这套"隐藏→唤出"链路整体退化为
- * no-op，关闭就按用户直觉走：真的关掉。
+ * 不会有任何反应；而拖放/审批/传输完成又不得不靠一套"隐藏→唤出"链路
+ * 把窗口叫回来。现在主窗口始终显示，那条链路已整体移除，关闭就按用户
+ * 直觉走：真的关掉。
  */
 function requestClose() {
   void FeisuoBridge.closeWindow();

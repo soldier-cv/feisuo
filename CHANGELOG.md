@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.1.28] — 2026-11-22
+
+### 变更
+
+- **彻底移除「隐藏 → 唤出」链路**：删除 `ensure_window_visible` / `hide_window` 命令及前端全部调用、托盘「打开面板」菜单项与左键唤窗事件、`show_main` / `ensure_foreground`；主窗口始终显示、关窗即退出，不再保留 no-op 兼容层。`wiring_guard` / `tray_guard` 同步重写，改为守新形态的不变量。
+
 ## [0.1.27] — 2026-11-22
 
 ### 优化
