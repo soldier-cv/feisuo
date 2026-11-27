@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- M3 Navigation Bar 选中态胶囊指示器（64x32dp） -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/feisuo_accent_soft" />
+    <corners android:radius="16dp" />
+</shape>

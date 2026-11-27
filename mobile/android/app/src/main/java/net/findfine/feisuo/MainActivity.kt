@@ -9,10 +9,13 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.text.InputType
 import android.util.Log
@@ -59,6 +62,7 @@ class MainActivity : Activity() {
     companion object {
         private const val TAG = "FeisuoMainActivity"
         private const val REQUEST_POST_NOTIFICATIONS = 1001
+        private const val REQUEST_PICK_FILES_TO_SEND = 1002
         /** 名册轮询间隔：发现信标 3 秒一轮，5 秒足够收敛且不浪费电 */
         private const val ROSTER_POLL_MS = 5000L
         /**
@@ -79,8 +83,17 @@ class MainActivity : Activity() {
     private lateinit var bottomNav: LinearLayout
     private val pages = mutableListOf<View>()
     private val navItems = mutableListOf<LinearLayout>()
+    private val navIndicators = mutableListOf<FrameLayout>()
     private val navIcons = mutableListOf<ImageView>()
     private val navLabels = mutableListOf<TextView>()
+    private var sendFab: LinearLayout? = null
+    private var snackbarView: TextView? = null
+    private var pendingSendTarget: RosterRow? = null
+    private val hideSnackbarRunnable = Runnable {
+        snackbarView?.animate()?.alpha(0f)?.setDuration(180L)?.withEndAction {
+            snackbarView?.visibility = View.GONE
+        }?.start()
+    }
 
     /** 当前分页的内容容器；[section] 建的卡片挂进它。 */
     private var pageBody: LinearLayout? = null
@@ -258,18 +271,16 @@ class MainActivity : Activity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = getColor(R.color.feisuo_bg)
         window.navigationBarColor = getColor(R.color.feisuo_bg)
+        val isNight = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
         WindowInsetsControllerCompat(window, window.decorView).apply {
-            isAppearanceLightStatusBars = false
-            isAppearanceLightNavigationBars = false
+            isAppearanceLightStatusBars = !isNight
+            isAppearanceLightNavigationBars = !isNight
         }
     }
 
     /**
-     * 搭 App 外壳：固定 AppBar + 可切换的内容区 + 底部导航。
-     *
-     * 老版是「一个 ScrollView 里从上往下堆 8 张说明卡片」——功能都在，
-     * 但看起来是一张网页而不是一个 App。这里把信息按"用户当下要做什么"
-     * 分到三个分页，说明文字压到一行，技术细节默认折叠。
+     * 搭 App 外壳：固定 AppBar + 可切换的内容区（含 M3 Extended FAB & Snackbar）+ M3 底部导航。
      */
     private fun buildUi() {
         root = LinearLayout(this).apply {
@@ -287,24 +298,87 @@ class MainActivity : Activity() {
         root.addView(contentHost)
         buildBottomNav()
         buildPages()
+        buildOverlays()
 
-        // 状态栏 / 刘海 / 手势条的高度由系统给，不写死数值。
-        // AppBar 用品牌卡片色延伸到状态栏下方，手势条让给底栏。
         ViewCompat.setOnApplyWindowInsetsListener(root) { _view, insets ->
             val bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
             )
             appBar.setPadding(
-                dp(18) + bars.left, dp(14) + bars.top, dp(18) + bars.right, dp(14)
+                dp(18) + bars.left, dp(12) + bars.top, dp(18) + bars.right, dp(12)
             )
             contentHost.setPadding(bars.left, 0, bars.right, 0)
             bottomNav.setPadding(
-                bars.left, dp(10), bars.right, dp(8) + bars.bottom
+                bars.left, dp(8), bars.right, dp(8) + bars.bottom
             )
             insets
         }
         ViewCompat.requestApplyInsets(root)
         switchTab(0)
+    }
+
+    /** 悬浮于内容区之上的 M3 Extended FAB（发送文件）与底部 M3 Snackbar。 */
+    private fun buildOverlays() {
+        val fab = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundResource(R.drawable.bg_fab)
+            elevation = dp(6).toFloat()
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(18), dp(14), dp(20), dp(14))
+            setOnClickListener { startPickFilesToSend() }
+        }
+        val fabIcon = ImageView(this).apply {
+            setImageResource(R.drawable.ic_tab_transfer)
+            imageTintList = ColorStateList.valueOf(getColor(R.color.feisuo_on_accent))
+            layoutParams = LinearLayout.LayoutParams(dp(20), dp(20))
+        }
+        val fabLabel = TextView(this).apply {
+            text = "发送文件"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTextColor(getColor(R.color.feisuo_on_accent))
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            setPadding(dp(8), 0, 0, 0)
+        }
+        fab.addView(fabIcon)
+        fab.addView(fabLabel)
+        sendFab = fab
+        contentHost.addView(
+            fab,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.END
+            ).apply {
+                rightMargin = dp(16)
+                bottomMargin = dp(16)
+            }
+        )
+
+        val bar = TextView(this).apply {
+            visibility = View.GONE
+            alpha = 0f
+            setBackgroundResource(R.drawable.bg_snackbar)
+            elevation = dp(8).toFloat()
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setTextColor(getColor(R.color.feisuo_snackbar_text))
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            maxLines = 3
+        }
+        snackbarView = bar
+        contentHost.addView(
+            bar,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            ).apply {
+                leftMargin = dp(16)
+                rightMargin = dp(16)
+                bottomMargin = dp(14)
+            }
+        )
     }
 
     /** 顶部品牌栏：图标 + 名称 + 一行状态，右侧是可一眼看到的引擎状态。 */
@@ -352,7 +426,7 @@ class MainActivity : Activity() {
         ))
     }
 
-    /** 底部导航：三个真实可达的分页，选中项用品牌色。 */
+    /** M3 Navigation Bar：64x32dp 选中胶囊指示器 + 48dp+ 触控热区 + 水波纹。 */
     private fun buildBottomNav() {
         val divider = View(this).apply {
             setBackgroundColor(getColor(R.color.feisuo_card_stroke))
@@ -364,7 +438,7 @@ class MainActivity : Activity() {
         bottomNav = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(getColor(R.color.feisuo_card))
-            setPadding(0, dp(10), 0, dp(8))
+            setPadding(0, dp(8), 0, dp(8))
         }
         val labels = listOf("互传", "配对", "我的")
         val icons = listOf(
@@ -372,27 +446,39 @@ class MainActivity : Activity() {
             R.drawable.ic_tab_pair,
             R.drawable.ic_tab_me
         )
+        val rippleAttr = TypedValue()
+        theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, rippleAttr, true)
+
         for (i in labels.indices) {
             val item = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
+                minimumHeight = dp(56)
+                isClickable = true
+                isFocusable = true
+                if (rippleAttr.resourceId != 0) setBackgroundResource(rippleAttr.resourceId)
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 setOnClickListener { switchTab(i) }
             }
+            val indicator = FrameLayout(this).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(64), dp(32))
+            }
             val icon = ImageView(this).apply {
                 setImageResource(icons[i])
-                layoutParams = LinearLayout.LayoutParams(dp(22), dp(22))
+                layoutParams = FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER)
             }
+            indicator.addView(icon)
             val label = TextView(this).apply {
                 text = labels[i]
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 gravity = Gravity.CENTER
-                setPadding(0, dp(3), 0, 0)
+                setPadding(0, dp(4), 0, 0)
             }
-            item.addView(icon)
+            item.addView(indicator)
             item.addView(label)
             bottomNav.addView(item)
             navItems.add(item)
+            navIndicators.add(indicator)
             navIcons.add(icon)
             navLabels.add(label)
         }
@@ -410,7 +496,7 @@ class MainActivity : Activity() {
         }
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(24))
+            setPadding(dp(16), dp(12), dp(16), dp(88))
         }
         scroll.addView(body, ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
@@ -577,21 +663,141 @@ class MainActivity : Activity() {
         }.apply { visibility = View.GONE }
     }
 
-    /** 切换分页：内容只留当前页可见，导航项用品牌色标出选中态。 */
+    /** 切换分页：内容只留当前页可见，选中项呈现 M3 胶囊指示器与品牌色；互传页展示发送 FAB。 */
     private fun switchTab(index: Int) {
         for (i in pages.indices) {
             pages[i].visibility = if (i == index) View.VISIBLE else View.GONE
         }
+        sendFab?.visibility = if (index == 0) View.VISIBLE else View.GONE
         for (i in navItems.indices) {
+            val active = i == index
             val color = getColor(
-                if (i == index) R.color.feisuo_accent else R.color.feisuo_text_secondary
+                if (active) R.color.feisuo_accent else R.color.feisuo_text_secondary
+            )
+            navIndicators.getOrNull(i)?.setBackgroundResource(
+                if (active) R.drawable.bg_nav_indicator else 0
             )
             navIcons[i].imageTintList = ColorStateList.valueOf(color)
             navLabels[i].setTextColor(color)
             navLabels[i].typeface = Typeface.create(
-                Typeface.DEFAULT, if (i == index) Typeface.BOLD else Typeface.NORMAL
+                Typeface.DEFAULT, if (active) Typeface.BOLD else Typeface.NORMAL
             )
         }
+    }
+
+    /** 应用内「发送文件」入口（M3 Extended FAB）：先挑在线受信设备，再拉起系统多选文件器。 */
+    private fun startPickFilesToSend() {
+        if (!FeisuoRuntime.isEngineRunning()) {
+            toast("引擎未就绪，请稍后重试")
+            return
+        }
+        val onlinePaired = rosterRows.filter { it.isPaired && it.presence == "online" }
+        if (onlinePaired.isEmpty()) {
+            toast("没有在线的已配对设备，请先在「配对」页连接电脑")
+            return
+        }
+        if (onlinePaired.size == 1) {
+            pendingSendTarget = onlinePaired[0]
+            launchFilePicker()
+            return
+        }
+        val names = onlinePaired.map { "${it.name} (${it.ip.ifBlank { it.lastIp }})" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("选择发送目标")
+            .setItems(names) { _, which ->
+                pendingSendTarget = onlinePaired[which]
+                launchFilePicker()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun launchFilePicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        }
+        try {
+            @Suppress("DEPRECATION")
+            startActivityForResult(intent, REQUEST_PICK_FILES_TO_SEND)
+        } catch (e: Exception) {
+            toast("无法打开系统文件选择器：${e.message}")
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_PICK_FILES_TO_SEND || resultCode != RESULT_OK || data == null) return
+        val target = pendingSendTarget ?: return
+        val uris = mutableListOf<Uri>()
+        data.clipData?.let { clip ->
+            for (i in 0 until clip.itemCount) {
+                clip.getItemAt(i).uri?.let { uris.add(it) }
+            }
+        }
+        data.data?.let { if (!uris.contains(it)) uris.add(it) }
+        if (uris.isEmpty()) return
+
+        toast("正在发送 ${uris.size} 个文件到「${target.name}」…")
+        val appCtx = applicationContext
+        Thread({
+            val batchDir = File(FeisuoRuntime.stagingDir(appCtx), "pick_${System.currentTimeMillis()}")
+            if (!batchDir.exists()) batchDir.mkdirs()
+            val stagedPaths = mutableListOf<String>()
+            val usedNames = mutableSetOf<String>()
+            for (uri in uris) {
+                runCatching {
+                    val base = resolvePickerDisplayName(uri)
+                    var unique = base
+                    var seq = 1
+                    while (!usedNames.add(unique)) {
+                        val dot = base.lastIndexOf('.')
+                        unique = if (dot > 0) {
+                            "${base.substring(0, dot)}_$seq${base.substring(dot)}"
+                        } else {
+                            "${base}_$seq"
+                        }
+                        seq++
+                    }
+                    val outFile = File(batchDir, unique)
+                    contentResolver.openInputStream(uri)?.use { input ->
+                        outFile.outputStream().use { output -> input.copyTo(output) }
+                    }
+                    if (outFile.isFile) stagedPaths.add(outFile.absolutePath)
+                }
+            }
+            if (stagedPaths.isEmpty()) {
+                runCatching { batchDir.deleteRecursively() }
+                toast("无法读取所选文件")
+                return@Thread
+            }
+            val ip = target.ip.ifBlank { target.lastIp }
+            val port = if (target.port > 0) target.port else 42100
+            val err = runCatching {
+                NativeBridge.sendFiles(ip, port, target.id, target.name, stagedPaths.toTypedArray())
+            }.getOrElse { "发送失败：${it.message}" }
+            runCatching { batchDir.deleteRecursively() }
+            if (err == null) {
+                toast("已发送 ${stagedPaths.size} 个文件到「${target.name}」")
+            } else {
+                toast("发送失败：$err")
+            }
+        }, "feisuo-pick-send").apply { isDaemon = true }.start()
+    }
+
+    private fun resolvePickerDisplayName(uri: Uri): String {
+        val raw = runCatching {
+            contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx) else null
+            }
+        }.getOrNull()
+        val base = raw?.takeIf { it.isNotBlank() }
+            ?: uri.lastPathSegment?.substringAfterLast('/')
+            ?: "file_${System.currentTimeMillis()}"
+        return base.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), "_").take(120)
     }
 
     /**
@@ -1863,10 +2069,18 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 单行输入框, 配对表单用 */
-    private fun addInput(label: String, hint: String): EditText =
-        EditText(this).apply {
-            this.hint = "$label · $hint"
+    /** 单行输入框（外置字段标签，输入文字后字段名仍清晰可见） */
+    private fun addInput(label: String, hint: String): EditText {
+        val caption = TextView(this).apply {
+            text = label
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextColor(getColor(R.color.feisuo_text_secondary))
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            setPadding(dp(2), 0, 0, dp(4))
+        }
+        addToSection(caption, top = dp(10))
+        return EditText(this).apply {
+            this.hint = hint
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             setTextColor(getColor(R.color.feisuo_text_primary))
             setHintTextColor(getColor(R.color.feisuo_text_tertiary))
@@ -1875,7 +2089,8 @@ class MainActivity : Activity() {
             backgroundTintList = null
             setPadding(dp(14), dp(12), dp(14), dp(12))
             minHeight = dp(48)
-        }.also { addToSection(it, top = dp(10)) }
+        }.also { addToSection(it, top = dp(2)) }
+    }
 
     /**
      * 统一样式的操作按钮。
@@ -1907,7 +2122,16 @@ class MainActivity : Activity() {
 
     private fun toast(msg: String) {
         runOnUiThread {
-            if (!isFinishing && !isDestroyed) {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            val bar = snackbarView
+            if (bar != null) {
+                ui.removeCallbacks(hideSnackbarRunnable)
+                bar.text = msg
+                bar.visibility = View.VISIBLE
+                bar.animate().cancel()
+                bar.animate().alpha(1f).setDuration(150L).start()
+                ui.postDelayed(hideSnackbarRunnable, 2800L)
+            } else {
                 Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
             }
         }

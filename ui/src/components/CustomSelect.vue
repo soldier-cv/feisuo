@@ -226,21 +226,13 @@ onBeforeUnmount(() => {
 
 .custom-select-trigger {
   width: 100%;
-  height: 38px;
-  /* 底色必须与 `.standard-text-input` 一致（`--bg-inset`）。
-   *
-   * 早先这里是 `--bg-card`(#20222b)，而同一列里的设备名输入框是
-   * `--bg-inset`(#16181f) —— 两个并排的控件深浅不同，看起来像
-   * 一个是可编辑的、一个不是，而它们其实是同一层级的设置项。 */
+  height: 36px;
   background: var(--bg-inset);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md, 8px);
+  border-radius: var(--radius-md);
   color: var(--text-primary);
   padding: 0 12px;
-  font-size: 13px;
-  /* `text-align` 必须显式给 left：按钮的 UA 默认是 center，
-   * 它会**穿透**到 .custom-select-label 之前的那一层盒子，
-   * 在窄宽度下把选项文字推到中间。 */
+  font-size: var(--fs-body);
   text-align: left;
   display: flex;
   align-items: center;

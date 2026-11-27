@@ -1,21 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 品牌色：与桌面端 ui/src/style.css 的窗口底色、卡片底色与强调色同源 -->
-    <color name="feisuo_bg">#121318</color>
-    <color name="feisuo_card">#1B1E26</color>
-    <color name="feisuo_card_stroke">#2A2E39</color>
-    <color name="feisuo_input">#14161C</color>
-    <color name="feisuo_input_stroke">#2A2E39</color>
-    <color name="feisuo_accent">#2FBF8A</color>
-    <color name="feisuo_accent_dark">#26A375</color>
-    <color name="feisuo_accent_disabled">#1E4A3A</color>
-    <color name="feisuo_on_accent">#042417</color>
-    <color name="feisuo_text_primary">#E8ECF3</color>
-    <color name="feisuo_text_secondary">#9AA4B2</color>
-    <color name="feisuo_text_tertiary">#6B7686</color>
-    <color name="feisuo_danger">#FF6B6B</color>
+    <!-- Material Design 3 浅色主题令牌（与桌面端 style.css 浅色主题同源） -->
+    <color name="feisuo_bg">#F4F7F5</color>
+    <color name="feisuo_card">#FFFFFF</color>
+    <color name="feisuo_card_stroke">#DCE4E0</color>
+    <color name="feisuo_input">#EEF3F0</color>
+    <color name="feisuo_input_stroke">#C8D4CE</color>
+    <color name="feisuo_accent">#006C4C</color>
+    <color name="feisuo_accent_dark">#005239</color>
+    <color name="feisuo_accent_soft">#1F006C4C</color>
+    <color name="feisuo_accent_disabled">#B8CCC4</color>
+    <color name="feisuo_on_accent">#FFFFFF</color>
+    <color name="feisuo_on_accent_disabled">#56635C</color>
+    <color name="feisuo_text_primary">#171D1A</color>
+    <color name="feisuo_text_secondary">#434F49</color>
+    <color name="feisuo_text_tertiary">#56635C</color>
+    <color name="feisuo_danger">#BA1A1A</color>
+    <color name="feisuo_btn_secondary_bg">#FFFFFF</color>
+    <color name="feisuo_btn_secondary_pressed">#E4ECE7</color>
+    <color name="feisuo_btn_secondary_disabled">#EDF2EF</color>
+    <color name="feisuo_ripple">#22006C4C</color>
+    <color name="feisuo_snackbar_bg">#242B28</color>
+    <color name="feisuo_snackbar_text">#EDF2EF</color>
 
-    <!-- 启动图标背景（自适应图标 background 层使用渐变矢量，这里保留同色兜底） -->
+    <!-- 启动图标背景 -->
     <color name="ic_launcher_background">#0B1322</color>
     <color name="ic_stat_white">#FFFFFFFF</color>
 </resources>

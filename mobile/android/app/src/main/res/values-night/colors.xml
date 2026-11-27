@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material Design 3 深色主题令牌（与桌面端 style.css 深色主题同源） -->
+    <color name="feisuo_bg">#111413</color>
+    <color name="feisuo_card">#1C211F</color>
+    <color name="feisuo_card_stroke">#2C3330</color>
+    <color name="feisuo_input">#0E1110</color>
+    <color name="feisuo_input_stroke">#2C3330</color>
+    <color name="feisuo_accent">#38C996</color>
+    <color name="feisuo_accent_dark">#2BB081</color>
+    <color name="feisuo_accent_soft">#2838C996</color>
+    <color name="feisuo_accent_disabled">#1D3B30</color>
+    <color name="feisuo_on_accent">#002116</color>
+    <color name="feisuo_on_accent_disabled">#6C857B</color>
+    <color name="feisuo_text_primary">#EDF2EF</color>
+    <color name="feisuo_text_secondary">#A8B5AE</color>
+    <color name="feisuo_text_tertiary">#92A199</color>
+    <color name="feisuo_danger">#FF7A7A</color>
+    <color name="feisuo_btn_secondary_bg">#1C211F</color>
+    <color name="feisuo_btn_secondary_pressed">#242A27</color>
+    <color name="feisuo_btn_secondary_disabled">#151918</color>
+    <color name="feisuo_ripple">#2838C996</color>
+    <color name="feisuo_snackbar_bg">#E5EDE9</color>
+    <color name="feisuo_snackbar_text">#171D1A</color>
+</resources>

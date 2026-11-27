@@ -1,18 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!--
-      深色主题：界面由 MainActivity 手写原生控件，颜色全部取自 colors.xml。
-
-      以前用的是 Theme.DeviceDefault.Light.NoActionBar + 白色文字 ——
-      浅色窗口配白字，整个页面在真机上基本看不见。这里换成深色主题
-      并显式指定窗口底色与系统栏颜色，保证状态栏 / 导航栏和内容连成一片。
-    -->
-    <style name="Theme.Feisuo" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+    <!-- 跟随系统深浅色切换（DayNight），系统栏图标明暗由 MainActivity 动态同步 -->
+    <style name="Theme.Feisuo" parent="@android:style/Theme.DeviceDefault.DayNight.NoActionBar">
         <item name="android:windowBackground">@color/feisuo_bg</item>
         <item name="android:statusBarColor">@color/feisuo_bg</item>
         <item name="android:navigationBarColor">@color/feisuo_bg</item>
-        <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowLightNavigationBar">false</item>
         <item name="android:colorAccent">@color/feisuo_accent</item>
     </style>
 </resources>

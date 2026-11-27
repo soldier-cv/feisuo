@@ -1,28 +1,30 @@
 <template>
-  <div class="desktop-shell" :data-theme="store.theme">
-    <!-- 1. Windows 原生标题栏 -->
+  <div class="desktop-shell" :class="{ 'is-rail': sidebarCollapsed }" :data-theme="store.theme">
+    <!-- 1. 极简标题栏（M3 桌面顶栏） -->
     <header class="app-titlebar">
       <div class="titlebar-drag-area" data-tauri-drag-region>
+        <button
+          type="button"
+          class="rail-toggle-btn"
+          :aria-expanded="!sidebarCollapsed"
+          :title="sidebarCollapsed ? '展开设备侧栏' : '收起设备侧栏'"
+          @mousedown.stop
+          @click.stop="sidebarCollapsed = !sidebarCollapsed"
+        >
+          <i class="ph ph-sidebar-simple"></i>
+        </button>
         <div class="brand-badge">
           <img src="/favicon.svg" alt="飞梭" class="brand-logo-img" />
         </div>
-        <!--
-          h1 = 应用本身。此前全篇没有 h1，标题从 h3 起跳：
-          屏幕阅读器按标题跳转的用户拿不到任何顶层锚点，
-          也无从判断「我现在在哪个应用里」。
-          改成 h1 在视觉上零影响 —— .titlebar-drag-area 是 flex 容器，
-          span 与 h1 都是 flex 项，块级化行为一致；.brand-text 自己
-          声明了 font-size/font-weight/letter-spacing，而 margin 已由
-          `* { margin: 0 }` 全局归零。
-        -->
         <h1 class="brand-text">飞梭 Feisuo</h1>
-        <div class="lan-network-chip">
-          <span class="live-dot"></span>
-          <span>局域网在线 · {{ localInfo.local_ip }}</span>
-        </div>
+        <span
+          class="titlebar-status-dot"
+          :class="{ online: engineOnline }"
+          :title="engineOnline ? `局域网在线 · ${localInfo.local_ip}` : '服务未就绪'"
+        ></span>
       </div>
 
-      <!-- 原生 caption 按钮: 关闭会先弹"最小化 / 退出"选择框 -->
+      <!-- 窗口控制区 -->
       <div class="caption-controls" @mousedown.stop>
         <button class="caption-btn" @click.stop="toggleTheme" title="切换深色/浅色外观">
           <i :class="store.theme === 'dark' ? 'ph ph-sun' : 'ph ph-moon'"></i>
@@ -40,186 +42,130 @@
     </header>
 
     <!-- 2. 主区域 -->
-    <div class="app-container">
-      <!-- 左侧: 本机 + 设备列表 -->
-      <aside class="app-sidebar">
+    <div class="app-container" :class="{ 'is-rail': sidebarCollapsed }">
+      <!-- 左侧: 本机状态 + 设备列表（支持收起为 M3 Compact Rail） -->
+      <aside class="app-sidebar" :class="{ 'is-rail': sidebarCollapsed }">
         <div
           class="local-machine-card"
-          :class="{ selected: currentTab === 'settings' }"
           v-key-activate
           role="button"
           tabindex="0"
-          :aria-pressed="currentTab === 'settings'"
-          @click="currentTab = 'settings'"
-          title="系统设置"
+          :title="`${localInfo.device_name || '本机电脑'} · ${localInfo.local_ip}（点击复制 IP）`"
+          @click="copyText(localInfo.local_ip)"
         >
-          <div class="local-icon">{{ (localInfo.device_name || 'H').slice(0, 1).toUpperCase() }}</div>
-          <div class="local-meta">
+          <div class="local-icon">
+            {{ (localInfo.device_name || 'H').slice(0, 1).toUpperCase() }}
+            <span class="avatar-presence-dot" :class="{ online: engineOnline }"></span>
+          </div>
+          <div v-if="!sidebarCollapsed" class="local-meta">
             <strong class="machine-name">{{ localInfo.device_name || '本机电脑' }}</strong>
             <span class="daemon-status">
               <span class="mini-status-dot" :class="{ active: engineOnline }"></span>
-              {{ engineOnline ? '在线 · ' + localInfo.local_ip : '守护进程未就绪' }}
+              {{ engineOnline ? localInfo.local_ip : '服务未就绪' }}
             </span>
           </div>
-          <!--
-            这里原来有个齿轮按钮，与整块卡片的点击行为**完全重复**
-            （两者都是 `currentTab = 'settings'`），而页签里已经有「系统设置」。
-            同一目的地放两个入口只增加决策成本：用户要判断"这两个有什么区别"。
-            已删除。
-          -->
-        </div>
-
-        <div class="sidebar-title-bar">
-          <span>我的设备 ({{ store.myDevices.length }})</span>
-          <div class="sidebar-header-actions">
-            <button class="icon-action-btn" @click="openDirectConnectModal" title="直连 IP">
-              <i class="ph ph-plus"></i>
-            </button>
-            <button class="icon-action-btn" @click="refreshDevices()" title="刷新设备">
-              <i class="ph ph-arrows-clockwise" :class="{ spinning: isRefreshing }"></i>
-            </button>
-          </div>
+          <i v-if="!sidebarCollapsed" class="ph ph-copy local-copy-icon" aria-hidden="true"></i>
         </div>
 
         <div class="devices-scroll-area">
-          <!--
-            原生拖放期间，按光标位置自动聚焦最近的一张卡片（放大 + 描边），
-            其余卡片淡化。窗口被遮挡时用户未必看得到光标压在哪张卡片上；
-            聚焦跟随光标上下移动，松手即发给聚焦的那台，落点始终明确。
-
-            这里曾有一条绿底提示「松手即发到光标下的设备」。删掉的原因：
-            「拖到目标上松手」是系统级约定，卡片高亮已经把动作说完了，
-            再补一行字属于把约定俗成的操作解释一遍；提示条还占掉列表顶部
-            一行，把设备卡片往下推，拖放时列表在动。
-
-            `role="status"` 保留，但只做**视觉隐藏**：屏幕阅读器拿不到
-            "卡片放大了"这个视觉信号，需要一句话替代；看得见的用户不需要。
-          -->
           <span v-if="isNativeFileDrag" class="view-heading-sr" role="status">
             松手即发到光标下的设备
           </span>
-          <!--
-            分组而不是一锅端（§3.7）：「我的设备」= 信任库全量, **含离线**
-            （灰显 + 上次在线时间）, 永不消失；「其他」= 仅在线的未配对设备, 可折叠。
-          -->
+
+          <!-- 分组头（合并原重复标题与操作图标） -->
           <div class="roster-group-head">
-            <span class="roster-group-title"><i class="ph-bold ph-shield-check"></i> 我的设备</span>
-            <span class="roster-group-count">{{ store.myDevices.length }}</span>
+            <span v-if="!sidebarCollapsed" class="roster-group-title">
+              我的设备
+              <span class="roster-group-count">{{ store.myDevices.length }}</span>
+            </span>
+            <div class="sidebar-header-actions">
+              <button class="icon-action-btn" @click="openDirectConnectModal" title="直连 IP">
+                <i class="ph ph-plus"></i>
+              </button>
+              <button class="icon-action-btn" @click="refreshDevices()" title="刷新设备">
+                <i class="ph ph-arrows-clockwise" :class="{ spinning: isRefreshing }"></i>
+              </button>
+            </div>
           </div>
+
           <div
             v-for="dev in store.myDevices"
             :key="dev.device_id"
             class="device-card-row"
             :data-device-id="dev.device_id"
+            :title="sidebarCollapsed ? `${dev.device_name || dev.last_ip} · ${dev.presence === 'online' ? '在线' : '离线'}` : undefined"
             :class="{
               active: dev.device_id === store.selectedDeviceId && currentTab !== 'settings',
               offline: dev.presence !== 'online',
-              // §5.1 目标即动作：按光标位置就近聚焦, 松手发给聚焦的那台
               'drop-target': dragOverDeviceId === dev.device_id && canDropTo(dev),
               'drop-blocked': dragOverDeviceId === dev.device_id && !canDropTo(dev),
-              // 拖拽期间非聚焦卡片淡化，让当前目标一眼可辨
               'drag-dimmed': isNativeFileDrag && !!dragOverDeviceId && dragOverDeviceId !== dev.device_id,
             }"
-
             v-key-activate
             role="button"
             tabindex="0"
             :aria-pressed="dev.device_id === store.selectedDeviceId"
             :aria-disabled="dev.presence !== 'online'"
             @click="selectDevice(dev.device_id)"
+            @contextmenu.prevent="openDeviceMenu(dev, $event)"
             @dragover.prevent="onDeviceDragOver($event, dev)"
             @dragleave="onDeviceDragLeave(dev)"
             @drop.prevent="onDeviceDrop($event, dev)"
           >
             <div class="os-icon-box">
               <i :class="getOsIcon(dev.os_type)"></i>
+              <span
+                class="avatar-presence-dot"
+                :class="{ online: dev.presence === 'online', reconnecting: dev.presence === 'reconnecting' }"
+              ></span>
             </div>
-            <div class="device-text-col">
+            <div v-if="!sidebarCollapsed" class="device-text-col">
               <div class="device-line1">
                 <span class="device-title">{{ dev.device_name || dev.last_ip || '未知设备' }}</span>
+                <i
+                  v-if="dev.trust_level === 'permanent'"
+                  class="ph-fill ph-shield-check device-trust-glyph trusted"
+                  title="永久信任"
+                ></i>
+                <i
+                  v-else-if="dev.trust_level === 'session'"
+                  class="ph-bold ph-key device-trust-glyph session"
+                  title="每次验证"
+                ></i>
+                <i
+                  v-if="dev.trust_level === 'session' && activeGrants[dev.device_id]?.length"
+                  class="ph-bold ph-timer device-trust-glyph grant"
+                  :title="activeGrants[dev.device_id].map((g) => `${g.scope_label}免确认至 ${humanizeUntil(g.expires_at)}`).join('；')"
+                ></i>
               </div>
               <div class="device-line2">
                 <template v-if="dev.presence === 'online'">{{ dev.ip || dev.last_ip }} · 在线</template>
                 <template v-else-if="dev.presence === 'reconnecting'">{{ dev.last_ip }} · 重连中…</template>
-                <template v-else>{{ dev.last_ip || '地址未知' }} · 离线 · 上次在线 {{ dev.last_seen_human }}</template>
+                <template v-else>离线 · {{ dev.last_seen_human || dev.last_ip || '未知' }}</template>
               </div>
             </div>
 
-            <div class="device-action-badge">
-              <!-- 信任等级（§2.4）：点击在「永久信任 / 每次验证」之间切换 -->
+            <div v-if="!sidebarCollapsed" class="device-action-badge">
               <button
-                v-if="dev.trust_level === 'permanent'"
-                class="trust-badge clickable"
-                title="永久信任：点击改为「每次验证」"
-                @click.stop="toggleTrustLevel(dev.device_id)"
+                type="button"
+                class="device-menu-trigger"
+                :class="{ 'is-open': deviceMenuDev?.device_id === dev.device_id }"
+                :aria-label="`管理 ${dev.device_name || '该设备'}`"
+                :aria-expanded="deviceMenuDev?.device_id === dev.device_id"
+                title="更多操作"
+                @click.stop="openDeviceMenu(dev, $event)"
               >
-                <i class="ph-bold ph-shield-check"></i> 永久信任
-              </button>
-              <button
-                v-else-if="dev.trust_level === 'session'"
-                class="trust-badge session clickable"
-                :title="
-                  activeGrants[dev.device_id]?.length
-                    ? `每次验证。${activeGrants[dev.device_id].map((g) => g.scope_label).join('、')}已免重复确认至 ${humanizeUntil(activeGrants[dev.device_id][0].expires_at)}。点击改为「永久信任」`
-                    : '每次验证：对方每次操作本机都需授权码。点击改为「永久信任」'
-                "
-                @click.stop="toggleTrustLevel(dev.device_id)"
-              >
-                <i class="ph-bold ph-key"></i> 每次验证
-              </button>
-              <!--
-                生效中的短期授权（§2.3.1）：必须**看得见、关得掉**。
-
-                刻意做成**兄弟**按钮，而不是在徽标里嵌一个可点的 `<span>`：
-                ① 按钮里套按钮是**无效 HTML**；
-                ② `<span @click>` **键盘不可达** —— Tab 走不到、Enter 没反应，
-                   而「关掉授权」恰恰是**只能用手点**的路径。
-
-                这不是我想到了才改的，是守卫
-                `clickable_non_button_elements_must_be_keyboard_reachable`
-                实测报红才改的 —— 可见性做了一半（看得见）、
-                可撤销做成了鼠标专属。
-              -->
-              <button
-                v-if="dev.trust_level === 'session' && activeGrants[dev.device_id]?.length"
-                class="grant-active-dot"
-                :aria-label="`取消 ${dev.device_name} 的免重复确认`"
-                :title="
-                  activeGrants[dev.device_id]
-                    .map((g) => `${g.scope_label}免确认至 ${humanizeUntil(g.expires_at)}`)
-                    .join('；') + '。点击立即取消'
-                "
-                @click.stop="revokeDeviceGrants(dev.device_id, dev.device_name)"
-              >
-                <i class="ph-bold ph-timer"></i>
-              </button>
-              <!-- 隐藏（§3.1）：不想再看到它，但保留已建立的信任与推送 -->
-              <button
-                class="hide-device-btn"
-                title="隐藏该设备（仍可接收其推送）"
-                @click.stop="hideDevice(dev.device_id)"
-              >
-                <i class="ph ph-eye-slash"></i>
-              </button>
-              <!-- 删除记录：改过名字后残留的旧条目只能靠它清掉。
-                   与「隐藏」「解除配对」是三个互不替代的动作。 -->
-              <button
-                class="delete-device-btn"
-                title="删除该设备记录"
-                :aria-label="`删除 ${dev.device_name || '该设备'} 的设备记录`"
-                @click.stop="confirmDeleteDevice(dev)"
-              >
-                <i class="ph ph-trash"></i>
+                <i class="ph-bold ph-dots-three-vertical"></i>
               </button>
             </div>
           </div>
 
-          <div v-if="store.myDevices.length === 0" class="roster-empty-hint">
-            还没有配对设备，在「其他设备」里点「配对」。
+          <div v-if="!sidebarCollapsed && store.myDevices.length === 0 && store.roster.length > 0" class="roster-empty-hint">
+            还没有配对设备，在下方「附近设备」中点「配对」。
           </div>
 
           <div
-            v-if="store.nearbyDevices.length > 0"
+            v-if="store.nearbyDevices.length > 0 && !sidebarCollapsed"
             class="roster-group-head collapsible"
             v-key-activate
             role="button"
@@ -229,17 +175,18 @@
           >
             <span class="roster-group-title">
               <i class="ph ph-caret-right" :class="{ rotated: !store.othersCollapsed }"></i>
-              其他设备
+              附近设备
             </span>
             <span class="roster-group-count">{{ store.nearbyDevices.length }}</span>
           </div>
 
           <div
             v-for="dev in store.nearbyDevices"
-            v-show="!store.othersCollapsed"
+            v-show="!store.othersCollapsed || sidebarCollapsed"
             :key="dev.device_id"
             class="device-card-row nearby"
             :data-device-id="dev.device_id"
+            :title="sidebarCollapsed ? `${dev.device_name || dev.ip} · 未配对` : undefined"
             v-key-activate
             role="button"
             tabindex="0"
@@ -248,25 +195,19 @@
           >
             <div class="os-icon-box">
               <i :class="getOsIcon(dev.os_type)"></i>
+              <span class="avatar-presence-dot online"></span>
             </div>
-            <div class="device-text-col">
+            <div v-if="!sidebarCollapsed" class="device-text-col">
               <div class="device-line1"><span class="device-title">{{ dev.device_name || dev.ip || '未知设备' }}</span></div>
-              <div class="device-line2">{{ dev.ip }} · 在线</div>
+              <div class="device-line2">{{ dev.ip }} · 未配对</div>
             </div>
-            <div class="device-action-badge">
+            <div v-if="!sidebarCollapsed" class="device-action-badge">
               <button class="btn-quick-pair" @click.stop="pairDevice(dev)">配对</button>
             </div>
           </div>
 
-          <div v-if="store.roster.length === 0" class="discovery-empty-state">
+          <div v-if="store.roster.length === 0 && !sidebarCollapsed" class="discovery-empty-state">
             <div class="radar-pulse-ring"><i class="ph ph-broadcast"></i></div>
-            <!--
-              这里原本是 <h4>，但它不是章节标题 —— 是一句**会变的状态提示**。
-              设备一搜到，这个元素整个消失，它作为标题就会在大纲里
-              凭空出现又凭空消失：按标题跳转的用户会撞到一个不存在的锚点。
-              改成 role="status" 的段落，状态变化仍会被朗读（aria-live=polite），
-              但不再污染文档大纲。
-            -->
             <p role="status" class="discovery-status-text">正在搜索附近设备…</p>
             <div class="empty-actions-row">
               <button class="btn-clean-primary" @click="openDirectConnectModal">
@@ -276,43 +217,6 @@
                 <i class="ph ph-key"></i> 配对码
               </button>
             </div>
-            <!--
-              防火墙引导。
-
-              为什么需要它（实测得来的，不是设想的）：首次运行绿色版时，
-              Windows 会弹出「是否要允许 feisuo-desktop.exe 访问网络」。
-              用户不点"允许"，这台机器就**收不到任何文件**，而界面上
-              只会一直转着"正在搜索附近设备…" —— 没有任何地方说明原因。
-
-              而**升级之后还会再弹一次**：Windows 防火墙规则按**程序路径**
-              匹配，绿色版每次更新 exe 都会换掉路径，于是规则失效、
-              需要重新授权。所以这不是"装一次点一次"就忘了的事。
-
-              为什么**不自动改防火墙**：改防火墙要管理员权限，而且用户
-              有权知道自己的机器上被放行了什么 —— 静默加规则等于
-              绕过他们的判断。所以这里只说清"要做什么"和"为什么"。
-
-              只在"搜了很久还一台都没有"时出现，不打扰正常用户。
-            -->
-            <!--
-              防火墙引导 —— **默认折叠成一行**。
-
-              ## 为什么必须收起来
-
-              这段说明有 5 行、含「Windows 安全中心 → 防火墙和网络保护 →
-              允许应用通过防火墙」这种必须逐字对照的步骤，**本质是一段
-              操作指南**。而它被放在 213px 宽的侧栏里：实测整块 **213×288**，
-              把设备列表直接挤出了首屏，文字也被压成每行 6~8 个字。
-
-              用户此刻的诉求是"设备在哪"，不是"读一篇防火墙教程"。
-              所以只留一行结论（+ 一个"怎么修"），要看细节再展开。
-
-              ## 为什么不删掉
-
-              首次运行 / 绿色版每次升级后，Windows 都会重新询问一次；
-              点了"拒绝"的用户**收不到任何文件**，而界面上只会一直转
-              "正在搜索附近设备…"。没有这段提示，这个故障无从排查。
-            -->
             <div v-if="showFirewallHint" class="firewall-hint">
               <button
                 type="button"
@@ -326,12 +230,10 @@
               </button>
               <div v-if="showFirewallDetail" class="firewall-hint-body">
                 <p>
-                  首次运行与每次升级后，Windows 都会询问是否允许本程序访问网络。
-                  没点「允许」的话，本机<strong>收不到</strong>任何文件。
+                  首次运行或升级后，请在 Windows 防火墙弹窗点击「允许」，否则本机<strong>无法接收</strong>文件。
                 </p>
                 <p class="firewall-hint-how">
-                  若已弹过窗且点了拒绝：开始菜单搜「Windows 安全中心」→
-                  防火墙和网络保护 → 允许应用通过防火墙 → 勾选
+                  手动放行：Windows 安全中心 → 防火墙和网络保护 → 允许应用通过防火墙 → 勾选
                   <code>feisuo-desktop</code>。
                 </p>
               </div>
@@ -340,10 +242,9 @@
         </div>
 
         <div class="sidebar-pinned-footer">
-          <!-- 已隐藏抽屉（§3.1）：隐藏是**纯显示**偏好，与信任强度正交 -->
           <button
-            v-if="store.hiddenDevices.length > 0 || showHiddenDrawer"
-            class="btn-open-pairing hidden-drawer-toggle"
+            v-if="!sidebarCollapsed && (store.hiddenDevices.length > 0 || showHiddenDrawer)"
+            class="btn-sidebar-nav hidden-drawer-toggle"
             @click="showHiddenDrawer = !showHiddenDrawer"
           >
             <i class="ph ph-eye-slash"></i>
@@ -351,9 +252,9 @@
             <i class="ph ph-caret-down" :class="{ rotated: showHiddenDrawer }"></i>
           </button>
 
-          <div v-if="showHiddenDrawer && store.hiddenDevices.length > 0" class="hidden-drawer">
+          <div v-if="!sidebarCollapsed && showHiddenDrawer && store.hiddenDevices.length > 0" class="hidden-drawer">
             <p class="hidden-drawer-hint">
-              隐藏只是不再显示，<strong>信任与接收都保留</strong>。
+              已隐藏设备仍保留信任与接收权限。
             </p>
             <div
               v-for="dev in store.hiddenDevices"
@@ -363,19 +264,24 @@
               <div class="device-text-col">
                 <div class="device-line1"><span class="device-title">{{ dev.device_name || dev.last_ip || '未知设备' }}</span></div>
                 <div class="device-line2">
-                  {{ dev.presence === 'online' ? '在线' : '离线 · 上次在线 ' + dev.last_seen_human }}
+                  {{ dev.presence === 'online' ? '在线' : '离线 · ' + dev.last_seen_human }}
                 </div>
               </div>
-              <button class="btn-quick-pair" @click="store.toggleHidden(dev.device_id)">取消隐藏</button>
+              <button class="btn-quick-pair" @click="store.toggleHidden(dev.device_id)">恢复</button>
               <button class="hidden-row-delete-btn" @click.stop="confirmDeleteDevice(dev)">删除</button>
             </div>
           </div>
 
-          <button class="btn-open-pairing" @click="openPairModal('show')">
+          <button
+            class="btn-open-pairing"
+            :title="sidebarCollapsed ? '设备配对码' : undefined"
+            @click="openPairModal('show')"
+          >
             <i class="ph-bold ph-qr-code"></i>
-            <span>配对码</span>
+            <span v-if="!sidebarCollapsed">设备配对</span>
           </button>
-          <div class="save-dir-card">
+
+          <div v-if="!sidebarCollapsed" class="save-dir-card">
             <div class="dir-header">
               <span>保存目录</span>
               <button type="button" class="dir-open-btn" @click="openReceiveFolder">打开</button>
@@ -391,114 +297,238 @@
               {{ localInfo.receive_dir }}
             </div>
           </div>
+
+          <button
+            type="button"
+            class="btn-sidebar-nav settings-nav-btn"
+            :class="{ active: currentTab === 'settings' }"
+            :aria-pressed="currentTab === 'settings'"
+            :title="sidebarCollapsed ? '系统设置' : undefined"
+            @click="currentTab = 'settings'"
+          >
+            <i class="ph-bold ph-gear-six"></i>
+            <span v-if="!sidebarCollapsed">系统设置</span>
+          </button>
         </div>
       </aside>
 
+      <!-- 统一设备操作溢出菜单（M3 Menu，position: fixed 避免被滚动容器裁剪） -->
+      <div
+        v-if="deviceMenuDev"
+        class="device-menu-surface"
+        role="menu"
+        :style="{ top: deviceMenuPos.top + 'px', left: deviceMenuPos.left + 'px' }"
+      >
+        <div class="device-menu-header">
+          <span class="device-menu-name">{{ deviceMenuDev.device_name || deviceMenuDev.last_ip || '未知设备' }}</span>
+          <span class="device-menu-sub">{{ deviceMenuDev.ip || deviceMenuDev.last_ip || '地址未知' }}</span>
+        </div>
+        <div class="device-menu-divider"></div>
+        <button
+          v-if="deviceMenuDev.trust_level === 'permanent' || deviceMenuDev.trust_level === 'session'"
+          type="button"
+          class="device-menu-item"
+          role="menuitem"
+          @click="handleMenuToggleTrust(deviceMenuDev)"
+        >
+          <i :class="deviceMenuDev.trust_level === 'permanent' ? 'ph ph-key' : 'ph ph-shield-check'"></i>
+          <span>{{ deviceMenuDev.trust_level === 'permanent' ? '改为每次验证' : '设为永久信任' }}</span>
+        </button>
+        <button
+          v-if="deviceMenuDev.trust_level === 'session' && activeGrants[deviceMenuDev.device_id]?.length"
+          type="button"
+          class="device-menu-item"
+          role="menuitem"
+          @click="handleMenuRevokeGrants(deviceMenuDev)"
+        >
+          <i class="ph ph-timer"></i>
+          <span>取消免重复确认</span>
+        </button>
+        <button
+          type="button"
+          class="device-menu-item"
+          role="menuitem"
+          @click="handleMenuOpenScope(deviceMenuDev)"
+        >
+          <i class="ph ph-sliders-horizontal"></i>
+          <span>访问范围</span>
+          <span v-if="deviceMenuDev.device_id === store.selectedDeviceId && scopeIsRestricted" class="menu-item-tag warn">已限制</span>
+        </button>
+        <button
+          v-if="deviceMenuDev.device_id === store.selectedDeviceId && deviceEndpoints.length > 0"
+          type="button"
+          class="device-menu-item"
+          role="menuitem"
+          @click="handleMenuToggleEndpoints"
+        >
+          <i class="ph ph-signpost"></i>
+          <span>连接路径</span>
+          <span class="menu-item-tag">{{ currentEndpointLabel }}</span>
+        </button>
+        <div class="device-menu-divider"></div>
+        <button
+          type="button"
+          class="device-menu-item"
+          role="menuitem"
+          @click="handleMenuHideDevice(deviceMenuDev)"
+        >
+          <i class="ph ph-eye-slash"></i>
+          <span>隐藏设备</span>
+        </button>
+        <button
+          v-if="deviceMenuDev.is_paired || deviceMenuDev.trust_level === 'permanent' || deviceMenuDev.trust_level === 'session'"
+          type="button"
+          class="device-menu-item is-danger"
+          role="menuitem"
+          @click="handleMenuUnpairDevice(deviceMenuDev)"
+        >
+          <i class="ph ph-shield-slash"></i>
+          <span>取消认证</span>
+        </button>
+        <button
+          type="button"
+          class="device-menu-item is-danger"
+          role="menuitem"
+          @click="handleMenuDeleteDevice(deviceMenuDev)"
+        >
+          <i class="ph ph-trash"></i>
+          <span>删除记录</span>
+        </button>
+      </div>
+
       <!-- 右侧工作区 -->
       <main class="app-workspace">
-        <div class="workspace-tabs-bar">
-          <div class="segmented-tabs" role="tablist" aria-label="工作区视图">
-            <button
-              role="tab"
-              :aria-selected="currentTab === 'send'"
-              :class="{ active: currentTab === 'send' }"
-              @click="currentTab = 'send'"
-            >
-              <i class="ph-bold ph-paper-plane-right"></i> 发送
-            </button>
-            <button
-              role="tab"
-              :aria-selected="currentTab === 'shuttle'"
-              :class="{ active: currentTab === 'shuttle' }"
-              @click="currentTab = 'shuttle'"
-            >
-              <i class="ph-bold ph-arrows-left-right"></i> 穿梭
-            </button>
-            <button
-              role="tab"
-              :aria-selected="currentTab === 'log'"
-              :class="{ active: currentTab === 'log' }"
-              @click="currentTab = 'log'"
-            >
-              <i class="ph-bold ph-clock-counter-clockwise"></i> 记录
-            </button>
-            <button
-              role="tab"
-              :aria-selected="currentTab === 'settings'"
-              :class="{ active: currentTab === 'settings' }"
-              @click="currentTab = 'settings'"
-            >
-              <i class="ph-bold ph-sliders-horizontal"></i> 设置
-            </button>
+        <div class="workspace-header-stack">
+          <div class="workspace-tabs-bar">
+            <div class="segmented-tabs" role="tablist" aria-label="工作区视图">
+              <button
+                role="tab"
+                :aria-selected="currentTab === 'send'"
+                :class="{ active: currentTab === 'send' }"
+                @click="currentTab = 'send'"
+              >
+                <i class="ph-bold ph-paper-plane-right"></i> 发送
+              </button>
+              <button
+                role="tab"
+                :aria-selected="currentTab === 'shuttle'"
+                :class="{ active: currentTab === 'shuttle' }"
+                @click="currentTab = 'shuttle'"
+              >
+                <i class="ph-bold ph-arrows-left-right"></i> 穿梭
+              </button>
+              <button
+                role="tab"
+                :aria-selected="currentTab === 'log'"
+                :class="{ active: currentTab === 'log' }"
+                @click="currentTab = 'log'"
+              >
+                <i class="ph-bold ph-clock-counter-clockwise"></i> 记录
+              </button>
+            </div>
+
+            <div class="current-target-pill" v-if="currentTab !== 'settings'">
+              <span class="target-prefix">目标</span>
+              <strong class="target-name">{{ store.selectedDevice?.device_name || '未选择设备' }}</strong>
+              <span
+                v-if="store.selectedDevice?.trust_level === 'permanent'"
+                class="status-chip trusted"
+                title="永久信任：对方投递文件不会弹窗确认"
+                >已信任</span
+              >
+              <span
+                v-else-if="store.selectedDevice?.trust_level === 'session'"
+                class="status-chip session"
+                title="每次验证：对方每次操作本机都需授权码"
+                >每次验证</span
+              >
+              <button
+                v-else-if="store.selectedDevice"
+                class="status-chip untrusted"
+                @click="pairDevice(store.selectedDevice)"
+              >
+                未配对 · 配对
+              </button>
+              <span
+                v-if="store.selectedDevice && store.selectedDevice.presence !== 'online'"
+                class="status-chip offline"
+                :title="'上次在线：' + store.selectedDevice.last_seen_human"
+              >
+                <i class="ph ph-plugs"></i>
+                {{ store.selectedDevice.presence === 'reconnecting' ? '重连中' : '离线' }}
+              </span>
+              <button
+                v-if="store.selectedDevice && scopeIsRestricted"
+                type="button"
+                class="scope-open-btn is-warn"
+                title="已限制访问范围，点击编辑"
+                @click="openScopeEditor"
+              >
+                <i class="ph ph-sliders-horizontal"></i> 已限范围
+              </button>
+              <button
+                v-if="store.selectedDevice && deviceEndpoints.length > 0"
+                type="button"
+                class="endpoint-toggle"
+                :aria-expanded="showEndpointBar"
+                title="查看或切换连接路径"
+                @click="showEndpointBar = !showEndpointBar"
+              >
+                <i class="ph ph-signpost"></i>
+                <span class="endpoint-current">{{ currentEndpointLabel }}</span>
+                <i class="ph ph-caret-down" :class="{ rotated: showEndpointBar }"></i>
+              </button>
+              <button
+                v-if="store.selectedDevice"
+                type="button"
+                class="device-menu-trigger header-more-btn"
+                :aria-label="`管理当前目标设备 ${store.selectedDevice.device_name}`"
+                title="设备管理（访问范围 / 信任 / 取消认证）"
+                @click.stop="openDeviceMenu(store.selectedDevice, $event)"
+              >
+                <i class="ph-bold ph-dots-three-vertical"></i>
+              </button>
+            </div>
           </div>
 
-          <div class="current-target-pill" v-if="currentTab !== 'settings'">
-            <span class="target-prefix">目标</span>
-            <strong class="target-name">{{ store.selectedDevice?.device_name || '未选择设备' }}</strong>
-            <span
-              v-if="store.selectedDevice?.trust_level === 'permanent'"
-              class="status-chip trusted"
-              title="永久信任：对方投递文件不会弹窗确认"
-              >已信任</span
-            >
-            <span
-              v-else-if="store.selectedDevice?.trust_level === 'session'"
-              class="status-chip session"
-              title="每次验证：对方每次操作本机都需授权码"
-              >每次验证</span
-            >
+          <!-- 展开式连接路径条（独立于主顶栏，避免主顶栏折行） -->
+          <div
+            v-if="currentTab !== 'settings' && store.selectedDevice && deviceEndpoints.length > 0 && showEndpointBar"
+            class="endpoint-bar"
+          >
+            <span class="endpoint-bar-label"><i class="ph ph-signpost"></i> 连接路径</span>
             <button
-              v-else-if="store.selectedDevice"
-              class="status-chip untrusted"
-              @click="pairDevice(store.selectedDevice)"
+              class="endpoint-chip"
+              :class="{ 'is-active': !pinnedEndpoints[store.selectedDevice.device_id] }"
+              title="自动选择（覆盖网优先）"
+              @click="pinDeviceEndpoint(store.selectedDevice.device_id, null)"
             >
-              未配对 · 点击配对
-            </button>
-            <span
-              v-if="store.selectedDevice && store.selectedDevice.presence !== 'online'"
-              class="status-chip offline"
-              :title="'上次在线：' + store.selectedDevice.last_seen_human"
-            >
-              <i class="ph ph-plugs"></i>
-              {{ store.selectedDevice.presence === 'reconnecting' ? '重连中' : '离线' }}
-            </span>
-            <!--
-              访问范围配置（需求 ④「可访问范围配置」）。
-
-              ## 为什么必须有这个入口
-
-              `AccessScope` 的模型、判定、落库、Tauri 命令**早就都有了**，
-              但整个前端**没有任何地方调用** `getAccessScope` / `setAccessScope`
-              —— 也就是说这个功能对用户**根本不存在**：他打开飞梭，看不到任何
-              "这台设备能看什么、能拿什么"的入口，只能被动接受默认的"全部"。
-
-              而"给了模型却没给入口"比"没有这个功能"更糟：文档里写着
-              "可多选盘符"，用户去找，找不到 —— 于是他要么以为功能不存在，
-              要么以为**默认已经收窄了**（实际是全开的）。后者是要命的：
-              他会以为同事看不到他的 D 盘。
-
-              面板刻意放在**头部信任等级旁边**而不是设置页深处：信任等级与
-              访问范围是同一件事的两个维度（谁能连进来 / 连进来能干什么），
-              拆到两处会让用户不知道该在哪里改。
-            -->
-            <button
-              v-if="store.selectedDevice"
-              class="scope-open-btn"
-              :class="{ 'is-warn': scopeIsRestricted }"
-              title="设置这台设备能浏览哪些盘符、能否取回、能否写入"
-              @click="openScopeEditor"
-            >
-              <i class="ph ph-sliders-horizontal"></i> 访问范围
+              自动
             </button>
             <button
-              v-if="store.selectedDevice && (store.selectedDevice.is_paired || store.selectedDevice.trust_level === 'permanent' || store.selectedDevice.trust_level === 'session')"
-              class="unpair-open-btn"
-              title="取消与该设备的认证关系；取消后对方无法再访问本机，离线设备将从列表中彻底清除"
-              @click="confirmUnpair(store.selectedDevice)"
+              v-for="ep in deviceEndpoints"
+              :key="`${ep.ip}:${ep.port}`"
+              class="endpoint-chip"
+              :class="{
+                'is-active':
+                  pinnedEndpoints[store.selectedDevice.device_id]?.ip === ep.ip &&
+                  pinnedEndpoints[store.selectedDevice.device_id]?.port === ep.port,
+              }"
+              :disabled="ep.port === 0"
+              :title="
+                (ep.port === 0
+                  ? '该地址还没有已知的传输端口，暂不可选'
+                  : endpointKindLabel(ep.kind) + (ep.verified ? '' : ' · 尚未验证过')) +
+                ' · 上次活动 ' + humanizeEndpoint(ep.last_seen)
+              "
+              @click="pinDeviceEndpoint(store.selectedDevice.device_id, ep)"
             >
-              <i class="ph ph-shield-slash"></i> 取消认证
+              {{ endpointKindLabel(ep.kind) }}
+              <span class="endpoint-ip">{{ ep.ip }}</span>
+              <i v-if="!ep.verified" class="ph ph-question" title="尚未验证过"></i>
             </button>
           </div>
+        </div>
 
           <!-- 访问范围编辑弹层 -->
           <div
@@ -506,9 +536,16 @@
             class="modal-mask"
             @click.self="closeScopeEditor"
           >
-            <div class="scope-modal">
+            <div
+              v-modal-focus
+              class="scope-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="scope-modal-title"
+              tabindex="-1"
+            >
               <div class="scope-head">
-                <h3>
+                <h3 id="scope-modal-title">
                   <i class="ph ph-sliders-horizontal"></i>
                   {{ store.selectedDevice?.device_name }} 的访问范围
                 </h3>
@@ -856,66 +893,18 @@
             </div>
           </div>
 
-          <!-- 连接路径：默认只显示当前走哪条，展开后才给出可切换的端点。
-               原始 IP / 端口 / 校验状态属于高级信息，不常驻主界面。 -->
-          <div
-            v-if="store.selectedDevice && deviceEndpoints.length > 0"
-            class="endpoint-bar"
-          >
-            <button
-              type="button"
-              class="endpoint-toggle"
-              :aria-expanded="showEndpointBar"
-              @click="showEndpointBar = !showEndpointBar"
-            >
-              <i class="ph ph-signpost"></i>
-              <span>连接路径</span>
-              <span class="endpoint-current">{{ currentEndpointLabel }}</span>
-              <i class="ph ph-caret-down" :class="{ rotated: showEndpointBar }"></i>
-            </button>
-            <template v-if="showEndpointBar">
-              <button
-                class="endpoint-chip"
-                :class="{ 'is-active': !pinnedEndpoints[store.selectedDevice.device_id] }"
-                title="自动选择（覆盖网优先）"
-                @click="pinDeviceEndpoint(store.selectedDevice.device_id, null)"
-              >
-                自动
-              </button>
-              <button
-                v-for="ep in deviceEndpoints"
-                :key="`${ep.ip}:${ep.port}`"
-                class="endpoint-chip"
-                :class="{
-                  'is-active':
-                    pinnedEndpoints[store.selectedDevice.device_id]?.ip === ep.ip &&
-                    pinnedEndpoints[store.selectedDevice.device_id]?.port === ep.port,
-                }"
-                :disabled="ep.port === 0"
-                :title="
-                  (ep.port === 0
-                    ? '该地址还没有已知的传输端口，暂不可选'
-                    : endpointKindLabel(ep.kind) + (ep.verified ? '' : ' · 尚未验证过')) +
-                  ' · 上次活动 ' + humanizeEndpoint(ep.last_seen)
-                "
-                @click="pinDeviceEndpoint(store.selectedDevice.device_id, ep)"
-              >
-                {{ endpointKindLabel(ep.kind) }}
-                <span class="endpoint-ip">{{ ep.ip }}</span>
-                <i v-if="!ep.verified" class="ph ph-question" title="尚未验证过"></i>
-              </button>
-            </template>
-          </div>
-        </div>
+          <!-- 连接路径条已提升至工作区顶栏下方独立展开 -->
 
         <!-- ===== Tab 1: 发送 ===== -->
         <div v-if="currentTab === 'send'" class="tab-page view-send">
-      <!-- 视觉隐藏但保留在无障碍树里：这个视图没有可见页标题，
-           而"双栏穿梭"那个视图有 —— 按标题跳转的用户会以为发送页不存在。 -->
-      <h2 class="view-heading-sr">发送文件</h2>
+          <h2 class="view-heading-sr">发送文件</h2>
           <div
             class="drag-drop-card"
-            :class="{ 'is-dragging': isDragOver, 'is-busy': isConcurrencyFull }"
+            :class="{
+              'is-dragging': isDragOver,
+              'is-busy': isConcurrencyFull,
+              'is-compact': stagedFiles.length > 0,
+            }"
             @dragover.prevent="isDragOver = true"
             @dragleave.prevent="isDragOver = false"
             @drop.prevent="isDragOver = false"
@@ -923,41 +912,67 @@
             <div class="drop-illustration-icon">
               <i class="ph-bold ph-arrow-fat-lines-up"></i>
             </div>
-            <h3>{{ isConcurrencyFull ? '并发传输已满，请稍候' : (runningCount > 0 ? '正在传输中 · 可继续添加或拖放' : '拖放文件或文件夹到此处') }}</h3>
-            <p class="drop-sub-tip" title="文件夹会递归展开；剪贴板内容支持先预览再发送">
-              <i class="ph ph-info"></i> 可拖放文件，或点击下方按钮选择
-            </p>
+            <div class="drop-copy-col">
+              <h3 class="drop-title">
+                {{
+                  isConcurrencyFull
+                    ? '并发传输已满，请稍候'
+                    : runningCount > 0
+                      ? '正在传输 · 可继续拖放文件'
+                      : stagedFiles.length > 0
+                        ? '继续拖放或添加更多文件'
+                        : '拖放文件或文件夹到这里'
+                }}
+              </h3>
+              <p v-if="stagedFiles.length === 0" class="drop-sub-tip">
+                可直接拖放、点击选择，或按 Ctrl+V 发送剪贴板
+              </p>
+            </div>
 
             <div class="drop-cta-buttons">
               <button class="btn-fluent-primary" @click="pickFilesToSend">
                 <i class="ph-bold ph-folder-open"></i> 选择文件
               </button>
-              <button class="btn-fluent-secondary" @click="handleSendClipboard">
+              <button class="btn-fluent-secondary btn-tonal" @click="handleSendClipboard">
                 <i class="ph-bold ph-clipboard-text"></i> 发送剪贴板
+              </button>
+              <button
+                type="button"
+                class="btn-fluent-secondary"
+                :class="{ 'is-active-toggle': showPathInput || pathInputErrors.length > 0 }"
+                :aria-expanded="showPathInput || pathInputErrors.length > 0"
+                @click="showPathInput = !showPathInput"
+              >
+                <i class="ph-bold ph-keyboard"></i> 输入路径
               </button>
             </div>
           </div>
 
-          <!--
-            路径直达：粘贴一串路径直接发送。
-            「拖放」要求文件就在手边，而用户想发的文件经常只在**文本里**被引用
-            （资源管理器「复制为路径」、终端输出、脚本日志、聊天记录）。
-            没有这一栏，他唯一的办法是用文件对话框把那个目录再点回去找一遍。
-          -->
-          <div class="path-input-card" :class="{ 'has-error': pathInputErrors.length > 0 }">
+          <!-- 渐进披露：按需展开的路径直达输入卡片 -->
+          <div
+            v-if="showPathInput || pathInput.trim().length > 0 || pathInputErrors.length > 0"
+            class="path-input-card"
+            :class="{ 'has-error': pathInputErrors.length > 0 }"
+          >
             <div class="path-input-head">
               <i class="ph-bold ph-keyboard"></i>
-              <span class="path-input-title">直接输入文件路径</span>
-              <span class="path-input-hint" title="每行一个路径；支持带引号的「复制为路径」、file:///、%USERPROFILE%、~、\\?\ 长路径前缀">
-                每行一个，支持带引号的「复制为路径」、<code>file:///</code>、<code>%USERPROFILE%</code>、<code>~</code>
-              </span>
+              <span class="path-input-title">粘贴文件路径</span>
+              <span class="path-input-hint">每行一个路径，回车直接发送</span>
+              <button
+                type="button"
+                class="path-input-close"
+                title="收起路径输入"
+                @click="showPathInput = false"
+              >
+                <i class="ph ph-x"></i>
+              </button>
             </div>
             <textarea
               v-model="pathInput"
               class="path-input-area"
-              rows="3"
+              rows="2"
               spellcheck="false"
-              placeholder="C:\Users\你\Desktop\报告.docx"
+              placeholder="例如 C:\Users\你\Desktop\报告.docx"
               :disabled="pathInputBusy"
               aria-label="要发送的文件路径，每行一个"
               :aria-invalid="pathInputErrors.length > 0"
@@ -965,10 +980,6 @@
               @keydown.enter.exact="onPathInputEnter"
             ></textarea>
             <div class="path-input-foot">
-              <!--
-                失败行按**行号**写出来。粘贴进来的一片路径里混着几条失效的很正常，
-                只说"有几个路径不可用"会让用户连改哪一行都不知道。
-              -->
               <ul v-if="pathInputErrors.length > 0" id="path-input-errors" class="path-input-errors" role="alert">
                 <li v-for="(err, i) in pathInputErrors" :key="i">
                   <i class="ph-bold ph-warning-circle"></i>
@@ -976,7 +987,7 @@
                 </li>
               </ul>
               <span v-else class="path-input-tip">
-                <i class="ph ph-corner-down-left"></i> Enter 直接添加并发送 · Shift+Enter 换行
+                <i class="ph ph-corner-down-left"></i> Enter 发送 · Shift+Enter 换行
               </span>
               <button
                 class="btn-fluent-primary path-input-submit"
@@ -991,22 +1002,9 @@
 
           <div v-if="stagedFiles.length > 0" class="staged-file-tray">
             <div class="tray-title-bar">
-              <!--
-                计数与大小都要算上**目录展开后的文件数**。
-                拖一个文件夹进来，清单上是 1 项；实际会发 7 个文件 17.8 MB。
-                头部写「1 项，共 4.0 KB」时，那 4.0 KB 是 NTFS **目录项自身**的
-                大小 —— 数字小得让人以为程序弄丢了文件。
-                所以：项数用 stagedFileCount（展开后），大小用 totalStagedSize
-                （已是展开后的字节）。
-              -->
               <span>待发清单 ({{ stagedFileCount }} 个文件，共 {{ totalStagedSize }})</span>
               <button class="clear-all-link" @click="clearStaged">清空全部</button>
             </div>
-            <!--
-              落点常驻显示。用户点「发送」之前**必须**知道文件会去哪儿：
-              两种来源（拖进窗口 / 穿梭里拖文件夹）落到完全不同的目录，
-              发出去之后再去收件目录找不到的人，会怀疑文件丢了而不是怀疑落点。
-            -->
             <div class="tray-dest-line" :title="stagedDestTitle">
               <i class="ph ph-map-pin"></i>
               <span>落点：{{ stagedDestLabel }}</span>
@@ -1016,11 +1014,6 @@
                 <i :class="getFileIcon(file.name)"></i>
                 <span class="row-fname" :title="file.path">
                   {{ file.name }}
-                  <!--
-                    目录必须显式写出「N 个文件」，不能只显示大小。
-                    用户拖进来的是**一个文件夹**，屏幕上只出现一行、
-                    大小又只有 4.0 KB，两边都在暗示"里面没别的东西"。
-                  -->
                   <em v-if="file.isDir" class="row-dir-count">{{ stagedRowSize(file) }}</em>
                 </span>
                 <span class="row-fsize" :title="stagedRowTitle(file)">{{ file.sizeFormatted }}</span>
@@ -1045,7 +1038,7 @@
 
         <!-- ===== Tab 2: 双栏穿梭 ===== -->
         <div v-if="currentTab === 'shuttle'" class="tab-page view-shuttle">
-      <h2 class="view-heading-sr">双栏穿梭</h2>
+          <h2 class="view-heading-sr">双栏穿梭</h2>
           <div class="shuttle-side-pane">
             <div class="shuttle-pane-header">
               <div class="pane-name">
@@ -1053,18 +1046,22 @@
                 <span class="pane-name-text">{{ localVolumeMode ? "本机磁盘" : "本机落盘目录" }}</span>
                 <span class="pane-count">{{ localDiskFiles.length }}</span>
               </div>
-              <button class="pane-refresh-btn" @click="loadLocalFiles()" title="刷新">
-                <i class="ph ph-arrows-clockwise" :class="{ spinning: isLoadingLocal }"></i>
-              </button>
+              <div class="pane-header-actions">
+                <button
+                  class="pane-refresh-btn"
+                  :disabled="localParentPath === null"
+                  @click="goLocalParent"
+                  title="返回上一级"
+                >
+                  <i class="ph ph-arrow-u-up-left"></i>
+                </button>
+                <button class="pane-refresh-btn" @click="loadLocalFiles()" title="刷新">
+                  <i class="ph ph-arrows-clockwise" :class="{ spinning: isLoadingLocal }"></i>
+                </button>
+              </div>
             </div>
-            <!-- 地址栏（§7.1）：与右栏同构 —— 卷下拉 + 完整路径 -->
-            <div class="pane-address-bar">
-              <!--
-                一个下拉装三类根：收件目录 / 常用位置 / 真实卷。
-                分组（optgroup）而不是三个并列控件 —— 地址栏的横向空间本来
-                就紧，而"选根"本来就是**一个**动作。资源管理器的地址栏下拉
-                也是这个结构。
-              -->
+            <!-- 合并后的单行路径栏（卷下拉 + 可点击面包屑 + 复制完整路径） -->
+            <div class="pane-address-bar" :title="localAddressDisplay">
               <div
                 v-if="localVolumes.length > 0 || localPlaces.length > 0"
                 class="custom-dropdown-wrap"
@@ -1119,27 +1116,26 @@
                   </button>
                 </div>
               </div>
-              <span class="address-text" :title="localAddressDisplay">{{ localAddressDisplay }}</span>
-            </div>
-            <div class="pane-breadcrumb">
+              <div class="pane-breadcrumb">
+                <template v-for="(c, ci) in localCrumbs" :key="c.path + ci">
+                  <i v-if="ci > 0" class="ph ph-caret-right crumb-sep"></i>
+                  <button
+                    class="crumb-item"
+                    :class="{ 'is-current': ci === localCrumbs.length - 1 }"
+                    @click="goLocalCrumb(c.path)"
+                  >
+                    {{ c.label }}
+                  </button>
+                </template>
+              </div>
               <button
-                class="crumb-up"
-                :disabled="localParentPath === null"
-                @click="goLocalParent"
-                title="返回上一级"
+                type="button"
+                class="crumb-copy-btn"
+                :title="'复制路径：' + localAddressDisplay"
+                @click="copyText(localAddressDisplay)"
               >
-                <i class="ph ph-arrow-u-up-left"></i>
+                <i class="ph ph-copy"></i>
               </button>
-              <template v-for="(c, ci) in localCrumbs" :key="c.path + ci">
-                <i v-if="ci > 0" class="ph ph-caret-right crumb-sep"></i>
-                <button
-                  class="crumb-item"
-                  :class="{ 'is-current': ci === localCrumbs.length - 1 }"
-                  @click="goLocalCrumb(c.path)"
-                >
-                  {{ c.label }}
-                </button>
-              </template>
             </div>
             <div v-if="localTruncated" class="pane-truncated-hint">
               <i class="ph ph-warning"></i>
@@ -1152,23 +1148,6 @@
               @dragover="onShuttlePaneDragOver($event, 'local')"
               @drop="onShuttlePaneDrop($event, 'local')"
             >
-              <!--
-                首屏加载用**骨架行**而不是转圈图标。
-
-                为什么: 之前这里什么都没有 —— `v-for` 在数组为空时不渲染,
-                于是列目录的那几百毫秒里整个面板是**一片空白**。用户看到
-                空白会以为"这个目录没文件"或"程序卡住了", 于是去点别的
-                地方。转圈图标好一点, 但它不告诉用户"接下来会出现什么形状
-                的东西"。
-
-                骨架行形状必须与真实行一致(勾选框 + 图标 + 名称 + 大小),
-                文件加载完成时列表才不会"跳一下"。行数刻意少于真实列表,
-                免得骨架比内容还长, 反倒给人更慢的错觉。
-
-                `aria-hidden` 是必须的: 骨架不是内容, 屏幕阅读器念出来
-                只会变成一串无意义的空文本。加载状态另有 `aria-busy`
-                在滚动容器上表达。
-              -->
               <div
                 v-if="isLoadingLocal && localDiskFiles.length === 0"
                 class="shuttle-skeleton-stack"
@@ -1207,12 +1186,6 @@
                 <i :class="item.is_dir ? 'ph-fill ph-folder file-glyph dir' : getFileIcon(item.name)"></i>
                 <span class="file-label-col" :title="item.name + ' · ' + item.modified">{{ item.name }}</span>
                 <span class="file-size-col">{{ item.size_formatted }}</span>
-                <!--
-                  文件夹行额外给一个"整夹发送"按钮（§7.6）。
-                  点行本身是"进入", 所以必须有一个**独立**入口才能把整个
-                  文件夹发出去 —— 让用户逐个进子目录、逐个勾选 3000 个文件
-                  是不现实的。按钮只在悬停/选中时出现, 避免列表右侧全是图标。
-                -->
                 <button
                   v-if="item.is_dir"
                   class="dir-send-btn"
@@ -1249,7 +1222,7 @@
               :title="'把选中的 ' + selectedLocalNames.size + ' 项送到对方 ' + sendDestLabel"
             >
               <i class="ph-bold ph-arrow-right"></i>
-              <span>发送</span>
+              <span>发送{{ selectedLocalNames.size > 0 ? ` (${selectedLocalNames.size})` : '' }}</span>
             </button>
             <button
               class="shuttle-op-button fetch-op"
@@ -1258,7 +1231,7 @@
               :title="'把选中的 ' + selectedRemoteNames.size + ' 项取回 ' + fetchDestLabel"
             >
               <i class="ph-bold ph-arrow-left"></i>
-              <span>取回</span>
+              <span>取回{{ selectedRemoteNames.size > 0 ? ` (${selectedRemoteNames.size})` : '' }}</span>
             </button>
           </div>
 
@@ -1269,14 +1242,22 @@
                 <span class="pane-name-text" :title="store.selectedDevice?.device_name">{{ store.selectedDevice?.device_name || '对端存储' }}</span>
                 <span class="pane-count">{{ remoteDiskFiles.length }}</span>
               </div>
-              <button class="pane-refresh-btn" @click="loadRemoteFiles()" title="刷新对端目录">
-                <i class="ph ph-arrows-clockwise" :class="{ spinning: isLoadingRemote }"></i>
-              </button>
+              <div class="pane-header-actions">
+                <button
+                  class="pane-refresh-btn"
+                  :disabled="remoteParentPath === null"
+                  @click="goRemoteParent"
+                  title="返回上一级"
+                >
+                  <i class="ph ph-arrow-u-up-left"></i>
+                </button>
+                <button class="pane-refresh-btn" @click="loadRemoteFiles()" title="刷新对端目录">
+                  <i class="ph ph-arrows-clockwise" :class="{ spinning: isLoadingRemote }"></i>
+                </button>
+              </div>
             </div>
-            <!-- 地址栏（§7.2）：卷下拉 + 面包屑 -->
-            <div class="pane-address-bar">
-              <!-- 与左栏同构：常用位置 + 磁盘。对端的是**对端机器**的
-                   目录，已按该设备的访问范围过滤过（服务端做的）。 -->
+            <!-- 合并后的单行路径栏（卷下拉 + 可点击面包屑 + 复制完整路径） -->
+            <div class="pane-address-bar" :title="remoteAddressDisplay">
               <div
                 v-if="remoteVolumes.length > 0 || remotePlaces.length > 0"
                 class="custom-dropdown-wrap"
@@ -1321,27 +1302,26 @@
                   </button>
                 </div>
               </div>
-              <span class="address-text" :title="remoteAddressDisplay">{{ remoteAddressDisplay }}</span>
-            </div>
-            <div class="pane-breadcrumb">
+              <div class="pane-breadcrumb">
+                <template v-for="(c, ci) in remoteCrumbs" :key="c.path + ci">
+                  <i v-if="ci > 0" class="ph ph-caret-right crumb-sep"></i>
+                  <button
+                    class="crumb-item"
+                    :class="{ 'is-current': ci === remoteCrumbs.length - 1 }"
+                    @click="goRemoteCrumb(c.path)"
+                  >
+                    {{ c.label }}
+                  </button>
+                </template>
+              </div>
               <button
-                class="crumb-up"
-                :disabled="remoteParentPath === null"
-                @click="goRemoteParent"
-                title="返回上一级"
+                type="button"
+                class="crumb-copy-btn"
+                :title="'复制路径：' + remoteAddressDisplay"
+                @click="copyText(remoteAddressDisplay)"
               >
-                <i class="ph ph-arrow-u-up-left"></i>
+                <i class="ph ph-copy"></i>
               </button>
-              <template v-for="(c, ci) in remoteCrumbs" :key="c.path + ci">
-                <i v-if="ci > 0" class="ph ph-caret-right crumb-sep"></i>
-                <button
-                  class="crumb-item"
-                  :class="{ 'is-current': ci === remoteCrumbs.length - 1 }"
-                  @click="goRemoteCrumb(c.path)"
-                >
-                  {{ c.label }}
-                </button>
-              </template>
             </div>
             <div v-if="remoteTruncated" class="pane-truncated-hint">
               <i class="ph ph-warning"></i>
@@ -1354,7 +1334,6 @@
               @dragover="onShuttlePaneDragOver($event, 'remote')"
               @drop="onShuttlePaneDrop($event, 'remote')"
             >
-              <!-- 对端目录要**跨网络**去问, 首屏空白比本机更久, 骨架更该有 -->
               <div
                 v-if="isLoadingRemote && remoteDiskFiles.length === 0"
                 class="shuttle-skeleton-stack"
@@ -1393,16 +1372,6 @@
                 <i :class="item.is_dir ? 'ph-fill ph-folder file-glyph dir' : getFileIcon(item.name)"></i>
                 <span class="file-label-col" :title="item.name + ' · ' + item.modified">{{ item.name }}</span>
                 <span class="file-size-col">{{ item.size_formatted }}</span>
-                <!--
-                  目录给一个"取回"按钮（§7.6 同款语义）。
-
-                  为什么需要它：点目录默认是**进入**目录，所以目录**永远无法被选中**
-                  —— 于是"取回整个文件夹"这条路径在界面上根本不存在。
-                  用户只能一级级进去逐个勾文件：目录深一点就是几十次点击，
-                  而漏掉一个文件的代价是他根本不知道自己漏了。
-
-                  和左栏的"整夹发送"对称：两个方向都能整夹操作。
-                -->
                 <button
                   v-if="item.is_dir"
                   class="dir-send-btn dir-pull-btn"
@@ -1413,7 +1382,6 @@
                   <i class="ph ph-folder-minus"></i>
                 </button>
               </div>
-              <!-- 分页（§7.3）：不自动滚到底加载，用户可能只是停下来看文件名 -->
               <button
                 v-if="remoteTruncated"
                 class="load-more-btn"
@@ -1430,17 +1398,12 @@
 
         <!-- ===== Tab 3: 传输记录 ===== -->
         <div v-if="currentTab === 'log'" class="tab-page view-log">
-          <div class="fluent-card-panel">
+          <div class="fluent-card-panel readable-container">
             <div class="panel-header-row">
               <div class="header-titles">
                 <h2>传输记录 <i class="ph ph-question" title="速度按纯数据传输耗时计算，已排除审批与落盘等待"></i></h2>
               </div>
               <div class="header-actions">
-                <!--
-                  范围切换。默认「当前设备」：用户在侧栏点中某台电脑之后，
-                  这里就该只剩与它之间的记录。保留「全部设备」是为了
-                  让被隐藏/解除配对的设备留下过的历史仍然看得到。
-                -->
                 <div
                   v-if="store.roster.length > 0"
                   class="history-scope-switch"
@@ -1468,10 +1431,6 @@
                     全部设备
                   </button>
                 </div>
-                <!-- 诊断报告导出：复现问题后把这份文件交给开发者即可定位瓶颈（§9.7） -->
-                <button class="btn-clear-history" @click="exportDiagnostics">
-                  <i class="ph ph-file-arrow-down"></i> 导出诊断报告
-                </button>
                 <button
                   class="btn-clear-history"
                   @click="clearHistory"
@@ -1482,28 +1441,76 @@
                       : '清空全部传输记录'
                   "
                 >
-                  <i class="ph ph-trash"></i> 清空记录
+                  <i class="ph ph-trash"></i> 清空
                 </button>
               </div>
             </div>
+
+            <!-- M3 Filter Chips -->
+            <div class="filter-chips-row" role="group" aria-label="按状态筛选记录">
+              <button
+                type="button"
+                class="m3-filter-chip"
+                :class="{ active: historyFilter === 'all' }"
+                :aria-pressed="historyFilter === 'all'"
+                @click="historyFilter = 'all'"
+              >
+                全部 ({{ transferLogs.length }})
+              </button>
+              <button
+                type="button"
+                class="m3-filter-chip"
+                :class="{ active: historyFilter === 'recv' }"
+                :aria-pressed="historyFilter === 'recv'"
+                @click="historyFilter = 'recv'"
+              >
+                <i class="ph ph-arrow-down-left"></i> 接收
+              </button>
+              <button
+                type="button"
+                class="m3-filter-chip"
+                :class="{ active: historyFilter === 'send' }"
+                :aria-pressed="historyFilter === 'send'"
+                @click="historyFilter = 'send'"
+              >
+                <i class="ph ph-arrow-up-right"></i> 发送
+              </button>
+              <button
+                type="button"
+                class="m3-filter-chip"
+                :class="{ active: historyFilter === 'failed' }"
+                :aria-pressed="historyFilter === 'failed'"
+                @click="historyFilter = 'failed'"
+              >
+                <i class="ph ph-warning-circle"></i> 失败 / 取消
+              </button>
+            </div>
+
             <div class="log-entries-list">
-              <div v-for="log in transferLogs" :key="log.id" class="log-entry-row">
+              <div v-for="log in filteredTransferLogs" :key="log.id" class="log-entry-row">
                 <div class="direction-badge" :class="log.direction === 'recv' ? 'recv' : 'send'">
                   <i :class="log.direction === 'recv' ? 'ph-bold ph-arrow-down-left' : 'ph-bold ph-arrow-up-right'"></i>
                 </div>
                 <div class="log-body-info">
                   <div class="entry-title-wrap">
-                    <span class="entry-title">{{ log.file_name }}</span>
-                    <!-- 只有接收记录才有"文件在哪"的问题；发送记录的 file_paths 是本机源文件，
-                         给它一个"定位"按钮只会让人以为能看对方收到哪儿（实际不能） -->
+                    <span class="entry-title" :title="log.file_name">{{ log.file_name }}</span>
                     <button
-                      v-if="log.direction === 'recv' && log.file_paths && log.file_paths.length > 0"
+                      v-if="log.direction === 'recv' && log.file_paths && log.file_paths.length === 1"
                       class="btn-view-paths-badge"
-                      @click.stop="openPathsModal(log)"
-                      :title="log.file_paths.length === 1 ? '查看完整路径并在文件夹中定位' : `查看全部 ${log.file_paths.length} 个文件的完整路径`"
+                      @click.stop="openFileInFolder(log.file_paths[0])"
+                      :title="'在资源管理器中定位：' + log.file_paths[0]"
                     >
                       <i class="ph ph-folder-open"></i>
-                      <span>{{ log.file_paths.length === 1 ? '查看路径' : `完整路径 (${log.file_paths.length})` }}</span>
+                      <span>定位文件</span>
+                    </button>
+                    <button
+                      v-else-if="log.direction === 'recv' && log.file_paths && log.file_paths.length > 1"
+                      class="btn-view-paths-badge"
+                      @click.stop="openPathsModal(log)"
+                      :title="`查看全部 ${log.file_paths.length} 个文件的完整路径`"
+                    >
+                      <i class="ph ph-folder-open"></i>
+                      <span>查看 {{ log.file_paths.length }} 项</span>
                     </button>
                   </div>
                   <div class="entry-sub">
@@ -1512,11 +1519,10 @@
                     <span
                       v-if="log.over_overlay"
                       class="link-tag"
-                      title="经覆盖网（ZeroTier / Tailscale 的 100.64/10）"
+                      title="经覆盖网（100.64/10）"
                       >经虚拟网卡</span
                     >
                   </div>
-                  <!-- 接收记录直接显示落盘目录，回答"文件存哪了"，不必点开弹窗 -->
                   <div
                     v-if="log.direction === 'recv' && log.file_paths && log.file_paths.length > 0 && getDirName(log.file_paths[0])"
                     class="entry-sub dimmed"
@@ -1524,7 +1530,6 @@
                   >
                     保存到 {{ getDirName(log.file_paths[0]) }}
                   </div>
-                  <!-- 慢的时候说清"时间花在哪"：审批等待 vs 数据流 -->
                   <div
                     v-if="log.duration_active_ms > 0 && log.duration_wall_ms > log.duration_active_ms + 500"
                     class="entry-sub dimmed"
@@ -1535,7 +1540,6 @@
                 </div>
                 <div class="entry-meta-col">
                   <span class="entry-size-text">{{ log.file_size_formatted }}</span>
-                  <!-- 样本不足时后端给"—"，而不是一个荒谬的数字（§9.6.5） -->
                   <span class="entry-speed-text" :class="{ unknown: log.speed_display === '—' }">
                     {{ log.speed_display }}
                   </span>
@@ -1551,41 +1555,37 @@
                   </span>
                 </div>
               </div>
-              <div v-if="transferLogs.length === 0" class="empty-log-box">
+              <div v-if="filteredTransferLogs.length === 0" class="empty-log-box">
                 <i class="ph ph-tray"></i>
-                <span v-if="historyScopeDeviceId">
+                <span v-if="transferLogs.length > 0">当前筛选条件下暂无记录</span>
+                <span v-else-if="historyScopeDeviceId">
                   与「{{ historyScopeName }}」暂无传输记录
                 </span>
                 <span v-else>暂无传输记录</span>
-                <span v-if="historyScopeDeviceId" class="empty-log-hint">
+                <span v-if="transferLogs.length === 0 && historyScopeDeviceId" class="empty-log-hint">
                   换一台设备，或切到「全部设备」查看本机所有记录
                 </span>
               </div>
             </div>
 
-            <!--
-              最近诊断：**默认折叠**。
-
-              为什么不默认展开：诊断条目比传输记录多 3~4 倍（每次传输一条，
-              且每条带归因与阶段耗时），默认展开会把上面的历史记录挤到看不见。
-              而它的使用场景是"用户已经报过一次慢/失败"——那时候他会主动找。
-
-              折叠标题上**写明里面是什么**（"含瓶颈归因"），否则用户看到
-              一个不认识的折叠条，猜不到里面是自己要的东西。
-            -->
             <div class="diag-section">
-              <button
-                class="diag-section-toggle"
-                :aria-expanded="showDiagnostics"
-                @click="toggleDiagnostics"
-              >
-                <i class="ph" :class="showDiagnostics ? 'ph-caret-down' : 'ph-caret-right'"></i>
-                <span>
-                  最近诊断（{{ diagnostics.length }} 条）<template v-if="diagnosticsFailed">
-                    · 读取失败</template
-                  >
-                </span>
-              </button>
+              <div class="diag-section-head">
+                <button
+                  class="diag-section-toggle"
+                  :aria-expanded="showDiagnostics"
+                  @click="toggleDiagnostics"
+                >
+                  <i class="ph" :class="showDiagnostics ? 'ph-caret-down' : 'ph-caret-right'"></i>
+                  <span>
+                    最近诊断（{{ diagnostics.length }} 条）<template v-if="diagnosticsFailed">
+                      · 读取失败</template
+                    >
+                  </span>
+                </button>
+                <button class="btn-clear-history" @click="exportDiagnostics" title="导出传输诊断报告">
+                  <i class="ph ph-file-arrow-down"></i> 导出诊断报告
+                </button>
+              </div>
               <div v-if="showDiagnostics" class="diag-list">
                 <div v-if="diagnostics.length === 0" class="empty-log-box">
                   <i class="ph ph-waveform"></i>
@@ -1613,11 +1613,6 @@
                     </span>
                     <span v-if="d.over_overlay" class="link-tag" title="经覆盖网（100.64/10）">经虚拟网卡</span>
                   </div>
-                  <!--
-                    归因是这一节存在的**唯一理由**。
-                    「缓冲区不足，瓶颈在飞梭」是用户能直接拿去改配置的话；
-                    在此之前它只存在于导出的 txt 里，用户看不到。
-                  -->
                   <div class="diag-attribution">{{ d.attribution }}</div>
                   <div v-if="d.error" class="diag-error">{{ d.error }}</div>
                   <div class="diag-phases">
@@ -1626,11 +1621,6 @@
                     <span :title="'整文件 BLAKE3 复核 ' + d.verify_ms + 'ms（不计入速度）'"
                       >校验 {{ d.verify_ms }}ms</span
                     >
-                    <!--
-                      审批等待单独显示：它是唯一"**不是程序慢**"的原因。
-                      混进总耗时里，用户会以为飞梭有问题，而实际只是
-                      对方看了一眼弹窗。
-                    -->
                     <span v-if="d.approval_wait_ms > 0" class="link-tag">
                       含人工等待 {{ (d.approval_wait_ms / 1000).toFixed(1) }}s（不计入速度）
                     </span>
@@ -1642,360 +1632,338 @@
           </div>
         </div>
 
-        <!-- ===== Tab 4: 系统设置 ===== -->
+        <!-- ===== Tab 4: 系统设置（Google Settings 分组卡片 + 760px 最佳阅读宽） ===== -->
         <div v-if="currentTab === 'settings'" class="tab-page view-settings">
-          <div class="fluent-card-panel">
-            <div class="panel-header-row">
+          <div class="settings-container">
+            <div class="settings-page-head">
               <div class="header-titles">
                 <h2>系统设置</h2>
               </div>
-            </div>
-
-            <div class="panel-section-divider first">
-              <h3>基础</h3>
-            </div>
-
-            <div class="setting-item-block">
-              <div class="setting-desc-text">
-                <strong>设备名称</strong>
-              </div>
-              <div class="setting-action-group">
-                <input
-                  class="standard-text-input name-input"
-                  v-model="deviceNameInput"
-                  maxlength="32"
-                  placeholder="输入设备名称"
-                  @blur="commitDeviceName"
-                  @keyup.enter="commitDeviceName" aria-label="本机设备名称" />
-                <span v-if="nameSaved" class="saved-hint"><i class="ph-fill ph-check"></i> 已保存</span>
+              <div class="settings-anchor-chips">
+                <button type="button" class="m3-filter-chip" @click="scrollSettingsSection('settings-general')">常规</button>
+                <button type="button" class="m3-filter-chip" @click="scrollSettingsSection('settings-security')">安全与设备</button>
+                <button type="button" class="m3-filter-chip" @click="scrollSettingsSection('settings-records')">记录与日志</button>
+                <button type="button" class="m3-filter-chip" @click="scrollSettingsSection('settings-update')">版本更新</button>
               </div>
             </div>
 
-            <div class="setting-item-block">
-              <div class="setting-desc-text">
-                <strong title="登录系统时自动在后台启动并驻留托盘">开机自启动</strong>
-                <span v-if="!updateStatus.isInstalled && localInfo.autostart" class="setting-sub-hint warn-hint">
-                  <i class="ph ph-warning"></i> 便携版自启依赖当前文件路径，请勿移动或删除程序
-                </span>
+            <!-- 卡片 1：常规 -->
+            <section id="settings-general" class="fluent-card-panel settings-group-card">
+              <div class="panel-section-divider first">
+                <h3>常规</h3>
               </div>
-              <label class="fluent-switch">
-                <input aria-label="开机自启动" type="checkbox" v-model="localInfo.autostart" @change="toggleAutostart" />
-                <span class="fluent-slider"></span>
-              </label>
-            </div>
 
-            <div class="setting-item-block">
-              <div class="setting-desc-text">
-                <strong title="关闭后，即使来自已信任设备的传输也会先请求确认">自动接收文件</strong>
-              </div>
-              <label class="fluent-switch">
-                <input aria-label="自动接收文件" type="checkbox" v-model="localInfo.auto_receive" @change="saveSettings" />
-                <span class="fluent-slider"></span>
-              </label>
-            </div>
-
-            <div class="setting-item-block">
-              <div class="setting-desc-text">
-                <strong title="同时进行的传输任务上限">最大并发传输数</strong>
-              </div>
-              <div class="select-compact">
-                <CustomSelect
-                  v-model="concurrentTransfersSelect"
-                  :options="concurrentOptions"
-                  @change="saveSettings"
-                  aria-label="最大并发传输数"
-                />
-              </div>
-            </div>
-
-            <div class="setting-item-block">
-              <div class="setting-desc-text">
-                <strong>界面外观</strong>
-              </div>
-              <div class="select-compact">
-                <CustomSelect
-                  v-model="themeSelect"
-                  :options="themeOptions"
-                  @change="onThemeSelect"
-                  aria-label="界面外观"
-                />
-              </div>
-            </div>
-
-            <div class="setting-item-block">
-              <div class="setting-desc-text">
-                <strong>保存目录</strong>
-                <span class="path-mono">{{ localInfo.receive_dir }}</span>
-              </div>
-              <div class="setting-action-group">
-                <button class="btn-fluent-secondary" @click="openReceiveFolder">
-                  <i class="ph ph-folder-open"></i> 打开目录
-                </button>
-                <button class="btn-fluent-secondary" @click="chooseReceiveDir">
-                  <i class="ph ph-folder-plus"></i> 更改…
-                </button>
-              </div>
-            </div>
-
-            <div class="setting-item-block">
-              <div class="setting-desc-text">
-                <strong>设备指纹</strong>
-                <span class="path-mono">{{ localInfo.device_id || '—' }}</span>
-              </div>
-              <button class="btn-fluent-secondary" @click="copyText(localInfo.device_id)">
-                <i class="ph ph-fingerprint"></i> 复制指纹
-              </button>
-            </div>
-
-            <div class="panel-section-divider">
-              <h3>受信设备</h3>
-            </div>
-            <div class="trust-table-wrap">
-              <div v-if="trustedDevices.length === 0" class="empty-trust-hint">
-                <i class="ph ph-shield-check"></i>
-                <span>暂无已信任设备</span>
-              </div>
-              <div v-else class="trust-item-row" v-for="dev in trustedDevices" :key="dev.device_id">
-                <div class="trust-meta">
-                  <strong class="dev-name">{{ dev.device_name }}</strong>
-                  <span class="dev-ip font-mono">{{ dev.last_ip }} · {{ dev.device_id }}</span>
-                </div>
-                <button class="btn-unblock" @click="confirmUnpair(dev)">取消认证</button>
-              </div>
-            </div>
-
-            <div class="panel-section-divider">
-              <h3>日志</h3>
-            </div>
-
-            <div class="setting-item-block">
-              <div class="setting-desc-text">
-                <strong title="常规运行使用 INFO，排障时可切换为 DEBUG">日志级别</strong>
-              </div>
-              <div class="select-compact">
-                <CustomSelect
-                  v-model="localInfo.log_level"
-                  :options="logLevelOptions"
-                  @change="saveSettings"
-                  aria-label="日志级别"
-                />
-              </div>
-            </div>
-
-            <div class="setting-item-block">
-              <div class="setting-desc-text">
-                <strong title="单文件超限后自动轮转，保留 3 个归档">日志文件</strong>
-              </div>
-              <button class="btn-fluent-secondary" @click="openLogFolder">
-                <i class="ph ph-folder-open"></i> 打开目录
-              </button>
-            </div>
-
-            <div class="panel-section-divider">
-              <h3>记录保留</h3>
-            </div>
-
-            <div class="setting-item-block">
-              <div class="setting-desc-text">
-                <strong title="超出数量上限后自动清理最老记录">记录存储上限</strong>
-              </div>
-              <div class="select-compact">
-                <CustomSelect
-                  v-model="localInfo.max_history_records"
-                  :options="maxHistoryOptions"
-                  @change="saveSettings"
-                  aria-label="记录存储上限"
-                />
-              </div>
-            </div>
-
-            <div class="setting-item-block">
-              <div class="setting-desc-text">
-                <strong title="超过保留天数的历史记录自动清理">记录保存周期</strong>
-              </div>
-              <div class="select-compact">
-                <CustomSelect
-                  v-model="localInfo.record_retention_days"
-                  :options="retentionDaysOptions"
-                  @change="saveSettings"
-                  aria-label="记录保存周期"
-                />
-              </div>
-            </div>
-
-            <div class="setting-item-block">
-              <div class="setting-desc-text">
-                <strong title="清空所有历史传输记录">清空记录</strong>
-              </div>
-              <button class="btn-fluent-secondary danger-action" @click="clearAllHistory">
-                <i class="ph ph-trash"></i> 清空
-              </button>
-            </div>
-
-            <div class="panel-section-divider">
-              <h3>来源网段</h3>
-            </div>
-            <!--
-              来源网段白名单：只接受来自这些网段的连接（**含配对**）。
-
-              ## 为什么需要它（都是实测来的，不是设想的）
-
-              1. 传输端口绑在 `0.0.0.0`（所有网卡，含公网网卡）；
-              2. 实测本机的 Windows 防火墙放行规则作用域是 `Private, Public`
-                 —— **包含公用网络**。首次运行在弹窗上点一次「允许」，
-                 就等于替公网也开了门；
-              3. 实测本机公网出口是 `64.120.95.50`，从公网反连 42100
-                 **连不上** —— 但那只在"家里路由器不做端口转发"时成立。
-
-              满足下面任一条，公网就直接可达，而应用层**不会有任何东西拒绝**：
-              路由器配了端口转发 / 运营商给了公网 IPv4 且全锥 NAT /
-              有全局可路由的 IPv6（IPv6 没有 NAT）。
-
-              防火墙是第一道，它挡不住"用户点了允许"这件事；这道是第二道。
-
-              ## 空 = 不限制
-
-              保持既有行为（不引入"升级后突然收不到文件"），
-              但**必须一眼看出当前是未设置** —— 所以下面有醒目提示。
-            -->
-            <!--
-              ## 为什么没有「保存」按钮
-
-              本节其余每一项（开关、下拉、设备名）都是**改完即生效**，只有这一块
-              要再点一次「保存」。同一页里两种提交模型，用户就得先判断"这次改的
-              东西会不会自己生效" —— 而这个页面上没有任何线索能回答它。
-              原来那个「保存」还被挤到了内容正中间（见 .setting-item-block-col
-              的注释：变体规则被基础规则反向覆盖），看起来像一条悬空的操作条。
-
-              现在改为**失焦 / 回车即落盘**，与同页其他控件一致；
-              落盘成功后就地显示「已保存」，不再有"未保存的改动"这种中间态。
-              空白行（点了「添加网段」却没填）不会被当成一条配置提交。
-            -->
-            <div class="setting-item-block setting-item-block-col">
-              <div class="subnet-head">
+              <div class="setting-item-block">
                 <div class="setting-desc-text">
-                  <strong>允许的网段</strong>
+                  <strong>设备名称</strong>
                 </div>
-                <span v-if="subnetsSaved" class="saved-hint">
-                  <i class="ph-fill ph-check"></i> 已保存
-                </span>
-                <button class="btn-fluent-secondary subnet-add" @click="addSubnetChip">
-                  <i class="ph ph-plus"></i> 添加网段
-                </button>
-              </div>
-              <div v-if="allowedPeerSubnets.length > 0" class="subnet-editor">
-                <div
-                  v-for="(cidr, i) in allowedPeerSubnets"
-                  :key="i"
-                  class="subnet-chip"
-                  :class="{ 'is-invalid': !isValidCidr(cidr) && cidr.trim() !== '' }"
-                >
-                  <i class="ph ph-globe"></i>
+                <div class="setting-action-group">
                   <input
-                    class="subnet-chip-input font-mono"
-                    v-model="allowedPeerSubnets[i]"
-                    placeholder="192.168.31.0/24 或 IP"
-                    :title="isValidCidr(cidr) ? cidr : '格式无法识别'"
-                    spellcheck="false"
-                    @blur="commitAllowedSubnets"
-                    @keyup.enter="commitAllowedSubnets"
+                    class="standard-text-input name-input"
+                    v-model="deviceNameInput"
+                    maxlength="32"
+                    placeholder="输入设备名称"
+                    @blur="commitDeviceName"
+                    @keyup.enter="commitDeviceName" aria-label="本机设备名称" />
+                  <span v-if="nameSaved" class="saved-hint"><i class="ph-fill ph-check"></i> 已保存</span>
+                </div>
+              </div>
+
+              <div class="setting-item-block">
+                <div class="setting-desc-text">
+                  <strong title="登录系统时自动在后台启动并驻留托盘">开机自启动</strong>
+                  <span v-if="!updateStatus.isInstalled && localInfo.autostart" class="setting-sub-hint warn-hint">
+                    <i class="ph ph-warning"></i> 便携版自启依赖当前文件路径，请勿移动或删除程序
+                  </span>
+                </div>
+                <label class="fluent-switch">
+                  <input aria-label="开机自启动" type="checkbox" v-model="localInfo.autostart" @change="toggleAutostart" />
+                  <span class="fluent-slider"></span>
+                </label>
+              </div>
+
+              <div class="setting-item-block">
+                <div class="setting-desc-text">
+                  <strong title="关闭后，即使来自已信任设备的传输也会先请求确认">自动接收文件</strong>
+                </div>
+                <label class="fluent-switch">
+                  <input aria-label="自动接收文件" type="checkbox" v-model="localInfo.auto_receive" @change="saveSettings" />
+                  <span class="fluent-slider"></span>
+                </label>
+              </div>
+
+              <div class="setting-item-block">
+                <div class="setting-desc-text">
+                  <strong title="同时进行的传输任务上限">最大并发传输数</strong>
+                </div>
+                <div class="select-compact">
+                  <CustomSelect
+                    v-model="concurrentTransfersSelect"
+                    :options="concurrentOptions"
+                    @change="saveSettings"
+                    aria-label="最大并发传输数"
                   />
-                  <button
-                    class="subnet-chip-del"
-                    :aria-label="`移除 ${cidr || '这一条'}`"
-                    title="移除"
-                    @click="removeSubnet(i)"
-                  >
-                    <i class="ph ph-x"></i>
+                </div>
+              </div>
+
+              <div class="setting-item-block">
+                <div class="setting-desc-text">
+                  <strong>界面外观</strong>
+                </div>
+                <div class="select-compact">
+                  <CustomSelect
+                    v-model="themeSelect"
+                    :options="themeOptions"
+                    @change="onThemeSelect"
+                    aria-label="界面外观"
+                  />
+                </div>
+              </div>
+
+              <div class="setting-item-block">
+                <div class="setting-desc-text">
+                  <strong>保存目录</strong>
+                  <span class="path-mono">{{ localInfo.receive_dir }}</span>
+                </div>
+                <div class="setting-action-group">
+                  <button class="btn-fluent-secondary" @click="openReceiveFolder">
+                    <i class="ph ph-folder-open"></i> 打开目录
+                  </button>
+                  <button class="btn-fluent-secondary" @click="chooseReceiveDir">
+                    <i class="ph ph-folder-plus"></i> 更改…
                   </button>
                 </div>
               </div>
-              <p v-else class="subnet-state-hint">
-                <i class="ph ph-shield-warning"></i>
-                <span>未设置 · 不限制来源</span>
-              </p>
-              <p v-for="(cidr, i) in badSubnets" :key="'bad' + i" class="subnet-warn-hint is-error">
-                <i class="ph-fill ph-warning-circle"></i>
-                <span><code class="path-mono">{{ cidr }}</code> 格式无法识别，会被拒绝</span>
-              </p>
-            </div>
 
-            <div class="panel-section-divider">
-              <h3>更新</h3>
-            </div>
-
-            <div class="setting-item-block">
-              <div class="setting-desc-text">
-                <strong>版本</strong>
-                <span class="path-mono">
-                  v{{ localInfo.app_version || '—' }}
-                  <span class="channel-badge" :class="updateStatus.isInstalled ? 'badge-installed' : 'badge-portable'">
-                    {{ updateStatus.isInstalled ? '安装版' : '绿色便携版' }}
-                  </span>
-                </span>
-                <span v-if="!updateStatus.isInstalled" class="setting-sub-hint">
-                  便携版：需要桌面快捷方式和稳定自启，推荐安装版。
-                </span>
-              </div>
-              <div class="setting-action-group">
-                <button class="btn-fluent-secondary" @click="openUpdatePage" :disabled="!updateStatus.releasePage">
-                  <i class="ph ph-download-simple"></i> 前往下载页
-                </button>
-              </div>
-            </div>
-
-            <div class="setting-item-block">
-              <div class="setting-desc-text">
-                <strong title="开启后周期性自动检查新版本并在后台静默下载，下载完成点「立即更新」即可安装">自动检查并下载更新</strong>
-                <span class="setting-sub-hint">发现新版本会后台自动下载，完成后点「立即更新」即可升级。</span>
-              </div>
-              <label class="fluent-switch">
-                <input aria-label="自动检查并下载更新" type="checkbox" v-model="localInfo.auto_check_update" @change="toggleAutoUpdate" />
-                <span class="fluent-slider"></span>
-              </label>
-            </div>
-
-            <div class="setting-item-block update-block">
-              <div class="setting-desc-text">
-                <strong>检查更新</strong>
-                <span class="path-mono" :class="{ 'update-failed': updateStatus.phase === 'failed' }">
-                  {{ updateStatusText }}
-                </span>
-                <span class="setting-sub-hint">上次检查：{{ lastCheckedText }}</span>
-              </div>
-              <div class="setting-action-group">
-                <div
-                  v-if="updateStatus.phase === 'downloading' && updateStatus.bytesTotal > 0"
-                  class="update-progress-track"
-                >
-                  <div
-                    class="update-progress-fill"
-                    :style="{ transform: `scaleX(${updatePercent / 100})` }"
-                  ></div>
+              <div class="setting-item-block">
+                <div class="setting-desc-text">
+                  <strong>设备指纹</strong>
+                  <span class="path-mono">{{ localInfo.device_id || '—' }}</span>
                 </div>
-                <button
-                  class="btn-fluent-secondary"
-                  @click="checkForUpdate"
-                  :disabled="updateStatus.busy"
-                >
-                  <i class="ph" :class="updateStatus.busy ? 'ph-spinner ph-spin' : 'ph-arrows-clockwise'"></i>
-                  {{ updateStatus.busy ? '进行中…' : '检查更新' }}
-                </button>
-                <button
-                  v-if="updateStatus.phase === 'ready' || (updateStatus.phase === 'failed' && updateStatus.pendingPath)"
-                  class="btn-fluent-primary"
-                  @click="applyUpdate"
-                >
-                  <i class="ph ph-download"></i>
-                  {{ updateStatus.phase === 'ready' ? '立即更新' : '安装已下载的版本' }}
+                <button class="btn-fluent-secondary" @click="copyText(localInfo.device_id)">
+                  <i class="ph ph-fingerprint"></i> 复制指纹
                 </button>
               </div>
-            </div>
+            </section>
 
-            <div class="settings-footer-note">
-              <i class="ph ph-info"></i>
-              飞梭 v{{ localInfo.app_version || '0.1.0' }}
-            </div>
+            <!-- 卡片 2：安全与设备 -->
+            <section id="settings-security" class="fluent-card-panel settings-group-card">
+              <div class="panel-section-divider first">
+                <h3>受信设备</h3>
+              </div>
+              <div class="trust-table-wrap">
+                <div v-if="trustedDevices.length === 0" class="empty-trust-hint">
+                  <i class="ph ph-shield-check"></i>
+                  <span>暂无已信任设备</span>
+                </div>
+                <div v-else class="trust-item-row" v-for="dev in trustedDevices" :key="dev.device_id">
+                  <div class="trust-meta">
+                    <strong class="dev-name">{{ dev.device_name }}</strong>
+                    <span class="dev-ip font-mono">{{ dev.last_ip }} · {{ dev.device_id }}</span>
+                  </div>
+                  <button class="btn-unblock" @click="confirmUnpair(dev)">取消认证</button>
+                </div>
+              </div>
+
+              <div class="panel-section-divider">
+                <h3>来源网段</h3>
+              </div>
+              <div class="setting-item-block setting-item-block-col">
+                <div class="subnet-head">
+                  <div class="setting-desc-text">
+                    <strong>允许的网段</strong>
+                  </div>
+                  <span v-if="subnetsSaved" class="saved-hint">
+                    <i class="ph-fill ph-check"></i> 已保存
+                  </span>
+                  <button class="btn-fluent-secondary subnet-add" @click="addSubnetChip">
+                    <i class="ph ph-plus"></i> 添加网段
+                  </button>
+                </div>
+                <div v-if="allowedPeerSubnets.length > 0" class="subnet-editor">
+                  <div
+                    v-for="(cidr, i) in allowedPeerSubnets"
+                    :key="i"
+                    class="subnet-chip"
+                    :class="{ 'is-invalid': !isValidCidr(cidr) && cidr.trim() !== '' }"
+                  >
+                    <i class="ph ph-globe"></i>
+                    <input
+                      class="subnet-chip-input font-mono"
+                      v-model="allowedPeerSubnets[i]"
+                      placeholder="192.168.31.0/24 或 IP"
+                      :title="isValidCidr(cidr) ? cidr : '格式无法识别'"
+                      spellcheck="false"
+                      @blur="commitAllowedSubnets"
+                      @keyup.enter="commitAllowedSubnets"
+                    />
+                    <button
+                      class="subnet-chip-del"
+                      :aria-label="`移除 ${cidr || '这一条'}`"
+                      title="移除"
+                      @click="removeSubnet(i)"
+                    >
+                      <i class="ph ph-x"></i>
+                    </button>
+                  </div>
+                </div>
+                <p v-else class="subnet-state-hint">
+                  <i class="ph ph-shield-warning"></i>
+                  <span>未设置 · 不限制来源</span>
+                </p>
+                <p v-for="(cidr, i) in badSubnets" :key="'bad' + i" class="subnet-warn-hint is-error">
+                  <i class="ph-fill ph-warning-circle"></i>
+                  <span><code class="path-mono">{{ cidr }}</code> 格式无法识别，会被拒绝</span>
+                </p>
+              </div>
+            </section>
+
+            <!-- 卡片 3：记录与日志 -->
+            <section id="settings-records" class="fluent-card-panel settings-group-card">
+              <div class="panel-section-divider first">
+                <h3>记录与日志</h3>
+              </div>
+
+              <div class="setting-item-block">
+                <div class="setting-desc-text">
+                  <strong title="超出数量上限后自动清理最老记录">记录存储上限</strong>
+                </div>
+                <div class="select-compact">
+                  <CustomSelect
+                    v-model="localInfo.max_history_records"
+                    :options="maxHistoryOptions"
+                    @change="saveSettings"
+                    aria-label="记录存储上限"
+                  />
+                </div>
+              </div>
+
+              <div class="setting-item-block">
+                <div class="setting-desc-text">
+                  <strong title="超过保留天数的历史记录自动清理">记录保存周期</strong>
+                </div>
+                <div class="select-compact">
+                  <CustomSelect
+                    v-model="localInfo.record_retention_days"
+                    :options="retentionDaysOptions"
+                    @change="saveSettings"
+                    aria-label="记录保存周期"
+                  />
+                </div>
+              </div>
+
+              <div class="setting-item-block">
+                <div class="setting-desc-text">
+                  <strong title="常规运行使用 INFO，排障时可切换为 DEBUG">日志级别</strong>
+                </div>
+                <div class="select-compact">
+                  <CustomSelect
+                    v-model="localInfo.log_level"
+                    :options="logLevelOptions"
+                    @change="saveSettings"
+                    aria-label="日志级别"
+                  />
+                </div>
+              </div>
+
+              <div class="setting-item-block">
+                <div class="setting-desc-text">
+                  <strong title="单文件超限后自动轮转，保留 3 个归档">日志文件</strong>
+                </div>
+                <button class="btn-fluent-secondary" @click="openLogFolder">
+                  <i class="ph ph-folder-open"></i> 打开目录
+                </button>
+              </div>
+
+              <div class="setting-item-block">
+                <div class="setting-desc-text">
+                  <strong title="清空所有历史传输记录">清空全部历史记录</strong>
+                </div>
+                <button class="btn-fluent-secondary danger-action" @click="clearAllHistory">
+                  <i class="ph ph-trash"></i> 清空
+                </button>
+              </div>
+            </section>
+
+            <!-- 卡片 4：版本更新 -->
+            <section id="settings-update" class="fluent-card-panel settings-group-card">
+              <div class="panel-section-divider first">
+                <h3>版本与更新</h3>
+              </div>
+
+              <div class="setting-item-block">
+                <div class="setting-desc-text">
+                  <strong>当前版本</strong>
+                  <span class="path-mono">
+                    v{{ localInfo.app_version || '—' }}
+                    <span class="channel-badge" :class="updateStatus.isInstalled ? 'badge-installed' : 'badge-portable'">
+                      {{ updateStatus.isInstalled ? '安装版' : '绿色便携版' }}
+                    </span>
+                  </span>
+                  <span v-if="!updateStatus.isInstalled" class="setting-sub-hint">
+                    需要桌面快捷方式和稳定自启时，推荐使用安装版。
+                  </span>
+                </div>
+                <div class="setting-action-group">
+                  <button class="btn-fluent-secondary" @click="openUpdatePage" :disabled="!updateStatus.releasePage">
+                    <i class="ph ph-download-simple"></i> 前往下载页
+                  </button>
+                </div>
+              </div>
+
+              <div class="setting-item-block">
+                <div class="setting-desc-text">
+                  <strong title="开启后周期性自动检查新版本并在后台静默下载，下载完成点「立即更新」即可安装">自动检查并下载更新</strong>
+                  <span class="setting-sub-hint">发现新版本会后台下载，完成后点击「立即更新」升级。</span>
+                </div>
+                <label class="fluent-switch">
+                  <input aria-label="自动检查并下载更新" type="checkbox" v-model="localInfo.auto_check_update" @change="toggleAutoUpdate" />
+                  <span class="fluent-slider"></span>
+                </label>
+              </div>
+
+              <div class="setting-item-block update-block">
+                <div class="setting-desc-text">
+                  <strong>检查更新</strong>
+                  <span class="path-mono" :class="{ 'update-failed': updateStatus.phase === 'failed' }">
+                    {{ updateStatusText }}
+                  </span>
+                  <span class="setting-sub-hint">上次检查：{{ lastCheckedText }}</span>
+                </div>
+                <div class="setting-action-group">
+                  <div
+                    v-if="updateStatus.phase === 'downloading' && updateStatus.bytesTotal > 0"
+                    class="update-progress-track"
+                  >
+                    <div
+                      class="update-progress-fill"
+                      :style="{ transform: `scaleX(${updatePercent / 100})` }"
+                    ></div>
+                  </div>
+                  <button
+                    class="btn-fluent-secondary"
+                    @click="checkForUpdate"
+                    :disabled="updateStatus.busy"
+                  >
+                    <i class="ph" :class="updateStatus.busy ? 'ph-spinner ph-spin' : 'ph-arrows-clockwise'"></i>
+                    {{ updateStatus.busy ? '进行中…' : '检查更新' }}
+                  </button>
+                  <button
+                    v-if="updateStatus.phase === 'ready' || (updateStatus.phase === 'failed' && updateStatus.pendingPath)"
+                    class="btn-fluent-primary"
+                    @click="applyUpdate"
+                  >
+                    <i class="ph ph-download"></i>
+                    {{ updateStatus.phase === 'ready' ? '立即更新' : '安装已下载的版本' }}
+                  </button>
+                </div>
+              </div>
+
+              <div class="settings-footer-note">
+                <i class="ph ph-info"></i>
+                飞梭 v{{ localInfo.app_version || '0.1.0' }}
+              </div>
+            </section>
           </div>
         </div>
       </main>
@@ -2697,9 +2665,13 @@
       </div>
     </div>
 
-    <!-- 8. 全局提示 -->
+    <!-- 8. 全局提示（M3 Snackbar：底部传输进度条可见时自动避让） -->
     <transition name="toast-fade">
-      <div v-if="toastMessage" class="fluent-toast" :class="{ error: toastIsError }">
+      <div
+        v-if="toastMessage"
+        class="fluent-toast"
+        :class="{ error: toastIsError, 'above-dock': !!activeProgress }"
+      >
         <i :class="toastIsError ? 'ph-fill ph-warning-circle' : 'ph-fill ph-check-circle'"></i>
         <span>{{ toastMessage }}</span>
       </div>
@@ -2790,6 +2762,74 @@ type TabName = "send" | "shuttle" | "log" | "settings";
 type PathOrigin = "drop" | "input";
 
 const currentTab = ref<TabName>("send");
+const sidebarCollapsed = ref(false);
+const showPathInput = ref(false);
+const historyFilter = ref<"all" | "recv" | "send" | "failed">("all");
+const deviceMenuDev = ref<DeviceRosterEntry | null>(null);
+const deviceMenuPos = ref({ top: 0, left: 0 });
+
+function openDeviceMenu(dev: DeviceRosterEntry, e: MouseEvent) {
+  if (deviceMenuDev.value?.device_id === dev.device_id) {
+    deviceMenuDev.value = null;
+    return;
+  }
+  const menuW = 216;
+  const menuH = 290;
+  const target = e.currentTarget as HTMLElement | null;
+  const rect = target?.getBoundingClientRect();
+  const baseLeft = e.type === "contextmenu" ? e.clientX : (rect ? rect.right - menuW : e.clientX);
+  const baseTop = e.type === "contextmenu" ? e.clientY : (rect ? rect.bottom + 6 : e.clientY);
+  const left = Math.max(12, Math.min(baseLeft, window.innerWidth - menuW - 12));
+  const top = Math.max(48, Math.min(baseTop, window.innerHeight - menuH - 12));
+  deviceMenuPos.value = { top, left };
+  deviceMenuDev.value = dev;
+}
+
+function closeDeviceMenu() {
+  deviceMenuDev.value = null;
+}
+
+function handleMenuToggleTrust(dev: DeviceRosterEntry) {
+  closeDeviceMenu();
+  void toggleTrustLevel(dev.device_id);
+}
+
+function handleMenuRevokeGrants(dev: DeviceRosterEntry) {
+  closeDeviceMenu();
+  void revokeDeviceGrants(dev.device_id, dev.device_name);
+}
+
+function handleMenuOpenScope(dev: DeviceRosterEntry) {
+  closeDeviceMenu();
+  if (store.selectedDeviceId !== dev.device_id) {
+    selectDevice(dev.device_id);
+  }
+  void openScopeEditor();
+}
+
+function handleMenuToggleEndpoints() {
+  closeDeviceMenu();
+  showEndpointBar.value = !showEndpointBar.value;
+}
+
+function handleMenuHideDevice(dev: DeviceRosterEntry) {
+  closeDeviceMenu();
+  void hideDevice(dev.device_id);
+}
+
+function handleMenuUnpairDevice(dev: DeviceRosterEntry) {
+  closeDeviceMenu();
+  confirmUnpair(dev);
+}
+
+function handleMenuDeleteDevice(dev: DeviceRosterEntry) {
+  closeDeviceMenu();
+  confirmDeleteDevice(dev);
+}
+
+function scrollSettingsSection(id: string) {
+  document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
 const isRefreshing = ref(false);
 const isDragOver = ref(false);
 /** Tauri 原生拖放拿到的真实磁盘路径（网页层拿不到，§7.2 拖放的两条通路） */
@@ -2935,6 +2975,13 @@ const transferLogs = ref<TransferRecord[]>([]);
  * 地方能看到那些历史 —— 记录本身不会因为设备从名册消失而消失。
  */
 const historyScope = ref<"device" | "all">("device");
+const filteredTransferLogs = computed(() => {
+  const list = transferLogs.value;
+  if (historyFilter.value === "all") return list;
+  if (historyFilter.value === "recv") return list.filter((l) => l.direction === "recv");
+  if (historyFilter.value === "send") return list.filter((l) => l.direction === "send");
+  return list.filter((l) => l.status === "failed" || l.status === "cancelled");
+});
 /** 记录页真正的过滤目标；空串 = 全部设备。 */
 const historyScopeDeviceId = computed(() =>
   historyScope.value === "device" ? store.selectedDevice?.device_id || "" : ""
@@ -3845,18 +3892,38 @@ function focusablesIn(root: HTMLElement): HTMLElement[] {
   ).filter((el) => el.offsetParent !== null || el === document.activeElement);
 }
 
-/** 当前应该响应 Escape 的弹窗。审批框不参与 —— 它必须由人决定。 */
+/** 当前应该响应 Escape 的弹窗与浮层菜单。审批框不参与 —— 它必须由人决定。 */
 const ESCAPABLE_MODALS: Array<{ ref: () => unknown; close: () => void }> = [
-  { ref: () => codePrompt.value, close: () => cancelCodePrompt() },
-  {
-    ref: () => showDirectConnectDialog.value,
-    close: () => (showDirectConnectDialog.value = false)
-  },
+  { ref: () => deviceMenuDev.value, close: () => closeDeviceMenu() },
+  { ref: () => localDropdownOpen.value || remoteDropdownOpen.value, close: () => { localDropdownOpen.value = false; remoteDropdownOpen.value = false; } },
+  { ref: () => showDirectConnectDialog.value, close: () => (showDirectConnectDialog.value = false) },
   { ref: () => showPairingDialog.value, close: () => closePairingDialog() },
-  { ref: () => clipboardPreview.value, close: () => (clipboardPreview.value = null) }
+  { ref: () => clipboardPreview.value, close: () => (clipboardPreview.value = null) },
+  { ref: () => scopeEditorOpen.value, close: () => closeScopeEditor() },
+  { ref: () => unpairConfirmDev.value, close: () => (unpairConfirmDev.value = null) },
+  { ref: () => deleteConfirmDev.value, close: () => (deleteConfirmDev.value = null) },
+  { ref: () => showPathsModal.value, close: () => (showPathsModal.value = false) },
+  { ref: () => showActiveTransfersModal.value, close: () => (showActiveTransfersModal.value = false) },
+  { ref: () => codePrompt.value, close: () => cancelCodePrompt() }
 ];
 
 function handleDialogKeydown(e: KeyboardEvent) {
+  // 发送页支持 Ctrl+V / Cmd+V 直接发送剪贴板（不干扰输入框内粘贴）
+  if (
+    (e.ctrlKey || e.metaKey) &&
+    !e.altKey &&
+    e.key.toLowerCase() === "v" &&
+    currentTab.value === "send" &&
+    modalStack.value.length === 0
+  ) {
+    const tag = (document.activeElement as HTMLElement | null)?.tagName;
+    if (tag !== "INPUT" && tag !== "TEXTAREA") {
+      e.preventDefault();
+      void handleSendClipboard();
+      return;
+    }
+  }
+
   // Escape: 只关最上面那个可关的弹窗, 而不是全部
   if (e.key === "Escape") {
     for (let i = ESCAPABLE_MODALS.length - 1; i >= 0; i--) {
@@ -3915,6 +3982,13 @@ function handleWindowClickForDropdowns(e: MouseEvent) {
   if (!t?.closest(".custom-dropdown-wrap")) {
     localDropdownOpen.value = false;
     remoteDropdownOpen.value = false;
+  }
+  if (
+    deviceMenuDev.value &&
+    !t?.closest(".device-menu-surface") &&
+    !t?.closest(".device-menu-trigger")
+  ) {
+    deviceMenuDev.value = null;
   }
 }
 
@@ -7903,7 +7977,7 @@ function getFileIcon(name: string) {
   box-sizing: border-box;
 }
 
-/* 2. 标题栏 */
+/* 2. 标题栏（M3 极简桌面顶栏） */
 .app-titlebar {
   height: 40px;
   background: var(--titlebar-bg);
@@ -7918,15 +7992,32 @@ function getFileIcon(name: string) {
 .titlebar-drag-area {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding-left: 14px;
+  gap: 8px;
+  padding-left: 8px;
   flex: 1;
   height: 100%;
+}
+.rail-toggle-btn {
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  display: grid;
+  place-items: center;
+  font-size: var(--fs-title);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.rail-toggle-btn:hover {
+  background: var(--titlebar-hover);
+  color: var(--text-primary);
 }
 .brand-badge {
   width: 22px;
   height: 22px;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -7938,19 +8029,15 @@ function getFileIcon(name: string) {
   object-fit: contain;
   display: block;
 }
-.brand-text { font-size: 13px; font-weight: 700; letter-spacing: 0.02em; }
-.lan-network-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--titlebar-chip-bg);
-  border: 1px solid var(--border-subtle);
-  padding: 2px 10px;
-  border-radius: var(--radius-pill);
-  font-size: 11px;
-  color: var(--text-secondary);
+.brand-text { font-size: var(--fs-body); font-weight: 700; letter-spacing: 0.02em; }
+.titlebar-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  flex-shrink: 0;
 }
-.live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.titlebar-status-dot.online { background: var(--accent); }
 
 .caption-controls {
   display: flex;
@@ -7961,27 +8048,31 @@ function getFileIcon(name: string) {
   pointer-events: auto;
 }
 .caption-btn {
-  width: 46px;
+  width: 44px;
   height: 40px;
   background: transparent;
   border: 0;
   color: var(--text-secondary);
   display: grid;
   place-items: center;
-  font-size: 15px;
+  font-size: var(--fs-subtitle);
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
 .caption-btn:hover { background: var(--titlebar-hover); color: var(--text-primary); }
 .caption-btn.close-caption:hover { background: var(--win-close-hover); color: var(--text-on-solid); }
 
-/* 3. 主区域 */
+/* 3. 主区域（支持 Expanded 252px ↔ M3 Compact Rail 68px） */
 .app-container {
   display: grid;
-  grid-template-columns: 262px 1fr;
+  grid-template-columns: 252px 1fr;
   min-height: 0;
   height: 100%;
   overflow: hidden;
+  transition: grid-template-columns 0.18s ease;
+}
+.app-container.is-rail {
+  grid-template-columns: 68px 1fr;
 }
 
 /* 4. 左侧边栏 */
@@ -7989,9 +8080,41 @@ function getFileIcon(name: string) {
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border-subtle);
   display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto 1fr auto;
   min-height: 0;
   overflow: hidden;
+}
+.app-sidebar.is-rail .local-machine-card {
+  margin: 10px 8px 4px;
+  padding: 8px;
+  justify-content: center;
+}
+.app-sidebar.is-rail .roster-group-head {
+  padding: 8px 0 4px;
+  justify-content: center;
+}
+.app-sidebar.is-rail .sidebar-header-actions {
+  flex-direction: column;
+  gap: 4px;
+}
+.app-sidebar.is-rail .devices-scroll-area {
+  padding: 4px 8px;
+}
+.app-sidebar.is-rail .device-card-row {
+  grid-template-columns: 1fr;
+  justify-items: center;
+  padding: 8px 4px;
+}
+.app-sidebar.is-rail .sidebar-pinned-footer {
+  padding: 8px;
+  align-items: center;
+}
+.app-sidebar.is-rail .btn-open-pairing,
+.app-sidebar.is-rail .btn-sidebar-nav {
+  width: 44px;
+  height: 40px;
+  padding: 0;
+  justify-content: center;
 }
 
 .local-machine-card {
@@ -8004,11 +8127,11 @@ function getFileIcon(name: string) {
   align-items: center;
   gap: 10px;
   cursor: pointer;
-  transition: background 0.18s, border-color 0.18s;
+  transition: background 0.15s, border-color 0.15s;
 }
 .local-machine-card:hover { background: var(--bg-card-hover); border-color: var(--border-strong); }
-.local-machine-card.selected { border-color: var(--accent); background: var(--bg-active); }
 .local-icon {
+  position: relative;
   width: 34px;
   height: 34px;
   border-radius: var(--radius-md);
@@ -8016,31 +8139,50 @@ function getFileIcon(name: string) {
   color: var(--accent-contrast);
   display: grid;
   place-items: center;
-  font-weight: 800;
-  font-size: 14px;
+  font-weight: 700;
+  font-size: var(--fs-subtitle);
   flex-shrink: 0;
 }
 .local-meta { flex: 1; min-width: 0; }
 .machine-name {
   display: block;
-  font-size: 13px;
-  font-weight: 650;
+  font-size: var(--fs-body);
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-primary);
 }
 .daemon-status {
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: var(--text-secondary);
-  margin-top: 1px;
+  margin-top: 2px;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
+  font-family: var(--font-mono);
 }
-.mini-status-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--text-tertiary); }
+.local-copy-icon {
+  font-size: var(--fs-body);
+  color: var(--text-tertiary);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.local-machine-card:hover .local-copy-icon { opacity: 1; }
+.mini-status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-tertiary); flex-shrink: 0; }
 .mini-status-dot.active { background: var(--accent); }
-/* .btn-gear 已随齿轮按钮一起删除（与卡片点击重复，且页签里已有「系统设置」） */
+.avatar-presence-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  border: 2px solid var(--bg-sidebar);
+}
+.avatar-presence-dot.online { background: var(--accent); }
+.avatar-presence-dot.reconnecting { background: var(--warn); }
 
 /* ---- 来源网段编辑器 ----
  *
@@ -8061,7 +8203,7 @@ function getFileIcon(name: string) {
   align-items: stretch;
   gap: 10px;
 }
-.setting-desc-text code.path-mono { font-size: 11.5px; padding: 1px 4px; }
+.setting-desc-text code.path-mono { font-size: var(--fs-label); padding: 1px 4px; }
 
 /* 本节第一行：标题在左，动作（添加 / 已保存）靠右。
  * 用 `.setting-desc-text` 自带的 `flex: 1` 把右侧动作推到底 —— 不额外写
@@ -8076,7 +8218,7 @@ function getFileIcon(name: string) {
  * 单独写死 padding 会让它在整列里显得矮一截，所以只压字号/高度。 */
 .subnet-add {
   padding: 5px 12px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   flex: 0 0 auto;
 }
 .subnet-editor {
@@ -8094,7 +8236,7 @@ function getFileIcon(name: string) {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-pill);
 }
-.subnet-chip > i { font-size: 13px; color: var(--text-tertiary); }
+.subnet-chip > i { font-size: var(--fs-body); color: var(--text-tertiary); }
 .subnet-chip.is-invalid {
   border-color: var(--danger-text);
   background: var(--danger-soft);
@@ -8105,7 +8247,7 @@ function getFileIcon(name: string) {
    * `192.168.31.0/2`，用户会以为值本身是坏的。放宽到 18ch。 */
   width: 18ch;
   padding: 2px 2px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--text-primary);
   background: none;
   border: 0;
@@ -8117,7 +8259,7 @@ function getFileIcon(name: string) {
   background: none;
   color: var(--text-tertiary);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--fs-body);
   padding: 2px 4px;
   border-radius: var(--radius-pill);
 }
@@ -8130,11 +8272,11 @@ function getFileIcon(name: string) {
   align-items: center;
   gap: 6px;
   margin: 0;
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 1.6;
   color: var(--text-tertiary);
 }
-.subnet-state-hint > i { font-size: 14px; flex: 0 0 auto; }
+.subnet-state-hint > i { font-size: var(--fs-subtitle); flex: 0 0 auto; }
 
 /* 压在 **soft 底色** 上的文字必须用 `--*-on-soft`，不是 `--*-text`。
    项目已有既定写法（App.vue 里 .status-chip.untrusted 与 .btn-approval-block），
@@ -8147,14 +8289,14 @@ function getFileIcon(name: string) {
   align-items: flex-start;
   margin: 0;
   padding: 9px 11px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 1.6;
   color: var(--warn-on-soft);
   background: var(--warn-soft);
   border: 1px solid var(--warn-border);
   border-radius: var(--radius-md);
 }
-.subnet-warn-hint > i { flex: 0 0 auto; margin-top: 1px; font-size: 15px; }
+.subnet-warn-hint > i { flex: 0 0 auto; margin-top: 1px; font-size: var(--fs-subtitle); }
 .subnet-warn-hint.is-error {
   color: var(--danger-on-soft);
   background: var(--danger-soft);
@@ -8166,7 +8308,7 @@ function getFileIcon(name: string) {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   font-weight: 700;
   color: var(--text-tertiary);
   letter-spacing: 0.04em;
@@ -8177,7 +8319,7 @@ function getFileIcon(name: string) {
   border: 0;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--fs-subtitle);
   padding: 3px;
   border-radius: var(--radius-sm);
   display: flex;
@@ -8191,77 +8333,180 @@ function getFileIcon(name: string) {
 
 .devices-scroll-area {
   overflow-y: auto;
-  padding: 4px 10px;
+  padding: 4px 10px 8px;
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 .device-card-row {
   display: grid;
-  grid-template-columns: 32px 1fr auto;
+  grid-template-columns: 36px 1fr auto;
   gap: 10px;
   align-items: center;
   padding: 8px 10px;
   border-radius: var(--radius-md);
   cursor: pointer;
-  /* transform 加进 transition 才能让"拖放时放大"是渐变而不是瞬间跳一格。
-   * 只动 transform / opacity / border-color / background：都是合成层属性，
-   * 拖动过程中每帧 elementFromPoint 都在跑，重排会直接把反馈拖成卡顿。 */
   transition: background 0.15s, border-color 0.15s, transform 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
   border: 1px solid transparent;
   will-change: transform, opacity;
 }
 .device-card-row:hover { background: var(--bg-hover-soft); }
-.device-card-row.active { background: var(--bg-active); border-color: var(--accent); }
+.device-card-row.active { background: var(--bg-active); border-color: var(--accent-border); }
 
-/* 原生拖放期间，聚焦目标由 `.drop-target` 放大描边表达，其余卡片淡化；
- * 不做整列上浮 —— 那只会让列表晃动，反而不指明落点。 */
 .os-icon-box {
-  width: 32px;
-  height: 32px;
+  position: relative;
+  width: 36px;
+  height: 36px;
   border-radius: var(--radius-md);
   background: var(--bg-card);
   color: var(--accent-text);
   display: grid;
   place-items: center;
-  font-size: 16px;
+  font-size: var(--fs-title);
+  flex-shrink: 0;
 }
 .device-text-col { min-width: 0; }
-.device-line1 { display: flex; align-items: center; gap: 6px; }
+.device-line1 { display: flex; align-items: center; gap: 5px; min-width: 0; }
 .device-title {
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-primary);
 }
-.device-line2 { font-size: 11px; color: var(--text-secondary); margin-top: 1px; }
-
-.device-action-badge { display: flex; align-items: center; }
-.trust-badge {
-  font-size: 10px;
-  background: var(--accent-soft);
-  color: var(--accent-on-soft);
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  font-weight: 600;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
+.device-trust-glyph {
+  font-size: var(--fs-label);
+  flex-shrink: 0;
 }
+.device-trust-glyph.trusted { color: var(--accent-text); }
+.device-trust-glyph.session { color: var(--info-text); }
+.device-trust-glyph.grant { color: var(--warn-text); }
+.device-line2 {
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.device-action-badge { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.device-menu-trigger {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-secondary);
+  display: grid;
+  place-items: center;
+  font-size: var(--fs-title);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.15s, color 0.15s;
+}
+.device-card-row:hover .device-menu-trigger,
+.device-card-row.active .device-menu-trigger,
+.device-menu-trigger.is-open,
+.device-menu-trigger:focus-visible,
+.device-menu-trigger.header-more-btn {
+  opacity: 1;
+}
+.device-menu-trigger:hover,
+.device-menu-trigger.is-open {
+  background: var(--bg-hover-soft);
+  color: var(--text-primary);
+}
+
+/* M3 统一设备操作溢出菜单 */
+.device-menu-surface {
+  position: fixed;
+  z-index: var(--z-menu);
+  width: 216px;
+  padding: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-modal);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.device-menu-header {
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.device-menu-name {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-menu-sub {
+  font-size: var(--fs-caption);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+.device-menu-divider {
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 4px 2px;
+}
+.device-menu-item {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: var(--fs-body);
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s, color 0.12s;
+}
+.device-menu-item > i {
+  font-size: var(--fs-subtitle);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.device-menu-item > span:first-of-type { flex: 1; }
+.device-menu-item:hover { background: var(--bg-hover-soft); }
+.device-menu-item.is-danger { color: var(--danger-text); }
+.device-menu-item.is-danger > i { color: var(--danger-text); }
+.device-menu-item.is-danger:hover { background: var(--danger-soft); }
+.menu-item-tag {
+  font-size: var(--fs-caption);
+  padding: 2px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-hover-soft);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.menu-item-tag.warn {
+  background: var(--warn-soft);
+  color: var(--warn-on-soft);
+}
+
 .btn-quick-pair {
   background: var(--accent);
   color: var(--accent-contrast);
   border: 0;
-  border-radius: var(--radius-sm);
-  font-size: 11px;
-  font-weight: 700;
-  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+  padding: 4px 10px;
   cursor: pointer;
   transition: filter 0.15s;
 }
-.btn-quick-pair:hover { filter: brightness(1.12); }
+.btn-quick-pair:hover { filter: brightness(1.1); }
 
 .discovery-empty-state { padding: 24px 14px; text-align: center; color: var(--text-tertiary); }
 .radar-pulse-ring {
@@ -8272,7 +8517,7 @@ function getFileIcon(name: string) {
   color: var(--accent-on-soft);
   display: grid;
   place-items: center;
-  font-size: 22px;
+  font-size: var(--fs-headline);
   margin: 0 auto 10px;
   animation: pulse 2.5s infinite;
 }
@@ -8285,7 +8530,7 @@ function getFileIcon(name: string) {
  * 元素从 h4 换成 p 之后这条规则会**静默失效**，字号退回浏览器默认 16px。
  * 四个属性都是显式声明，所以换标签后视觉完全一致。 */
 .discovery-empty-state .discovery-status-text {
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   color: var(--text-secondary);
   margin-bottom: 12px;
   font-weight: 600;
@@ -8316,17 +8561,17 @@ function getFileIcon(name: string) {
   border: 0;
   cursor: pointer;
   text-align: left;
-  font-size: 12px;
+  font-size: var(--fs-label);
   font-weight: 600;
   color: var(--warn-text);
   transition: background 0.15s;
 }
 .firewall-hint-summary:hover { background: var(--bg-hover-soft); }
-.firewall-hint-summary > i:first-child { font-size: 15px; flex: 0 0 auto; }
+.firewall-hint-summary > i:first-child { font-size: var(--fs-subtitle); flex: 0 0 auto; }
 .firewall-hint-summary > span { flex: 1; min-width: 0; }
 .firewall-hint-summary > i:last-child {
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   transition: transform 0.18s ease;
 }
 .firewall-hint-summary > i:last-child.rotated { transform: rotate(180deg); }
@@ -8339,14 +8584,14 @@ function getFileIcon(name: string) {
 }
 .firewall-hint-body p {
   margin: 0;
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   line-height: 1.65;
   color: var(--text-secondary);
 }
 .firewall-hint-how { margin-top: 6px !important; }
 .firewall-hint-body code {
   font-family: Consolas, "Cascadia Mono", monospace;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   padding: 1px 4px;
   border-radius: var(--radius-sm);
   background: var(--bg-inset);
@@ -8359,7 +8604,7 @@ function getFileIcon(name: string) {
   color: var(--accent-on-soft);
   padding: 6px 12px;
   border-radius: var(--radius-md);
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   font-weight: 600;
   cursor: pointer;
   display: inline-flex;
@@ -8374,7 +8619,7 @@ function getFileIcon(name: string) {
   color: var(--text-secondary);
   padding: 6px 10px;
   border-radius: var(--radius-md);
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   font-weight: 600;
   cursor: pointer;
   display: inline-flex;
@@ -8392,7 +8637,7 @@ function getFileIcon(name: string) {
   align-items: center;
   justify-content: space-between;
   padding: 10px 12px 6px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   letter-spacing: 0.04em;
   color: var(--text-dim);
   user-select: none;
@@ -8433,7 +8678,7 @@ function getFileIcon(name: string) {
 .device-card-row.offline .device-title { text-decoration: none; }
 
 .self-tag {
-  font-size: 10px;
+  font-size: var(--fs-caption);
   padding: 0 5px;
   border-radius: var(--radius-sm);
   background: var(--bg-hover-soft);
@@ -8477,7 +8722,7 @@ function getFileIcon(name: string) {
   border: 1px solid var(--danger-border);
   border-radius: var(--radius-sm);
   color: var(--danger-text);
-  font-size: 11px;
+  font-size: var(--fs-caption);
   padding: 3px 8px;
   cursor: pointer;
 }
@@ -8485,7 +8730,7 @@ function getFileIcon(name: string) {
 
 .roster-empty-hint {
   padding: 8px 12px 12px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 1.6;
   color: var(--text-dim);
 }
@@ -8501,7 +8746,7 @@ function getFileIcon(name: string) {
 }
 .hidden-drawer-hint {
   margin: 0 0 8px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   line-height: 1.55;
   color: var(--text-dim);
 }
@@ -8524,7 +8769,7 @@ function getFileIcon(name: string) {
   border-radius: var(--radius-md);
   padding: 7px 12px;
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--fs-label);
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -8551,7 +8796,7 @@ function getFileIcon(name: string) {
   border-radius: var(--radius-md);
   padding: 7px 12px;
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--fs-label);
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -8571,7 +8816,7 @@ function getFileIcon(name: string) {
   padding: 0 2px;
   /* 圆角必须用令牌：相邻容器差 1px 会被用户看成"圆角不一致"而不是层级 */
   border-radius: var(--radius-sm);
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: var(--info-text);
   cursor: pointer;
 }
@@ -8581,7 +8826,7 @@ function getFileIcon(name: string) {
 }
 .approval-hint {
   margin: 10px 0 0;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   line-height: 1.6;
   color: var(--text-dim);
   display: flex;
@@ -8611,7 +8856,7 @@ function getFileIcon(name: string) {
   padding: 12px;
   max-height: 300px;
   overflow: auto;
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
@@ -8656,16 +8901,6 @@ function getFileIcon(name: string) {
  * 屏幕阅读器仍需要文字替代视觉信号，改用 `.view-heading-sr` 视觉隐藏。
  */
 
-/* 地址栏（§7.2）：卷下拉 + 完整路径 */
-.pane-address-bar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 10px 6px;
-  font-size: 11.5px;
-  color: var(--text-secondary);
-  min-width: 0;
-}
 /* 自定义深色下拉位置组件（替代系统原生 <select>） */
 .custom-dropdown-wrap {
   position: relative;
@@ -8685,7 +8920,7 @@ function getFileIcon(name: string) {
   border-radius: var(--radius-md);
   padding: 2px 7px;
   color: var(--text-primary);
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   font-family: inherit;
   cursor: pointer;
   outline: none;
@@ -8718,7 +8953,7 @@ function getFileIcon(name: string) {
   text-align: left;
 }
 .dropdown-trigger-caret {
-  font-size: 10px;
+  font-size: var(--fs-caption);
   color: var(--text-tertiary);
   transition: transform 0.2s ease;
 }
@@ -8754,7 +8989,7 @@ function getFileIcon(name: string) {
   gap: 7px;
   padding: 6px 8px;
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--text-primary);
   cursor: pointer;
   transition: background 0.12s ease;
@@ -8776,13 +9011,13 @@ function getFileIcon(name: string) {
 }
 .item-tag-text,
 .item-sub-text {
-  font-size: 10.5px;
+  font-size: var(--fs-caption);
   color: var(--text-tertiary);
   font-family: var(--font-mono, monospace);
 }
 .dropdown-group-header {
   padding: 6px 8px 2px;
-  font-size: 10.5px;
+  font-size: var(--fs-caption);
   font-weight: 600;
   color: var(--text-tertiary);
   text-transform: uppercase;
@@ -8808,27 +9043,20 @@ function getFileIcon(name: string) {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--fs-label);
   font-family: inherit;
   cursor: pointer;
 }
 .load-more-btn:hover:not(:disabled) { background: var(--bg-hover-soft); color: var(--text-primary); }
 .load-more-btn:disabled { opacity: 0.5; cursor: default; }
 
-/* 连接路径切换条（§3.9 / P4 ⑧） */
-.endpoint-bar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 6px 2px 2px;
-}
+/* 连接路径切换按钮与端点芯片 */
 .endpoint-toggle {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   padding: 3px 9px;
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   font-family: inherit;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-pill);
@@ -8839,7 +9067,7 @@ function getFileIcon(name: string) {
 .endpoint-toggle:hover { background: var(--bg-hover-soft); color: var(--text-primary); }
 .endpoint-toggle .ph-caret-down.rotated { transform: rotate(180deg); }
 .endpoint-current {
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   font-weight: 600;
   color: var(--accent-on-soft);
 }
@@ -8848,7 +9076,7 @@ function getFileIcon(name: string) {
   align-items: center;
   gap: 5px;
   padding: 3px 9px;
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   font-family: inherit;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-pill);
@@ -8866,7 +9094,7 @@ function getFileIcon(name: string) {
 .endpoint-chip:disabled { opacity: 0.55; cursor: not-allowed; }
 .endpoint-ip {
   font-family: var(--font-mono, ui-monospace, Consolas, monospace);
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: var(--text-tertiary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -8879,7 +9107,7 @@ function getFileIcon(name: string) {
   align-items: center;
   gap: 4px;
   padding: 3px 9px;
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   font-family: inherit;
   color: var(--text-tertiary);
   background: transparent;
@@ -8901,7 +9129,7 @@ function getFileIcon(name: string) {
   align-items: center;
   gap: 4px;
   padding: 3px 9px;
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   font-family: inherit;
   color: var(--text-tertiary);
   background: transparent;
@@ -8922,7 +9150,7 @@ function getFileIcon(name: string) {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-modal);
-  font-size: 13px;
+  font-size: var(--fs-body);
   color: var(--text-primary);
   overflow: hidden;
   display: flex;
@@ -8942,11 +9170,11 @@ function getFileIcon(name: string) {
 }
 .unpair-title-row h3 {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--fs-subtitle);
   font-weight: 600;
 }
 .unpair-title-row i {
-  font-size: 18px;
+  font-size: var(--fs-headline);
   color: var(--warn-text);
 }
 .unpair-modal-body {
@@ -8957,7 +9185,7 @@ function getFileIcon(name: string) {
 }
 .unpair-headline {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--fs-subtitle);
   line-height: 1.5;
   color: var(--text-primary);
 }
@@ -8974,12 +9202,12 @@ function getFileIcon(name: string) {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   line-height: 1.4;
   color: var(--text-secondary);
 }
 .unpair-impact-item i {
-  font-size: 15px;
+  font-size: var(--fs-subtitle);
   color: var(--text-tertiary);
   margin-top: 1px;
   flex-shrink: 0;
@@ -9009,12 +9237,13 @@ function getFileIcon(name: string) {
   max-height: calc(100vh - 64px);
   display: flex;
   flex-direction: column;
-  background: var(--bg-card);
+  background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-modal);
-  font-size: 13px;
+  font-size: var(--fs-body);
   color: var(--text-primary);
+  overflow: hidden;
 }
 .scope-head {
   display: flex;
@@ -9023,13 +9252,13 @@ function getFileIcon(name: string) {
   padding: 12px 14px;
   border-bottom: 1px solid var(--border-subtle);
 }
-.scope-head h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.scope-head h3 { margin: 0; font-size: var(--fs-subtitle); font-weight: 600; }
 .scope-head h3 i { margin-right: 5px; color: var(--text-tertiary); }
 .scope-close {
   background: transparent;
   border: none;
   color: var(--text-tertiary);
-  font-size: 15px;
+  font-size: var(--fs-subtitle);
   cursor: pointer;
   padding: 2px 5px;
   border-radius: var(--radius-sm);
@@ -9041,7 +9270,7 @@ function getFileIcon(name: string) {
 .scope-field:last-child { margin-bottom: 0; }
 .scope-label {
   display: block;
-  font-size: 12px;
+  font-size: var(--fs-label);
   font-weight: 600;
   color: var(--text-secondary);
   margin-bottom: 7px;
@@ -9049,7 +9278,7 @@ function getFileIcon(name: string) {
 .scope-label-hint {
   display: block;
   font-weight: 400;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: var(--text-tertiary);
   margin-top: 2px;
 }
@@ -9087,7 +9316,7 @@ function getFileIcon(name: string) {
   cursor: pointer;
 }
 .scope-mode-title {
-  font-size: 12.5px;
+  font-size: var(--fs-body);
 }
 
 .scope-status-chip {
@@ -9098,16 +9327,16 @@ function getFileIcon(name: string) {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
   border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
   border-radius: var(--radius-md);
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   color: var(--text-primary);
 }
 .scope-status-chip i {
-  font-size: 18px;
+  font-size: var(--fs-headline);
   color: var(--accent-text, var(--accent));
 }
 
 .scope-sub-label {
-  font-size: 12px;
+  font-size: var(--fs-label);
   font-weight: 600;
   color: var(--text-secondary);
   margin-bottom: 6px;
@@ -9121,7 +9350,7 @@ function getFileIcon(name: string) {
 }
 .path-input-group .standard-text-input {
   flex: 1;
-  font-size: 12px;
+  font-size: var(--fs-label);
   padding: 6px 8px;
 }
 
@@ -9142,7 +9371,7 @@ function getFileIcon(name: string) {
   background: var(--bg-hover-soft);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   font-family: var(--font-mono, monospace);
   color: var(--text-primary);
 }
@@ -9181,14 +9410,14 @@ function getFileIcon(name: string) {
   margin-bottom: 6px;
 }
 .quick-preset-label {
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: var(--text-tertiary);
 }
 .quick-preset-btn {
   background: var(--bg-hover-soft);
   border: 1px dashed var(--border-subtle);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-family: var(--font-mono, monospace);
   padding: 2px 7px;
   border-radius: var(--radius-pill);
@@ -9209,7 +9438,7 @@ function getFileIcon(name: string) {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   cursor: pointer;
   color: var(--text-primary);
 }
@@ -9224,7 +9453,7 @@ function getFileIcon(name: string) {
   align-items: center;
   gap: 5px;
   padding: 4px 9px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-pill);
   cursor: pointer;
@@ -9235,14 +9464,14 @@ function getFileIcon(name: string) {
   color: var(--accent-on-soft);
   background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
-.scope-vol-free { font-size: 10.5px; color: var(--text-tertiary); }
+.scope-vol-free { font-size: var(--fs-caption); color: var(--text-tertiary); }
 
 .drop-sub-tip {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 5px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--text-tertiary);
   margin-top: 4px;
 }
@@ -9260,7 +9489,7 @@ function getFileIcon(name: string) {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-modal);
-  font-size: 13px;
+  font-size: var(--fs-body);
   color: var(--text-primary);
   overflow: hidden;
 }
@@ -9275,7 +9504,7 @@ function getFileIcon(name: string) {
  * 说得不够清楚，用户会低头在自己的窗口上找那个码。 */
 .code-prompt-hint {
   margin: 0 0 10px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 1.6;
   color: var(--text-secondary);
 }
@@ -9286,7 +9515,7 @@ function getFileIcon(name: string) {
 .code-prompt-reason {
   margin: 0 0 10px;
   padding: 7px 9px;
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   line-height: 1.55;
   color: var(--warn-on-soft);
   background: var(--warn-soft);
@@ -9301,7 +9530,7 @@ function getFileIcon(name: string) {
 .code-prompt-field-label {
   display: block;
   margin-bottom: 6px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   font-weight: 600;
   color: var(--text-secondary);
 }
@@ -9309,7 +9538,7 @@ function getFileIcon(name: string) {
   width: 100%;
   box-sizing: border-box;
   padding: 9px 10px;
-  font-size: 22px;
+  font-size: var(--fs-headline);
   letter-spacing: 7px;
   /* 字距会把最后一个字符推出去，用等量内边距把它拉回来居中 */
   padding-left: calc(10px + 7px);
@@ -9327,7 +9556,7 @@ function getFileIcon(name: string) {
 }
 .code-prompt-note {
   margin: 8px 0 0;
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   line-height: 1.55;
   color: var(--text-tertiary);
 }
@@ -9343,17 +9572,9 @@ function getFileIcon(name: string) {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 11px 14px;
+  padding: 12px 16px;
   border-top: 1px solid var(--border-subtle);
-  background: var(--bg-card);
-  /* 贴底圆角：底部操作条是弹层最后一个子元素，不继承圆角会漏出
-   * 遮罩背景形成四个小缺口。
-   *
-   * ⚠️ 这里**写死数值**而不是 var(--radius-lg)：CSS 的多值简写
-   * `0 0 X X` 里插不进变量（`0 0 var(--radius-lg) var(--radius-lg)`
-   * 语法非法，var() 整体是一个值）。数值必须与 --radius-lg 保持
-   * 一致（10px）—— 圆角收敛到四个令牌时，这一条是唯一手写值。 */
-  border-radius: 0 0 10px 10px;
+  background: var(--bg-elevated);
 }
 /* 左侧的"恢复默认"是次要操作，右边两个是主流程。
  * 用 margin-left:auto 把主按钮推到右边，而不是靠一堆空 div 撑。 */
@@ -9361,7 +9582,7 @@ function getFileIcon(name: string) {
 .scope-btn {
   appearance: none;
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   line-height: 1;
   padding: 7px 14px;
   border-radius: var(--radius-md);
@@ -9434,14 +9655,14 @@ function getFileIcon(name: string) {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   font-weight: 600;
   color: var(--warn-text);
   margin-bottom: 6px;
 }
 .grant-code-hint {
   margin: 0 0 8px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 1.6;
   color: var(--text-secondary);
 }
@@ -9457,7 +9678,7 @@ function getFileIcon(name: string) {
 .grant-code-display {
   margin: 4px 0 8px;
   padding: 12px 10px;
-  font-size: 32px;
+  font-size: var(--fs-display);
   font-weight: 700;
   line-height: 1.1;
   letter-spacing: 8px;
@@ -9473,7 +9694,7 @@ function getFileIcon(name: string) {
 }
 .grant-code-error {
   margin: 8px 0 0;
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 1.5;
   color: var(--danger-text);
 }
@@ -9489,40 +9710,40 @@ function getFileIcon(name: string) {
 .header-actions { display: flex; align-items: center; gap: 8px; }
 .entry-speed-text {
   font-variant-numeric: tabular-nums;
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--success-text);
   min-width: 62px;
   text-align: right;
 }
 .entry-speed-text.unknown { color: var(--text-dim); }
-.entry-sub.dimmed { opacity: 0.7; font-size: 11px; }
+.entry-sub.dimmed { opacity: 0.7; font-size: var(--fs-caption); }
 .link-tag {
   display: inline-block;
   margin-left: 6px;
   padding: 0 5px;
-  font-size: 10px;
+  font-size: var(--fs-caption);
   border-radius: var(--radius-sm);
   background: var(--bg-hover-soft);
   color: var(--text-tertiary);
 }
 
 .sidebar-pinned-footer {
-  padding: 12px;
+  padding: 10px 12px 12px;
   border-top: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   background: var(--bg-sidebar);
 }
 .btn-open-pairing {
   width: 100%;
-  height: 38px;
+  height: 36px;
   border-radius: var(--radius-md);
-  background: var(--bg-card);
-  border: 1px solid var(--border-subtle);
-  color: var(--text-primary);
-  font-size: 12.5px;
-  font-weight: 650;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: var(--accent-on-soft);
+  font-size: var(--fs-body);
+  font-weight: 600;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -9531,17 +9752,44 @@ function getFileIcon(name: string) {
   transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
 .btn-open-pairing:hover {
-  background: var(--bg-card-hover);
-  border-color: var(--accent-text);
-  color: var(--accent-text);
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
 }
-.save-dir-card { font-size: 11px; }
+.btn-sidebar-nav {
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: var(--radius-md);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  font-size: var(--fs-body);
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.btn-sidebar-nav > span { flex: 1; text-align: left; }
+.btn-sidebar-nav:hover {
+  background: var(--bg-hover-soft);
+  color: var(--text-primary);
+}
+.btn-sidebar-nav.active {
+  background: var(--bg-active);
+  color: var(--accent-on-soft);
+  border-color: var(--accent-border);
+}
+.save-dir-card {
+  font-size: var(--fs-caption);
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  background: var(--bg-row-soft);
+  border: 1px solid var(--border-subtle);
+}
 .dir-header { display: flex; justify-content: space-between; color: var(--text-tertiary); margin-bottom: 3px; }
-/* 原来是 `<a href="javascript:void(0)">`: 那是**假链接** ——
- * 没有真实目的地, 却带着链接的全部视觉暗示(可点、有 hover、
- * 中键能开新页)。屏幕阅读器会把它念成链接, 用户按 Enter 却什么
- * 都不会发生。换成真 <button>, 语义和视觉对得上。
- * 样式从 `.dir-header a` 搬过来, 视觉零变化。 */
 .dir-open-btn {
   background: none;
   border: 0;
@@ -9554,9 +9802,12 @@ function getFileIcon(name: string) {
 .dir-open-btn:hover { text-decoration: underline; }
 .dir-path-string {
   color: var(--text-secondary);
-  word-break: break-all;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   line-height: 1.35;
-  font-size: 10.5px;
+  font-size: var(--fs-caption);
+  font-family: var(--font-mono);
   cursor: pointer;
 }
 .dir-path-string:hover { color: var(--accent-text); }
@@ -9564,105 +9815,115 @@ function getFileIcon(name: string) {
 /* 5. 右侧工作区 */
 .app-workspace {
   display: grid;
-  /* `auto` 而不是固定 46px：顶部这一行会**换行**（见 .workspace-tabs-bar），
-   * 固定高度会把第二行裁掉 —— 父级是 overflow:hidden，裁掉的部分用户
-   * 完全看不到，表现为"某个按钮凭空消失"。minmax 保住最小观感高度。 */
-  grid-template-rows: minmax(46px, auto) 1fr;
+  grid-template-rows: auto 1fr;
   min-height: 0;
   height: 100%;
   background: var(--bg-window);
   overflow: hidden;
 }
-
+.workspace-header-stack {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-window);
+}
 .workspace-tabs-bar {
   display: flex;
-  /* 允许换行。这是"选中设备后内容被挤压"的正解：
-   * 选中设备会让右侧多出「目标 + 设备名 + 信任徽章 + 访问范围 + 连接路径」
-   * 好几个元素，窗口不够宽时**整块换到第二行**，而不是把每个元素都压扁。
-   * 不换行的话 flex 会去压缩每个子项，文字被逐字折行
-   * （截图里「已信任」竖着排成三行就是这么来的）。 */
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: space-between;
   align-items: center;
-  /* 换行后第二行不能贴着第一行，视觉上会像两排挤在一起 */
-  row-gap: 6px;
-  padding: 6px 20px;
-  border-bottom: 1px solid var(--border-subtle);
-  column-gap: 12px;
+  min-height: 50px;
+  padding: 8px 20px;
+  gap: 12px;
 }
-/* 标签栏永远不参与压缩：它被压扁是最伤的一种表现（按钮里的字被切掉），
- * 而窗口变窄时让右侧的目标块换行就好看得多。 */
-.segmented-tabs { display: flex; gap: 4px; flex: 0 0 auto; }
+.segmented-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  flex: 0 0 auto;
+}
 .segmented-tabs button {
-  height: 32px;
+  height: 30px;
   padding: 0 14px;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-pill);
   background: transparent;
   border: 0;
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   font-weight: 600;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
   transition: background 0.15s, color 0.15s;
 }
 .segmented-tabs button:hover { background: var(--bg-hover-soft); color: var(--text-primary); }
 .segmented-tabs button.active {
-  background: var(--bg-card);
-  color: var(--text-primary);
-  box-shadow: var(--shadow-card);
+  background: var(--bg-active);
+  color: var(--accent-on-soft);
 }
 .current-target-pill {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   background: var(--bg-card);
-  padding: 4px 10px;
-  border-radius: var(--radius-md);
+  padding: 4px 6px 4px 12px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border-subtle);
-  /* 不再限死 45%：外层已经能换行了，硬上限只会逼得这一块自己内部折行。
-   * 留一个上限是为了防止「系统设置」页签下设备名超长时把整行撑爆。 */
-  max-width: min(60%, 720px);
-  /* 块内也允许换行：设备名 + 徽章 + 访问范围 + 连接路径在窄窗口里
-   * 必然放不下，让它们换行比压扁好。 */
-  flex-wrap: wrap;
-  row-gap: 4px;
+  min-width: 0;
+  max-width: 58%;
+  flex-shrink: 1;
 }
-/* 徽章、按钮、设备名都不参与压缩。
- * flex 子项默认 `min-width: auto`，被压缩时不会缩到内容宽度以下，
- * 而是**溢出**——但在 nowrap + 固定 padding 的组合下，实际表现是
- * 文本被逐字折行（「已信任」竖排三行）。显式 nowrap + 不收缩即可根治。 */
 .target-prefix,
-.target-name,
 .status-chip,
 .scope-open-btn {
   flex: 0 0 auto;
   white-space: nowrap;
 }
-.target-prefix { color: var(--text-tertiary); font-size: 11px; }
+.target-prefix { color: var(--text-tertiary); font-size: var(--fs-caption); }
 .target-name {
   color: var(--text-primary);
+  font-size: var(--fs-body);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  /* 设备名是这一块里唯一"可以无限长"的内容，给它 min-width:0 才能真正
-   * 触发 ellipsis（否则它会顶着 min-width:auto 拒绝收缩）。 */
   min-width: 0;
+  flex: 0 1 auto;
 }
 .status-chip {
-  font-size: 10.5px;
-  padding: 2px 7px;
-  border-radius: var(--radius-sm);
+  font-size: var(--fs-caption);
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
   font-weight: 600;
   border: 0;
 }
 .status-chip.trusted { background: var(--accent-soft); color: var(--accent-on-soft); }
 .status-chip.untrusted { background: var(--warn-soft); color: var(--warn-on-soft); cursor: pointer; }
-.status-chip.untrusted:hover { filter: brightness(1.1); }
+.status-chip.untrusted:hover { filter: brightness(1.08); }
+
+.endpoint-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 20px 10px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-sidebar);
+}
+.endpoint-bar-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-caption);
+  color: var(--text-tertiary);
+  margin-right: 4px;
+}
 
 .tab-page {
   padding: 20px 24px;
@@ -9671,12 +9932,19 @@ function getFileIcon(name: string) {
   box-sizing: border-box;
 }
 
-/* 6. 发送页 */
-.view-send { display: flex; flex-direction: column; gap: 16px; }
+/* 6. 发送页（M3 Hero + 待发队列态自动收缩） */
+.view-send {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 820px;
+  width: 100%;
+  margin: 0 auto;
+}
 .drag-drop-card {
   flex: 1;
-  min-height: 250px;
-  border: 2px dashed var(--drop-border);
+  min-height: 260px;
+  border: 1.5px dashed var(--drop-border);
   border-radius: var(--radius-lg);
   background: var(--drop-bg);
   display: flex;
@@ -9684,8 +9952,33 @@ function getFileIcon(name: string) {
   align-items: center;
   justify-content: center;
   text-align: center;
-  padding: 24px;
-  transition: border-color 0.2s, background 0.2s;
+  padding: 28px 24px;
+  gap: 6px;
+  transition: border-color 0.2s, background 0.2s, padding 0.2s;
+}
+.drag-drop-card.is-compact {
+  flex: 0 0 auto;
+  min-height: 68px;
+  flex-direction: row;
+  justify-content: space-between;
+  text-align: left;
+  padding: 12px 16px;
+  gap: 14px;
+}
+.drag-drop-card.is-compact .drop-illustration-icon {
+  width: 40px;
+  height: 40px;
+  font-size: var(--fs-headline);
+  margin-bottom: 0;
+  flex-shrink: 0;
+}
+.drag-drop-card.is-compact .drop-copy-col {
+  flex: 1;
+  min-width: 0;
+}
+.drag-drop-card.is-compact .drop-title {
+  font-size: var(--fs-subtitle);
+  margin-bottom: 0;
 }
 .drag-drop-card:hover, .drag-drop-card.is-dragging {
   border-color: var(--accent);
@@ -9699,40 +9992,54 @@ function getFileIcon(name: string) {
   color: var(--accent-on-soft);
   display: grid;
   place-items: center;
-  font-size: 26px;
-  margin-bottom: 12px;
+  font-size: var(--fs-display);
+  margin-bottom: 10px;
 }
-.drag-drop-card h3 { font-size: 18px; font-weight: 700; margin-bottom: 10px; color: var(--text-primary); }
-/* 规则行：图标 + 一句话，`b` 只加粗规则里那个关键词。
- * 不用彩色徽章 —— 两条规则是并列的，一条特殊一条不特殊会暗示它们等级不同。 */
-.drop-rule {
-  display: flex;
-  align-items: baseline;
-  justify-content: center;
-  gap: 7px;
-  margin: 0 0 5px;
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--text-secondary);
-}
-.drop-rule i {
-  color: var(--text-tertiary);
-  font-size: 13px;
-  /* 图标是 inline 元素，baseline 对齐会让它比文字低一点点 */
-  transform: translateY(1px);
-}
-.drop-rule b {
+.drop-title {
+  font-size: var(--fs-headline);
+  font-weight: 700;
+  margin-bottom: 4px;
   color: var(--text-primary);
-  font-weight: 600;
 }
-.drop-hint {
-  font-size: 12px;
+.drop-copy-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.drag-drop-card.is-compact .drop-copy-col {
+  align-items: flex-start;
+}
+.drop-sub-tip {
+  font-size: var(--fs-label);
+  color: var(--text-secondary);
+  margin-bottom: 14px;
+}
+.drop-cta-buttons {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.drag-drop-card.is-compact .drop-cta-buttons {
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+}
+.path-input-close {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--text-tertiary);
-  max-width: 46ch;
-  line-height: 1.5;
-  margin: 10px 0 18px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  margin-left: auto;
 }
-.drop-cta-buttons { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+.path-input-close:hover {
+  background: var(--bg-hover-soft);
+  color: var(--text-primary);
+}
 
 /* 6.1 路径直达（粘贴路径直接发送）
  *
@@ -9759,7 +10066,7 @@ function getFileIcon(name: string) {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   color: var(--text-secondary);
 }
 .path-input-head > i { color: var(--text-tertiary); }
@@ -9769,11 +10076,11 @@ function getFileIcon(name: string) {
   /* 说明是给"想知道能粘什么"的人看的，占满剩余宽度即可换行 */
   flex: 1 1 auto;
   min-width: 0;
-  font-size: 11.5px;
+  font-size: var(--fs-label);
 }
 .path-input-hint code {
   font-family: var(--font-mono, ui-monospace, Consolas, monospace);
-  font-size: 11px;
+  font-size: var(--fs-caption);
   padding: 1px 4px;
   border-radius: var(--radius-sm);
   background: var(--bg-inset);
@@ -9789,7 +10096,7 @@ function getFileIcon(name: string) {
   font-family: var(--font-mono, ui-monospace, Consolas, monospace);
   /* 命令一样的东西用等宽字：路径里的 l / I / 1 在比例字体里分不开，
    * 而用户是拿眼睛逐字核对路径的。 */
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   line-height: 1.6;
   color: var(--text-primary);
   background: var(--bg-inset);
@@ -9813,7 +10120,7 @@ function getFileIcon(name: string) {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   color: var(--text-tertiary);
   /* 与按钮第一行文字对齐（按钮 padding 9px + 13px 字） */
   padding-top: 8px;
@@ -9834,7 +10141,7 @@ function getFileIcon(name: string) {
   display: flex;
   align-items: flex-start;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 1.5;
   color: var(--danger-text);
   /* 长路径要能折行，而不是把卡片撑出横向滚动 */
@@ -9847,25 +10154,19 @@ function getFileIcon(name: string) {
 .btn-fluent-primary {
   background: var(--accent);
   color: var(--accent-contrast);
-  font-weight: 700;
+  font-weight: 600;
   border: 0;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-pill);
   padding: 9px 20px;
-  font-size: 13px;
+  font-size: var(--fs-body);
   display: inline-flex;
   align-items: center;
   gap: 8px;
   cursor: pointer;
-  transition: filter 0.15s, transform 0.1s;
+  white-space: nowrap;
+  transition: filter 0.15s, background 0.15s;
 }
 .btn-fluent-primary:hover { filter: brightness(1.08); }
-.btn-fluent-primary:active { transform: scale(0.98); }
-/* 禁用态：改成中性底色 + 仍可读的文字，而不是整体压到 45% 透明。
- *
- * 实测 `opacity: 0.45` 让主按钮上的深色文字对比度掉到约 3.4:1，
- * 而主按钮的禁用态在界面上**很常见**（输入框为空时的「开始连接」、
- * 没选文件时的「发送」）。用户需要能读出"这个按钮是什么、为什么点不了"，
- * 而不是面对一团灰绿。 */
 .btn-fluent-primary:disabled {
   cursor: not-allowed;
   opacity: 1;
@@ -9878,24 +10179,33 @@ function getFileIcon(name: string) {
   background: var(--bg-card);
   color: var(--text-primary);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  /* 左右内边距必须与 primary 一致（20px）。
-   *
-   * 早先是 18px vs primary 的 20px：两个按钮并排时，图标与文字的
-   * 视觉重心偏移 2px，右边看起来"一个胖一个瘦"。单看每个都正常，
-   * 并排就是毛边 —— 而它们几乎总是并排出现（选择文件 / 发送剪贴板）。 */
+  border-radius: var(--radius-pill);
   padding: 9px 20px;
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 600;
   display: inline-flex;
   align-items: center;
   gap: 8px;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
 .btn-fluent-secondary:hover { background: var(--bg-card-hover); border-color: var(--border-strong); }
-/* 次要按钮的禁用态保持可读：0.5 透明时文字约 4.1:1，压线。
- * 直接换中性文字色，不再依赖透明度。 */
+.btn-fluent-secondary.btn-tonal {
+  background: var(--accent-soft);
+  color: var(--accent-on-soft);
+  border-color: var(--accent-border);
+}
+.btn-fluent-secondary.btn-tonal:hover {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border-color: var(--accent);
+}
+.btn-fluent-secondary.is-active-toggle {
+  background: var(--bg-active);
+  color: var(--accent-on-soft);
+  border-color: var(--accent-border);
+}
 .btn-fluent-secondary:disabled {
   cursor: not-allowed;
   opacity: 1;
@@ -9904,20 +10214,18 @@ function getFileIcon(name: string) {
 }
 
 .btn-danger-solid {
-  /* 必须用 --danger-solid 而不是 --danger: 白字压 #ff6b6b(深色主题的
-     --danger) 只有 2.78:1, 按钮文字几乎看不清。--danger-solid 4.69:1。 */
   background: var(--danger-solid);
   color: var(--text-on-solid);
   border: 0;
-  border-radius: var(--radius-md);
-  /* 与其它同尺寸按钮统一（primary / secondary 都是 20px） */
+  border-radius: var(--radius-pill);
   padding: 9px 20px;
-  font-size: 13px;
-  font-weight: 650;
+  font-size: var(--fs-body);
+  font-weight: 600;
   display: inline-flex;
   align-items: center;
   gap: 8px;
   cursor: pointer;
+  white-space: nowrap;
   transition: filter 0.15s;
 }
 .btn-danger-solid:hover { filter: brightness(1.08); }
@@ -9932,12 +10240,12 @@ function getFileIcon(name: string) {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   font-weight: 650;
   color: var(--text-primary);
   margin-bottom: 10px;
 }
-.clear-all-link { background: none; border: 0; color: var(--danger-text); cursor: pointer; font-size: 12px; }
+.clear-all-link { background: none; border: 0; color: var(--danger-text); cursor: pointer; font-size: var(--fs-label); }
 .clear-all-link:hover { text-decoration: underline; }
 /*
   落点行：紧贴标题栏，比标题小一档、字重更轻 ——
@@ -9950,7 +10258,7 @@ function getFileIcon(name: string) {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--text-secondary);
   margin: -4px 0 8px;
   min-width: 0;
@@ -9969,7 +10277,7 @@ function getFileIcon(name: string) {
   padding: 7px 12px;
   background: var(--bg-row-soft);
   border-radius: var(--radius-md);
-  font-size: 12.5px;
+  font-size: var(--fs-body);
 }
 .row-fname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
 /* 目录的「N 个文件」：放在名字后面而不是大小那一栏。
@@ -9978,7 +10286,7 @@ function getFileIcon(name: string) {
 .row-dir-count {
   margin-left: 6px;
   padding: 0 6px;
-  font-size: 10.5px;
+  font-size: var(--fs-caption);
   font-style: normal;
   color: var(--text-secondary);
   background: var(--bg-inset);
@@ -9986,21 +10294,21 @@ function getFileIcon(name: string) {
   border-radius: var(--radius-pill);
   white-space: nowrap;
 }
-.row-fsize { color: var(--text-secondary); font-size: 11px; }
+.row-fsize { color: var(--text-secondary); font-size: var(--fs-caption); }
 .row-remove-btn {
   background: none;
   border: 0;
   color: var(--text-tertiary);
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--fs-subtitle);
   padding: 0 2px;
 }
 .row-remove-btn:hover { color: var(--danger-text); }
 .tray-action-bottom { margin-top: 12px; }
 .execute-send-btn { width: 100%; height: 42px; justify-content: center; }
 
-/* 7. 双栏穿梭 */
-.view-shuttle { display: grid; grid-template-columns: 1fr 132px 1fr; gap: 16px; height: 100%; }
+/* 7. 双栏穿梭（收窄中间列 + 合并单行路径栏，把空间还给文件名） */
+.view-shuttle { display: grid; grid-template-columns: minmax(0, 1fr) 88px minmax(0, 1fr); gap: 12px; height: 100%; }
 .shuttle-side-pane {
   background: var(--bg-card);
   border: 1px solid var(--border-subtle);
@@ -10008,18 +10316,25 @@ function getFileIcon(name: string) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-width: 0;
 }
 .shuttle-pane-header {
-  padding: 10px 14px;
-  background: var(--bg-card-hover);
+  padding: 10px 12px;
+  background: var(--bg-card);
   border-bottom: 1px solid var(--border-subtle);
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 8px;
 }
+.pane-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
 .pane-name {
-  font-size: 12px;
+  font-size: var(--fs-body);
   font-weight: 700;
   display: flex;
   align-items: center;
@@ -10028,92 +10343,98 @@ function getFileIcon(name: string) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
-/* 设备名/卷标：必须是**独立的元素**，不能是 .pane-name 的裸文本。
- *
- * `text-overflow: ellipsis` 只作用于元素自己的 inline 内容。父元素一旦是
- * flex 容器，裸文本会被拆成匿名 flex item —— 父元素上的 ellipsis 完全失效，
- * 而匿名 flex item 的 `min-width: auto` 又禁止它收缩，于是长设备名把后面的
- * 角标挤出容器、再被 .pane-name 的 `overflow: hidden` 裁掉。
- *
- * 四象限实测（规则从本文件原样抽取，容器右边界 x=310，看 .pane-count 右缘）：
- *   A 改动前：裸文本、count 无 flex          → 438，角标不可见
- *   B 只给 .pane-count 加 flex:0 0 auto      → 438，**仍然不可见**
- *   C 只把文本包进 span、count 仍无 flex     → 271，角标可见
- *   D 两者都做（= 现在这份）                 → 271，角标可见
- * B 与 A 完全一致这一点很关键：真正起作用的只有「包一层元素」，
- * flex 属性单独加是**无效**的。所以下面 `.pane-count` 的 flex:0 0 auto
- * 不能被当成本缺陷的修复依据，它只是防将来再加一个可伸缩兄弟节点时的
- * 纵深防御 —— 今天它对结果没有任何影响。
- *
- * `min-width: 0` 不能省：省略号的前提是元素肯收缩，而 flex 子项默认
- * `min-width: auto`（= 内容宽度）会拒绝收缩。 */
 .pane-name-text {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.pane-name > i { flex: 0 0 auto; }
+.pane-name > i { flex: 0 0 auto; color: var(--accent-text); }
 .pane-count {
-  font-size: 10px;
+  font-size: var(--fs-caption);
+  font-variant-numeric: tabular-nums;
   background: var(--bg-active);
   color: var(--accent-on-soft);
-  padding: 1px 6px;
+  padding: 1px 7px;
   border-radius: var(--radius-pill);
   font-weight: 700;
-  /* 纵深防御，不是上面那个缺陷的修复手段（四象限 B 已证明它单独无效） */
   flex: 0 0 auto;
 }
 .pane-refresh-btn {
+  width: 26px;
+  height: 26px;
   background: none;
   border: 0;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   cursor: pointer;
-  font-size: 14px;
-  padding: 3px;
+  font-size: var(--fs-subtitle);
   border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
   flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
 }
-.pane-refresh-btn:hover { color: var(--accent-text); background: var(--bg-hover-soft); }
+.pane-refresh-btn:hover:not(:disabled) { color: var(--accent-text); background: var(--bg-hover-soft); }
+.pane-refresh-btn:disabled { opacity: 0.5; cursor: default; }
 
-/* ===== 对端目录面包屑 (子文件夹导航) ===== */
+/* 合并后的单行路径栏：卷下拉 + 可滚面包屑 + 复制 */
+.pane-address-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--bg-row-soft);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--fs-label);
+  color: var(--text-secondary);
+  min-width: 0;
+}
 .pane-breadcrumb {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 5px 10px;
-  background: var(--bg-card);
-  border-bottom: 1px solid var(--border-subtle);
-  font-size: 11px;
+  font-size: var(--fs-caption);
   overflow-x: auto;
   scrollbar-width: none;
 }
 .pane-breadcrumb::-webkit-scrollbar { display: none; }
-.crumb-up,
+.crumb-copy-btn {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.crumb-copy-btn:hover { background: var(--bg-hover-soft); color: var(--text-primary); }
 .crumb-item {
   background: none;
   border: 0;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   padding: 2px 6px;
   border-radius: var(--radius-sm);
   white-space: nowrap;
   font-family: inherit;
 }
-.crumb-up { color: var(--text-tertiary); flex-shrink: 0; }
-.crumb-up:hover:not(:disabled),
 .crumb-item:hover { color: var(--accent-text); background: var(--bg-hover-soft); }
-.crumb-up:disabled { opacity: 0.5; cursor: default; }
-.crumb-item.is-current { color: var(--text-primary); font-weight: 700; cursor: default; }
-.crumb-sep { color: var(--text-tertiary); font-size: 9px; flex-shrink: 0; }
+.crumb-item.is-current { color: var(--text-primary); font-weight: 600; cursor: default; }
+.crumb-sep { color: var(--text-tertiary); font-size: var(--fs-caption); flex-shrink: 0; }
 .pane-truncated-hint {
   display: flex;
   align-items: center;
   gap: 5px;
   padding: 5px 12px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: var(--warn-on-soft);
   background: var(--warn-soft);
   border-bottom: 1px solid var(--border-subtle);
@@ -10163,7 +10484,7 @@ function getFileIcon(name: string) {
   align-items: center;
   padding: 7px 10px;
   border-radius: var(--radius-md);
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   cursor: pointer;
   transition: background 0.15s;
 }
@@ -10210,10 +10531,10 @@ function getFileIcon(name: string) {
   border-radius: var(--radius-sm);
   display: grid;
   place-items: center;
-  font-size: 10px;
+  font-size: var(--fs-caption);
   color: var(--accent-text);
 }
-.file-glyph { font-size: 16px; color: var(--text-secondary); }
+.file-glyph { font-size: var(--fs-title); color: var(--text-secondary); }
 .file-glyph.dir { color: var(--warn-text); }
 .file-glyph.pdf { color: var(--danger-text); }
 .file-glyph.word { color: var(--info-text); }
@@ -10227,8 +10548,8 @@ function getFileIcon(name: string) {
   white-space: nowrap;
   color: var(--text-primary);
 }
-.file-size-col { color: var(--text-secondary); font-size: 11px; margin-right: 6px; white-space: nowrap; }
-.shuttle-empty-tip { padding: 30px 16px; text-align: center; color: var(--text-tertiary); font-size: 12px; line-height: 1.6; }
+.file-size-col { color: var(--text-secondary); font-size: var(--fs-caption); margin-right: 6px; white-space: nowrap; }
+.shuttle-empty-tip { padding: 30px 16px; text-align: center; color: var(--text-tertiary); font-size: var(--fs-label); line-height: 1.6; }
 .shuttle-busy-hint {
   display: flex;
   align-items: center;
@@ -10236,7 +10557,7 @@ function getFileIcon(name: string) {
   gap: 6px;
   padding: 12px;
   margin: 6px;
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   color: var(--text-secondary);
   background: var(--accent-soft);
   border-radius: var(--radius-md);
@@ -10251,7 +10572,7 @@ function getFileIcon(name: string) {
   margin: 0;
   max-width: 15ch;
   text-align: center;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   line-height: 1.45;
   color: var(--text-tertiary);
 }
@@ -10263,7 +10584,7 @@ function getFileIcon(name: string) {
   width: 100%;
   height: 52px;
   border-radius: var(--radius-md);
-  font-size: 12px;
+  font-size: var(--fs-label);
   font-weight: 700;
   display: flex;
   flex-direction: column;
@@ -10301,29 +10622,102 @@ function getFileIcon(name: string) {
 }
 .shuttle-op-button:not(:disabled):hover { filter: brightness(1.08); }
 
-/* 8. 记录 / 设置面板 */
+/* 8. 记录 / 设置面板（M3 分组卡片 + 最佳可读宽度 + Filter Chips + M3 Switch） */
+.readable-container {
+  max-width: 860px;
+  margin: 0 auto;
+}
+.settings-container {
+  max-width: 760px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-bottom: 24px;
+}
+.settings-page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 2px 4px;
+}
+.settings-anchor-chips,
+.filter-chips-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.filter-chips-row {
+  margin-top: 10px;
+}
+.m3-filter-chip {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-row-soft);
+  color: var(--text-secondary);
+  font-size: var(--fs-label);
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.m3-filter-chip:hover {
+  background: var(--bg-hover-soft);
+  color: var(--text-primary);
+}
+.m3-filter-chip.active {
+  background: var(--accent-soft);
+  color: var(--accent-on-soft);
+  border-color: var(--accent-border);
+}
+.diag-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.diag-section-head .diag-section-toggle {
+  width: auto;
+  flex: 1;
+}
+
 .fluent-card-panel {
   background: var(--bg-card);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
-  padding: 22px 24px;
+  padding: 20px 24px;
 }
-.panel-header-row { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px; }
-/* 选择器跟着标签走：h3→h2 之后这里若还写 h3，整条规则静默失效，
- * 16px 会退回浏览器默认的 1.5em，字会突然变大。 */
-.header-titles h2 { font-size: 16px; font-weight: 700; color: var(--text-primary); margin-bottom: 4px; }
-.header-titles p { font-size: 12px; color: var(--text-secondary); }
+.settings-group-card {
+  padding: 16px 24px 8px;
+}
+.settings-group-card .setting-item-block:last-of-type {
+  border-bottom-color: transparent;
+}
+.panel-header-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 4px; }
+.header-titles h2 { font-size: var(--fs-title); font-weight: 700; color: var(--text-primary); margin-bottom: 0; }
+.header-titles p { font-size: var(--fs-label); color: var(--text-secondary); }
 .btn-clear-history {
   background: none;
   border: 0;
   color: var(--text-tertiary);
   cursor: pointer;
-  font-size: 12px;
-  display: flex;
+  font-size: var(--fs-label);
+  display: inline-flex;
   align-items: center;
   gap: 4px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
 }
-.btn-clear-history:hover { color: var(--danger-text); }
+.btn-clear-history:hover { color: var(--danger-text); background: var(--bg-hover-soft); }
 
 /* 记录范围切换：两个互斥选项，做成紧凑的分段控件。
  * 用边框而不是背景色块区分，避免在深色主题里显得比内容还重。 */
@@ -10339,7 +10733,7 @@ function getFileIcon(name: string) {
   border: 0;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--fs-label);
   padding: 3px 10px;
 }
 .history-scope-btn + .history-scope-btn { border-left: 1px solid var(--border-subtle); }
@@ -10355,22 +10749,22 @@ function getFileIcon(name: string) {
   background: var(--bg-row-soft);
   border-radius: var(--radius-md);
 }
-.direction-badge { width: 34px; height: 34px; border-radius: var(--radius-md); display: grid; place-items: center; font-size: 16px; }
+.direction-badge { width: 34px; height: 34px; border-radius: var(--radius-md); display: grid; place-items: center; font-size: var(--fs-title); }
 .direction-badge.recv { background: var(--accent-soft); color: var(--accent-on-soft); }
 .direction-badge.send { background: var(--info-soft); color: var(--info-on-soft); }
 .log-body-info { flex: 1; min-width: 0; }
 .entry-title {
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 600;
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.entry-sub { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+.entry-sub { font-size: var(--fs-caption); color: var(--text-secondary); margin-top: 2px; }
 .entry-meta-col { text-align: right; flex-shrink: 0; }
-.entry-size-text { font-size: 11.5px; color: var(--text-secondary); display: block; }
-.entry-status-badge { font-size: 10.5px; color: var(--accent-text); font-weight: 600; }
+.entry-size-text { font-size: var(--fs-label); color: var(--text-secondary); display: block; }
+.entry-status-badge { font-size: var(--fs-caption); color: var(--accent-text); font-weight: 600; }
 .entry-status-badge.failed { color: var(--danger-text); }
 /* 「传输中」：带转圈图标，和"已完成"必须一眼分得开 */
 .entry-status-badge.running {
@@ -10387,11 +10781,11 @@ function getFileIcon(name: string) {
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: var(--fs-body);
 }
-.empty-log-box i { font-size: 32px; }
+.empty-log-box i { font-size: var(--fs-display); }
 /* 空态的第二行：只解释"为什么是空的/还能去哪看"，比主文案更弱 */
-.empty-log-hint { font-size: 11.5px; color: var(--text-tertiary); }
+.empty-log-hint { font-size: var(--fs-label); color: var(--text-tertiary); }
 
 /* ---- 最近诊断（默认折叠的次级小节）----
  *
@@ -10412,7 +10806,7 @@ function getFileIcon(name: string) {
   border: 0;
   padding: 2px 0;
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   color: var(--text-secondary);
   cursor: pointer;
   text-align: left;
@@ -10436,7 +10830,7 @@ function getFileIcon(name: string) {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   color: var(--text-primary);
   min-width: 0;
 }
@@ -10461,14 +10855,14 @@ function getFileIcon(name: string) {
   margin-top: 5px;
   padding-left: 9px;
   border-left: 2px solid var(--accent-border);
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 1.55;
   color: var(--text-secondary);
 }
 .diag-error {
   margin-top: 4px;
   padding-left: 9px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 1.5;
   color: var(--danger-text);
 }
@@ -10477,7 +10871,7 @@ function getFileIcon(name: string) {
   flex-wrap: wrap;
   gap: 4px 10px;
   margin-top: 6px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
 }
@@ -10491,16 +10885,16 @@ function getFileIcon(name: string) {
   border-bottom: 1px solid var(--border-subtle);
 }
 .setting-desc-text { min-width: 0; flex: 1; }
-.setting-desc-text strong { display: block; font-size: 13px; font-weight: 650; color: var(--text-primary); }
+.setting-desc-text strong { display: block; font-size: var(--fs-body); font-weight: 650; color: var(--text-primary); }
 .setting-desc-text span {
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--text-secondary);
   margin-top: 3px;
   display: block;
   max-width: 56ch;
   line-height: 1.45;
 }
-.path-mono { color: var(--accent-text) !important; font-size: 11.5px !important; word-break: break-all; }
+.path-mono { color: var(--accent-text) !important; font-size: var(--fs-label) !important; word-break: break-all; }
 .setting-action-group {
   display: flex;
   gap: 8px;
@@ -10524,13 +10918,13 @@ function getFileIcon(name: string) {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: var(--accent-text);
   white-space: nowrap;
 }
 .channel-badge {
   display: inline-block !important;
-  font-size: 11px !important;
+  font-size: var(--fs-caption) !important;
   padding: 1px 6px;
   border-radius: var(--radius-sm);
   margin-left: 6px;
@@ -10546,7 +10940,7 @@ function getFileIcon(name: string) {
   color: var(--warn-on-soft) !important;
 }
 .setting-sub-hint {
-  font-size: 11.5px !important;
+  font-size: var(--fs-label) !important;
   color: var(--text-tertiary) !important;
   margin-top: 3px;
   display: block;
@@ -10581,7 +10975,7 @@ function getFileIcon(name: string) {
   padding-top: 10px;
   margin-top: 0;
 }
-.panel-section-divider h3 { font-size: 13px; font-weight: 700; color: var(--text-secondary); margin: 0; }
+.panel-section-divider h3 { font-size: var(--fs-body); font-weight: 700; color: var(--text-secondary); margin: 0; }
 /* 视觉隐藏但保留在无障碍树里的视图页标题。
  *
  * 发送 / 穿梭这两个视图没有可见页标题（页签名已经在页签上写着，
@@ -10603,32 +10997,39 @@ function getFileIcon(name: string) {
   border: 0;
 }
 
-.fluent-switch { position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0; }
+.fluent-switch { position: relative; display: inline-block; width: 46px; height: 26px; flex-shrink: 0; }
 .fluent-switch input { opacity: 0; width: 0; height: 0; }
 .fluent-slider {
   position: absolute;
   cursor: pointer;
   inset: 0;
   background: var(--switch-off);
+  border: 1.5px solid var(--switch-knob-ring);
   border-radius: var(--radius-pill);
-  transition: 0.2s;
+  transition: background 0.2s, border-color 0.2s;
 }
 .fluent-slider:before {
   position: absolute;
   content: "";
-  height: 18px;
-  width: 18px;
-  left: 3px;
-  bottom: 3px;
+  height: 16px;
+  width: 16px;
+  left: 4px;
+  top: 50%;
+  transform: translateY(-50%);
   background: var(--switch-knob);
-  /* 浅色主题下关闭态轨道是浅灰, 白滑块必须靠描边才界定得清楚。
-     深色主题该值是全透明, 视觉零变化。 */
-  box-shadow: 0 0 0 1px var(--switch-knob-ring);
   border-radius: 50%;
-  transition: 0.2s;
+  transition: transform 0.2s cubic-bezier(0.2, 0, 0, 1), width 0.18s, height 0.18s, background 0.2s;
 }
-input:checked + .fluent-slider { background: var(--accent); }
-input:checked + .fluent-slider:before { transform: translateX(20px); }
+input:checked + .fluent-slider {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+input:checked + .fluent-slider:before {
+  width: 18px;
+  height: 18px;
+  background: var(--switch-knob-on);
+  transform: translate(19px, -50%);
+}
 
 .trust-table-wrap {
   margin-top: 10px;
@@ -10641,7 +11042,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   align-items: center;
   gap: 8px;
   color: var(--text-tertiary);
-  font-size: 12px;
+  font-size: var(--fs-label);
   padding: 12px;
   background: var(--bg-row-soft);
   border-radius: var(--radius-md);
@@ -10657,8 +11058,8 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   border-radius: var(--radius-md);
 }
 .trust-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.trust-meta .dev-name { font-size: 13px; color: var(--text-primary); }
-.trust-meta .dev-ip { font-size: 11px; color: var(--text-tertiary); word-break: break-all; }
+.trust-meta .dev-name { font-size: var(--fs-body); color: var(--text-primary); }
+.trust-meta .dev-ip { font-size: var(--fs-caption); color: var(--text-tertiary); word-break: break-all; }
 .font-mono { font-family: var(--font-mono); }
 .btn-unblock {
   background: transparent;
@@ -10666,7 +11067,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   color: var(--text-secondary);
   padding: 4px 10px;
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  font-size: var(--fs-label);
   cursor: pointer;
   flex-shrink: 0;
   transition: color 0.15s, border-color 0.15s;
@@ -10731,7 +11132,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   margin-top: 18px;
   padding-top: 14px;
   border-top: 1px solid var(--border-subtle);
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: var(--text-tertiary);
   display: flex;
   align-items: center;
@@ -10751,7 +11152,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   gap: 6px;
 }
 .desktop-speed-dock.failed .speed-bandwidth-rate { color: var(--danger-text); }
-.speed-dock-meta { display: flex; justify-content: space-between; font-size: 12px; gap: 16px; }
+.speed-dock-meta { display: flex; justify-content: space-between; font-size: var(--fs-label); gap: 16px; }
 .speed-file-title {
   border: none;
   background: transparent;
@@ -10774,7 +11175,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
 .speed-bandwidth-rate {
   color: var(--accent-text);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 700;
   flex-shrink: 0;
 }
@@ -10790,7 +11191,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   border: 1px solid var(--danger-border);
   border-radius: var(--radius-sm);
   padding: 1px 8px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   cursor: pointer;
   line-height: 18px;
   transition: all 0.15s ease;
@@ -10850,13 +11251,13 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   padding: 22px;
 }
 .modal-dialog-titlebar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
-.modal-dialog-titlebar h3 { font-size: 16px; font-weight: 700; color: var(--text-primary); }
+.modal-dialog-titlebar h3 { font-size: var(--fs-title); font-weight: 700; color: var(--text-primary); }
 .modal-close-icon {
   background: none;
   border: 0;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 18px;
+  font-size: var(--fs-headline);
   /* 注意：不要给它设 `background` 或 `border` 的可见值 ——
    * 弹窗打开时焦点会落在它身上（`v-modal-focus` 把焦点交给标题栏第一个
    * 可聚焦元素），此时浏览器画的是**默认方框焦点环**，在圆角弹窗里
@@ -10878,7 +11279,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   gap: 8px;
   margin: 0 0 12px;
   padding: 9px 11px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 1.6;
   color: var(--text-secondary);
   background: var(--bg-hover-soft);
@@ -10887,7 +11288,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
 .pair-flow-hint i {
   flex: 0 0 auto;
   margin-top: 1px;
-  font-size: 13px;
+  font-size: var(--fs-body);
   color: var(--text-tertiary);
 }
 .pair-mode-selector {
@@ -10905,7 +11306,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   background: none;
   border: 0;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--fs-label);
   font-weight: 600;
   cursor: pointer;
   display: flex;
@@ -10916,7 +11317,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
 }
 .pair-mode-selector button.active { background: var(--bg-card); color: var(--text-primary); box-shadow: var(--shadow-card); }
 
-.pair-guide-hint { font-size: 12px; color: var(--text-secondary); margin-bottom: 12px; line-height: 1.5; }
+.pair-guide-hint { font-size: var(--fs-label); color: var(--text-secondary); margin-bottom: 12px; line-height: 1.5; }
 
 .pin-input-container { margin-bottom: 14px; }
 .code-pin-input {
@@ -10926,7 +11327,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   border: 1.5px solid var(--border-subtle);
   border-radius: var(--radius-md);
   color: var(--accent-text);
-  font-size: 26px;
+  font-size: var(--fs-display);
   font-weight: 800;
   letter-spacing: 0.15em;
   text-align: center;
@@ -10937,14 +11338,14 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
 }
 .code-pin-input:focus { border-color: var(--accent); outline: 0; box-shadow: 0 0 14px var(--accent-glow); }
 .code-pin-input::placeholder {
-  font-size: 14px;
+  font-size: var(--fs-subtitle);
   font-weight: normal;
   letter-spacing: normal;
   color: var(--text-tertiary);
 }
 
 .form-input-group { margin-bottom: 14px; display: flex; flex-direction: column; gap: 5px; }
-.form-input-group label { font-size: 11.5px; color: var(--text-secondary); font-weight: 600; }
+.form-input-group label { font-size: var(--fs-label); color: var(--text-secondary); font-weight: 600; }
 .standard-text-input {
   height: 38px;
   background: var(--bg-inset);
@@ -10952,7 +11353,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   border-radius: var(--radius-md);
   color: var(--text-primary);
   padding: 0 12px;
-  font-size: 13px;
+  font-size: var(--fs-body);
   width: 100%;
   box-sizing: border-box;
   user-select: text;
@@ -10973,15 +11374,15 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   display: flex;
   align-items: center;
   gap: 5px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   line-height: 1.45;
   color: var(--danger-text);
 }
-.field-hint > i { flex: 0 0 auto; font-size: 13px; }
+.field-hint > i { flex: 0 0 auto; font-size: var(--fs-body); }
 .standard-text-input::placeholder { color: var(--text-tertiary); }
 
 .error-notice-card {
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   color: var(--danger-on-soft);
   background: var(--danger-soft);
   border-radius: var(--radius-md);
@@ -11001,7 +11402,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   background: none;
   border: 0;
   color: var(--accent-text);
-  font-size: 11px;
+  font-size: var(--fs-caption);
   cursor: pointer;
   padding: 0;
   text-decoration: underline;
@@ -11016,7 +11417,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   border-radius: var(--radius-md);
   color: var(--text-primary);
   padding: 0 32px 0 12px;
-  font-size: 13px;
+  font-size: var(--fs-body);
   appearance: none;
   cursor: pointer;
   box-sizing: border-box;
@@ -11030,7 +11431,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   transform: translateY(-50%);
   color: var(--text-tertiary);
   pointer-events: none;
-  font-size: 12px;
+  font-size: var(--fs-label);
 }
 
 .auto-ip-box { position: relative; display: flex; align-items: center; }
@@ -11040,7 +11441,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   right: 8px;
   background: var(--accent-soft);
   color: var(--accent-on-soft);
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-weight: 600;
   padding: 3px 8px;
   border-radius: var(--radius-sm);
@@ -11064,11 +11465,11 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   color: var(--accent-on-soft);
   display: grid;
   place-items: center;
-  font-size: 32px;
+  font-size: var(--fs-display);
   margin-bottom: 12px;
   box-shadow: 0 0 24px var(--accent-glow);
 }
-.success-headline { font-size: 18px; font-weight: 750; color: var(--text-primary); margin-bottom: 12px; }
+.success-headline { font-size: var(--fs-headline); font-weight: 750; color: var(--text-primary); margin-bottom: 12px; }
 .success-device-card {
   width: 100%;
   background: var(--bg-inset);
@@ -11082,8 +11483,8 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   box-sizing: border-box;
   margin-bottom: 6px;
 }
-.success-card-row { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; gap: 12px; }
-.success-card-row .label { color: var(--text-tertiary); font-size: 12px; }
+.success-card-row { display: flex; justify-content: space-between; align-items: center; font-size: var(--fs-body); gap: 12px; }
+.success-card-row .label { color: var(--text-tertiary); font-size: var(--fs-label); }
 .success-card-row .value { color: var(--text-primary); font-weight: 600; }
 .success-card-row .truncate {
   max-width: 220px;
@@ -11095,7 +11496,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
 .status-tag-trusted {
   background: var(--accent-soft);
   color: var(--accent-on-soft);
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-weight: 650;
   padding: 2px 8px;
   border-radius: var(--radius-sm);
@@ -11112,9 +11513,9 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   padding: 16px;
   text-align: center;
 }
-.box-tiny-label { font-size: 11px; color: var(--text-tertiary); }
+.box-tiny-label { font-size: var(--fs-caption); color: var(--text-tertiary); }
 .box-giant-pin {
-  font-size: 34px;
+  font-size: var(--fs-display);
   font-weight: 850;
   color: var(--accent-text);
   letter-spacing: 0.22em;
@@ -11130,7 +11531,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   color: var(--text-secondary);
   border-radius: var(--radius-md);
   padding: 4px 10px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -11148,7 +11549,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   align-items: center;
 }
 .pin-countdown-text {
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: var(--text-tertiary);
   display: inline-flex;
   align-items: center;
@@ -11177,8 +11578,8 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   flex-direction: column;
   gap: 10px;
 }
-.approval-row { display: flex; justify-content: space-between; align-items: center; font-size: 13px; gap: 12px; }
-.approval-row .label { color: var(--text-tertiary); font-size: 12px; flex-shrink: 0; }
+.approval-row { display: flex; justify-content: space-between; align-items: center; font-size: var(--fs-body); gap: 12px; }
+.approval-row .label { color: var(--text-tertiary); font-size: var(--fs-label); flex-shrink: 0; }
 .approval-row .value { color: var(--text-primary); }
 .approval-actions { display: flex; gap: 10px; justify-content: flex-end; }
 .btn-approval-allow {
@@ -11187,7 +11588,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   border: 0;
   padding: 8px 16px;
   border-radius: var(--radius-md);
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 600;
   cursor: pointer;
   display: inline-flex;
@@ -11202,7 +11603,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   border: 1px solid var(--border-subtle);
   padding: 8px 16px;
   border-radius: var(--radius-md);
-  font-size: 13px;
+  font-size: var(--fs-body);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -11216,7 +11617,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   border: 1px solid var(--danger-border);
   padding: 8px 16px;
   border-radius: var(--radius-md);
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 600;
   cursor: pointer;
   display: inline-flex;
@@ -11235,18 +11636,18 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   background: var(--danger-soft);
   border-bottom: 1px solid var(--danger-border);
   color: var(--danger-on-soft);
-  font-size: 12.5px;
+  font-size: var(--fs-body);
 }
-.engine-error-banner > i { font-size: 18px; flex-shrink: 0; }
+.engine-error-banner > i { font-size: var(--fs-headline); flex-shrink: 0; }
 .engine-error-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.engine-error-text strong { font-size: 12.5px; }
+.engine-error-text strong { font-size: var(--fs-body); }
 .engine-error-text span { color: var(--text-secondary); line-height: 1.45; }
 .banner-close {
   background: none;
   border: 0;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--fs-subtitle);
   padding: 4px;
   border-radius: var(--radius-sm);
   flex-shrink: 0;
@@ -11259,18 +11660,18 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
 .approval-dialog { max-width: 460px; }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* 11. 全局提示 */
+/* 11. 全局提示（M3 Snackbar：进度条可见时自动避让） */
 .fluent-toast {
   position: fixed;
   bottom: 24px;
   left: 50%;
   transform: translateX(-50%);
   background: var(--bg-elevated);
-  border: 1px solid var(--accent);
+  border: 1px solid var(--accent-border);
   color: var(--text-primary);
   padding: 10px 18px;
-  border-radius: var(--radius-md);
-  font-size: 13px;
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-body);
   font-weight: 600;
   display: flex;
   align-items: center;
@@ -11278,10 +11679,12 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   box-shadow: var(--shadow-toast);
   z-index: var(--z-toast);
   max-width: 80vw;
+  transition: bottom 0.2s ease;
 }
+.fluent-toast.above-dock { bottom: 68px; }
 .fluent-toast.error { border-color: var(--danger); }
 .fluent-toast.error i { color: var(--danger-text); }
-.fluent-toast i { color: var(--accent-text); font-size: 16px; }
+.fluent-toast i { color: var(--accent-text); font-size: var(--fs-title); }
 .toast-fade-enter-active, .toast-fade-leave-active { transition: opacity 0.2s, transform 0.2s; }
 .toast-fade-enter-from, .toast-fade-leave-to { opacity: 0; transform: translate(-50%, 10px); }
 
@@ -11297,7 +11700,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   align-items: center;
   gap: 4px;
   padding: 1px 7px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-weight: 500;
   color: var(--accent-text);
   background: var(--bg-hover-soft);
@@ -11318,7 +11721,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   align-items: center;
   gap: 5px;
   padding: 4px 10px;
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   font-weight: 500;
   color: var(--text-primary);
   background: var(--bg-hover-soft);
@@ -11352,7 +11755,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   margin: 0;
 }
 .paths-dialog-sub {
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--text-secondary);
 }
 .paths-dialog-toolbar {
@@ -11377,7 +11780,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   border: none;
   outline: none;
   color: var(--text-primary);
-  font-size: 12.5px;
+  font-size: var(--fs-body);
 }
 .btn-clear-search {
   background: none;
@@ -11385,14 +11788,14 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   color: var(--text-secondary);
   cursor: pointer;
   padding: 0;
-  font-size: 14px;
+  font-size: var(--fs-subtitle);
 }
 .btn-clear-search:hover { color: var(--text-primary); }
 .copy-all-btn {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   white-space: nowrap;
 }
 .paths-list-container {
@@ -11414,10 +11817,10 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   justify-content: center;
   padding: 36px 0;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--fs-body);
   gap: 8px;
 }
-.empty-paths-box i { font-size: 28px; }
+.empty-paths-box i { font-size: var(--fs-display); }
 .path-item-row {
   display: flex;
   align-items: center;
@@ -11433,7 +11836,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
 }
 .path-item-icon {
   color: var(--accent);
-  font-size: 18px;
+  font-size: var(--fs-headline);
   flex-shrink: 0;
 }
 .path-item-content {
@@ -11444,7 +11847,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   gap: 2px;
 }
 .path-item-basename {
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   font-weight: 600;
   color: var(--text-primary);
   overflow: hidden;
@@ -11452,7 +11855,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   white-space: nowrap;
 }
 .path-item-fullpath {
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: var(--text-secondary);
   font-family: monospace;
   overflow: hidden;
@@ -11471,7 +11874,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   align-items: center;
   gap: 4px;
   padding: 4px 8px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-weight: 500;
   color: var(--text-primary);
   background: var(--bg-hover-soft);
@@ -11492,7 +11895,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   gap: 12px;
 }
 .paths-footer-hint {
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--text-secondary);
 }
 
@@ -11515,7 +11918,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   margin: 0;
 }
 .active-dialog-sub {
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--text-secondary);
 }
 .active-transfers-list-container {
@@ -11534,10 +11937,10 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   justify-content: center;
   padding: 40px 0;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--fs-body);
   gap: 8px;
 }
-.empty-active-box i { font-size: 32px; color: var(--accent); }
+.empty-active-box i { font-size: var(--fs-display); color: var(--accent); }
 .active-transfer-card {
   padding: 12px;
   border-radius: var(--radius-md);
@@ -11560,13 +11963,13 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   font-weight: 600;
 }
 .card-direction-tag.send { color: var(--info-text); }
 .card-direction-tag.recv { color: var(--success-text); }
 .card-speed-badge {
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   font-weight: 600;
   color: var(--accent-text);
   background: var(--bg-hover-soft);
@@ -11579,10 +11982,10 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   align-items: center;
   gap: 6px;
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 500;
 }
-.card-file-row i { font-size: 16px; color: var(--text-secondary); flex-shrink: 0; }
+.card-file-row i { font-size: var(--fs-title); color: var(--text-secondary); flex-shrink: 0; }
 .card-filename {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -11612,7 +12015,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   justify-content: space-between;
 }
 .card-bytes-text {
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }
@@ -11621,7 +12024,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   align-items: center;
   gap: 3px;
   padding: 3px 8px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-weight: 500;
   color: var(--danger-on-soft);
   background: var(--danger-soft);
@@ -11635,7 +12038,7 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   color: var(--text-on-solid);
 }
 .card-settled-text {
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   font-weight: 600;
 }
 .card-settled-text.ok { color: var(--success-text); }
@@ -11658,11 +12061,11 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   grid-template-columns: 14px 1fr auto;
   align-items: center;
   gap: 6px;
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   color: var(--text-secondary);
   min-width: 0;
 }
-.card-file-check i { font-size: 12px; }
+.card-file-check i { font-size: var(--fs-label); }
 .card-file-check.done i { color: var(--success-text); }
 .card-file-check.active { color: var(--text-primary); font-weight: 600; }
 .card-file-check.active i { color: var(--accent-text); }
@@ -11673,12 +12076,12 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
   white-space: nowrap;
 }
 .card-file-check-state {
-  font-size: 10.5px;
+  font-size: var(--fs-caption);
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
 }
 .card-file-more {
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: var(--text-secondary);
   padding-left: 20px;
 }
@@ -11690,4 +12093,37 @@ input:checked + .fluent-slider:before { transform: translateX(20px); }
 }
 .footer-spacer { flex: 1; }
 .text-success { color: var(--success-text) !important; }
+.row-fsize,
+.file-size-col,
+.entry-size-text {
+  font-variant-numeric: tabular-nums;
+}
+
+/* M3 响应式窗口断点（Compact / Medium 桌面小窗适配） */
+@media (max-width: 860px) {
+  .app-container {
+    grid-template-columns: 216px 1fr;
+  }
+  .workspace-tabs-bar {
+    padding: 8px 14px;
+  }
+  .tab-page {
+    padding: 14px 16px;
+  }
+  .view-shuttle {
+    grid-template-columns: minmax(0, 1fr) 72px minmax(0, 1fr);
+    gap: 8px;
+  }
+  .drag-drop-card.is-compact {
+    flex-wrap: wrap;
+  }
+}
+@media (max-width: 740px) {
+  .current-target-pill .target-prefix {
+    display: none;
+  }
+  .segmented-tabs button {
+    padding: 0 10px;
+  }
+}
 </style>
