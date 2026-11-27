@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 跟随系统深浅色切换（DayNight），系统栏图标明暗由 MainActivity 动态同步 -->
-    <style name="Theme.Feisuo" parent="@android:style/Theme.DeviceDefault.DayNight.NoActionBar">
+    <!-- 浅色模式主题（深色模式由 res/values-night/themes.xml 自动接管） -->
+    <style name="Theme.Feisuo" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar">
         <item name="android:windowBackground">@color/feisuo_bg</item>
         <item name="android:statusBarColor">@color/feisuo_bg</item>
         <item name="android:navigationBarColor">@color/feisuo_bg</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
         <item name="android:colorAccent">@color/feisuo_accent</item>
     </style>
 </resources>

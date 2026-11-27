@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 深色模式主题（跟随系统夜间模式自动生效） -->
+    <style name="Theme.Feisuo" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/feisuo_bg</item>
+        <item name="android:statusBarColor">@color/feisuo_bg</item>
+        <item name="android:navigationBarColor">@color/feisuo_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:colorAccent">@color/feisuo_accent</item>
+    </style>
+</resources>
